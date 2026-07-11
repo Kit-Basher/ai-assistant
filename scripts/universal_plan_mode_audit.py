@@ -41,10 +41,13 @@ MIGRATED_MUTATIONS = {
     "operator.git.commit": ("operator.git.commit.v1", "git.commit"),
     "operator.git.push": ("operator.git.push.v1", "git.push"),
     "operator.service.restart": ("operator.service.restart.v1", "system.service.restart"),
+    "operator.notification.local.send": ("operator.notification.local.send.v1", "notification.local.send"),
+    "operator.notification.telegram.send": ("operator.notification.telegram.send.v1", "notification.external.send"),
+    "operator.notification.mark_read": ("operator.notification.mark_read.v1", "notification.mark_read"),
+    "operator.notification.prune": ("operator.notification.prune.v1", "notification.prune"),
 }
 
 LEGACY_VISIBLE = {
-    "communications": "not migrated in this checkpoint",
     "broader skill-pack mutation": "not migrated in this checkpoint",
 }
 

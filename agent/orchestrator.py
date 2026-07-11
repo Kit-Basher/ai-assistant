@@ -156,6 +156,10 @@ from agent.executor_registry import (
     execute_file_modify,
     execute_git_commit,
     execute_git_push,
+    execute_notification_local_send,
+    execute_notification_mark_read,
+    execute_notification_prune,
+    execute_notification_telegram_send,
     execute_service_restart,
     execute_uninstall_v1,
     execute_update_v1,
@@ -788,6 +792,50 @@ class Orchestrator:
                 rollback_available=False,
                 rollback_hint="Fixture service restart is verified by final status.",
                 capability_id="system.service.restart",
+            )
+        )
+        self._executor_registry.register(
+            ExecutorSpec(
+                executor_id="operator.notification.local.send.v1",
+                action_type="operator.notification.local.send",
+                status="enabled",
+                run=execute_notification_local_send,
+                rollback_available=True,
+                rollback_hint="Remove only the local notification fixture receipt created by this operation.",
+                capability_id="notification.local.send",
+            )
+        )
+        self._executor_registry.register(
+            ExecutorSpec(
+                executor_id="operator.notification.telegram.send.v1",
+                action_type="operator.notification.telegram.send",
+                status="enabled",
+                run=execute_notification_telegram_send,
+                rollback_available=False,
+                rollback_hint="External notification delivery is not automatically reversible.",
+                capability_id="notification.external.send",
+            )
+        )
+        self._executor_registry.register(
+            ExecutorSpec(
+                executor_id="operator.notification.mark_read.v1",
+                action_type="operator.notification.mark_read",
+                status="enabled",
+                run=execute_notification_mark_read,
+                rollback_available=False,
+                rollback_hint="Mark-read state can be advanced by marking another notification read.",
+                capability_id="notification.mark_read",
+            )
+        )
+        self._executor_registry.register(
+            ExecutorSpec(
+                executor_id="operator.notification.prune.v1",
+                action_type="operator.notification.prune",
+                status="enabled",
+                run=execute_notification_prune,
+                rollback_available=False,
+                rollback_hint="Pruned notification history is not automatically restored.",
+                capability_id="notification.prune",
             )
         )
         self._executor_registry.register(

@@ -234,13 +234,16 @@ warnings.
 
 - Universal Plan Mode enforcement covers the currently migrated set, not every
   mutating assistant action.
-- Communication and broad skill-pack mutation paths are not fully migrated.
+- Implemented notification communications are migrated; email and calendar
+  providers are not implemented and remain unsupported rather than routed
+  through generic transports. Broad skill-pack mutation paths are not fully
+  migrated.
   Unsupported destructive file, Git, and service-control variants remain
   denied or deferred until dedicated bounded executors exist.
 - Generic bypass hardening is proven for migrated package install, lifecycle
-  operations, backup, restore, support-bundle, bounded file, Git, and service
-  fixture helpers in this checkpoint; broader shell/subprocess brokers remain
-  next-phase work.
+  operations, backup, restore, support-bundle, bounded file, Git, service
+  fixture, and notification helpers in this checkpoint; broader shell/
+  subprocess brokers remain next-phase work.
 
 Recommended next checkpoint:
 

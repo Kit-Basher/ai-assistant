@@ -163,6 +163,15 @@ Mutation Migration v1 proof. It verifies bounded file create/modify/delete,
 symlink/path-traversal blocking, Git status/diff read-only behavior, Git commit
 with staged diff fingerprint, force-push denial, direct shell Git blocking,
 fixture service restart, unknown-service blocking, direct `systemctl` blocking,
+and receipt metadata.
+
+`communications_migration_smoke.py` is the focused Communications Migration v1
+proof. It verifies implemented notification communications through Universal
+Plans, fake Telegram fixture delivery, local notification records, mark-read and
+prune history mutation, direct provider-client bypass blocking, secret-content
+blocking, unsupported email/calendar providers, and the narrow active-channel
+response exception. It uses only fake providers and temporary stores and never
+sends real communications.
 and receipt metadata. It uses isolated temporary roots and does not mutate real
 repository history or primary services.
 

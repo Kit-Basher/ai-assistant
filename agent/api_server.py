@@ -29,6 +29,7 @@ import urllib.parse
 import urllib.request
 
 from agent.config import Config, default_registry_root_path, load_config, packaged_asset_root_path, runtime_instance
+from agent.capability_policy import TrustedInvocationContext
 from agent.chat_response_serializer import serialize_orchestrator_chat_response
 from agent.error_kind import classify_error_kind
 from agent.error_response_ux import (
@@ -13769,9 +13770,36 @@ class AgentRuntime:
         payload = {"message": str(outbound_message or "").strip()}
         telegram_descriptor = telegram_target.target
         local_descriptor = local_target.target
+        plan_fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "message_sha256": hashlib.sha256(payload["message"].encode("utf-8", errors="replace")).hexdigest(),
+                    "telegram_chat_id_sha256": hashlib.sha256(str(chat_id or "").encode("utf-8", errors="replace")).hexdigest(),
+                    "allow_remote": remote_allowed,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        operation_id = f"notification-{uuid.uuid4().hex[:12]}"
+        telegram_context = TrustedInvocationContext(
+            capability_id="notification.external.send",
+            executor_id="operator.notification.telegram.send.v1",
+            authorization_decision_id=f"authz-{uuid.uuid4().hex[:12]}",
+            plan_fingerprint=plan_fingerprint,
+            operation_id=operation_id,
+        ).to_dict()
+        local_context = TrustedInvocationContext(
+            capability_id="notification.local.send",
+            executor_id="operator.notification.local.send.v1",
+            authorization_decision_id=f"authz-{uuid.uuid4().hex[:12]}",
+            plan_fingerprint=plan_fingerprint,
+            operation_id=operation_id,
+        ).to_dict()
 
         if telegram_descriptor.enabled and telegram_descriptor.configured:
-            result = telegram_target.deliver(payload)
+            result = telegram_target.deliver(payload, trusted_invocation_context=telegram_context, plan_fingerprint=plan_fingerprint)
             if result.ok:
                 if isinstance(fixit_prompt_state, dict):
                     self._audit_telegram_fixit_prompt_shown(
@@ -13781,7 +13809,7 @@ class AgentRuntime:
                         step=str(fixit_prompt_state.get("step") or ""),
                     )
                 return result
-            fallback = local_target.deliver(payload)
+            fallback = local_target.deliver(payload, trusted_invocation_context=local_context, plan_fingerprint=plan_fingerprint)
             if fallback.ok:
                 return DeliveryResult(
                     ok=True,
@@ -13792,7 +13820,7 @@ class AgentRuntime:
             return result
 
         if local_descriptor.enabled and local_descriptor.configured:
-            return local_target.deliver(payload)
+            return local_target.deliver(payload, trusted_invocation_context=local_context, plan_fingerprint=plan_fingerprint)
 
         return DeliveryResult(
             ok=False,

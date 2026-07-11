@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -28,6 +29,8 @@ from .host_lifecycle import (
     HOST_LIFECYCLE_RUNNER_VERSION,
     attach_approved_hash,
 )
+from .llm.notifications import NotificationStore, sanitize_notification_text
+from .llm.notify_delivery import LocalTarget, TelegramTarget
 from .mutation_plan import (
     MUTATION_PLAN_SCHEMA_VERSION,
     build_mutation_plan,
@@ -3667,4 +3670,250 @@ def execute_service_restart(plan: dict[str, Any], action: dict[str, Any]) -> dic
         "rollback_hint": "Fixture restart has no rollback requirement.",
         "user_message": f"Restarted fixture service {service}.",
         "details": {"service_name": service, "before": before, "after": after, "command_class": "fixture_systemctl_user_restart"},
+    }
+
+
+_COMMUNICATION_SECRET_RE = re.compile(
+    r"(?i)(-----BEGIN [A-Z ]*PRIVATE KEY-----|\bsk-[A-Za-z0-9]{16,}\b|\bbearer\s+[A-Za-z0-9._\-]{8,}|\b(?:api[-_]?key|token|password|secret)\s*[=:]\s*[^\s,;]+)"
+)
+
+
+def _notification_message(action: dict[str, Any]) -> str:
+    return sanitize_notification_text(str(action.get("message") or "").strip())
+
+
+def _notification_secret_block(action: dict[str, Any]) -> dict[str, Any] | None:
+    raw = str(action.get("message") or "")
+    if _COMMUNICATION_SECRET_RE.search(raw):
+        return {
+            "ok": False,
+            "mutated": False,
+            "error_code": "communication_sensitive_content_blocked",
+            "user_message": "Communication delivery was blocked because the content looked like it contained raw secrets.",
+            "details": {"blocked_before_delivery": True},
+        }
+    return None
+
+
+def _approved_notification_fixture_path(action: dict[str, Any], key: str) -> tuple[Path | None, dict[str, Any] | None]:
+    raw = str(action.get(key) or "").strip()
+    if not raw:
+        return None, {"error_code": "notification_fixture_path_required", "user_message": "Notification migration proof requires a fixture path."}
+    path = Path(raw).expanduser().resolve(strict=False)
+    tmp = Path(tempfile.gettempdir()).resolve()
+    if path.is_symlink() or not (path == tmp or _is_under(path, tmp)):
+        return None, {"error_code": "notification_fixture_path_unapproved", "user_message": "Notification fixture paths must stay under /tmp."}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path, None
+
+
+def _notification_receipt(
+    *,
+    provider: str,
+    account_id: str,
+    audience: dict[str, Any],
+    message: str,
+    delivered_to: str,
+    provider_message_id: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "provider": provider,
+        "account_id_sha256": hashlib.sha256(str(account_id or "").encode("utf-8", errors="replace")).hexdigest(),
+        "audience": redact_executor_value(audience),
+        "content": {
+            "body_sha256": hashlib.sha256(str(message or "").encode("utf-8", errors="replace")).hexdigest(),
+            "body_length": len(str(message or "").encode("utf-8")),
+            "safe_preview": sanitize_notification_text(str(message or "")[:160]),
+        },
+        "attachment_inventory": [],
+        "delivered_to": delivered_to,
+        "provider_message_id": provider_message_id,
+    }
+
+
+def execute_notification_local_send(plan: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+    context_failure = _trusted_context_failure(plan, action, capability_id="notification.local.send", executor_id="operator.notification.local.send.v1")
+    if context_failure is not None:
+        return context_failure
+    secret_block = _notification_secret_block(action)
+    if secret_block is not None:
+        return {"executor_id": "operator.notification.local.send.v1", **secret_block}
+    message = _notification_message(action)
+    if not message:
+        return {"ok": False, "mutated": False, "executor_id": "operator.notification.local.send.v1", "error_code": "notification_message_required", "user_message": "Notification content is required."}
+    receipt_path, error = _approved_notification_fixture_path(action, "receipt_path")
+    if error is not None:
+        return {"ok": False, "mutated": False, "executor_id": "operator.notification.local.send.v1", **error}
+    assert receipt_path is not None
+    result = LocalTarget(enabled=True).deliver(
+        {"message": message},
+        trusted_invocation_context=action.get("trusted_invocation_context") if isinstance(action.get("trusted_invocation_context"), dict) else None,
+        plan_fingerprint=str(plan.get("plan_fingerprint") or ""),
+    )
+    if not result.ok:
+        return {"ok": False, "mutated": False, "executor_id": "operator.notification.local.send.v1", "error_code": result.reason, "user_message": "Local notification delivery was blocked."}
+    receipt = _notification_receipt(
+        provider="local",
+        account_id="local-notification-history",
+        audience={"destination": "local_history"},
+        message=message,
+        delivered_to=result.delivered_to,
+        provider_message_id=f"local-{uuid.uuid4().hex[:12]}",
+    )
+    receipt_path.write_text(json.dumps(receipt, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
+    return {
+        "ok": True,
+        "mutated": True,
+        "executor_id": "operator.notification.local.send.v1",
+        "resources_touched": [str(receipt_path)],
+        "rollback_available": True,
+        "rollback_hint": f"Remove local notification fixture receipt {receipt_path}.",
+        "user_message": "Created local notification record.",
+        "details": {"receipt": receipt},
+    }
+
+
+def execute_notification_telegram_send(plan: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+    context_failure = _trusted_context_failure(plan, action, capability_id="notification.external.send", executor_id="operator.notification.telegram.send.v1")
+    if context_failure is not None:
+        return context_failure
+    secret_block = _notification_secret_block(action)
+    if secret_block is not None:
+        return {"executor_id": "operator.notification.telegram.send.v1", **secret_block}
+    if not bool(action.get("fixture_transport", False)):
+        return {
+            "ok": False,
+            "mutated": False,
+            "executor_id": "operator.notification.telegram.send.v1",
+            "error_code": "external_notification_fixture_required",
+            "user_message": "External notification proof requires a fixture transport. No real message was sent.",
+        }
+    message = _notification_message(action)
+    if not message:
+        return {"ok": False, "mutated": False, "executor_id": "operator.notification.telegram.send.v1", "error_code": "notification_message_required", "user_message": "Notification content is required."}
+    chat_id = str(action.get("chat_id") or "").strip()
+    token = str(action.get("token") or "fixture-token").strip()
+    if not chat_id:
+        return {"ok": False, "mutated": False, "executor_id": "operator.notification.telegram.send.v1", "error_code": "notification_destination_required", "user_message": "A configured notification destination is required."}
+    expected_chat_hash = str(action.get("expected_chat_id_sha256") or "").strip()
+    chat_hash = hashlib.sha256(chat_id.encode("utf-8", errors="replace")).hexdigest()
+    if expected_chat_hash and expected_chat_hash != chat_hash:
+        return {"ok": False, "mutated": False, "executor_id": "operator.notification.telegram.send.v1", "error_code": "notification_destination_changed", "user_message": "The notification destination changed after preview. Ask for a fresh Plan."}
+    expected_body_hash = str(action.get("expected_body_sha256") or "").strip()
+    body_hash = hashlib.sha256(message.encode("utf-8", errors="replace")).hexdigest()
+    if expected_body_hash and expected_body_hash != body_hash:
+        return {"ok": False, "mutated": False, "executor_id": "operator.notification.telegram.send.v1", "error_code": "notification_content_changed", "user_message": "The notification content changed after preview. Ask for a fresh Plan."}
+    transport_path, error = _approved_notification_fixture_path(action, "transport_path")
+    if error is not None:
+        return {"ok": False, "mutated": False, "executor_id": "operator.notification.telegram.send.v1", **error}
+    assert transport_path is not None
+    operation_id = str((action.get("trusted_invocation_context") or {}).get("operation_id") or plan.get("plan_id") or "")
+    delivered_ids: set[str] = set()
+    if transport_path.exists():
+        for line in transport_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(row, dict) and str(row.get("operation_id") or ""):
+                delivered_ids.add(str(row.get("operation_id") or ""))
+    if operation_id and operation_id in delivered_ids:
+        return {
+            "ok": True,
+            "mutated": False,
+            "executor_id": "operator.notification.telegram.send.v1",
+            "resources_touched": [str(transport_path)],
+            "rollback_available": False,
+            "rollback_hint": "Duplicate confirmation returned the existing fixture delivery status.",
+            "user_message": "Notification delivery was already accepted for this Plan.",
+            "details": {"status": "duplicate_confirmation", "operation_id": operation_id},
+        }
+
+    def _fixture_send(_token: str, target_chat_id: str, text: str) -> None:
+        row = {
+            "operation_id": operation_id,
+            "provider": "telegram",
+            "chat_id_sha256": hashlib.sha256(target_chat_id.encode("utf-8", errors="replace")).hexdigest(),
+            "body_sha256": hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest(),
+            "body_length": len(text.encode("utf-8")),
+            "sent_at": utc_now_iso(),
+        }
+        with transport_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, sort_keys=True, ensure_ascii=True) + "\n")
+
+    result = TelegramTarget(token=token, chat_id=chat_id, send_fn=_fixture_send, enabled=True).deliver(
+        {"message": message},
+        trusted_invocation_context=action.get("trusted_invocation_context") if isinstance(action.get("trusted_invocation_context"), dict) else None,
+        plan_fingerprint=str(plan.get("plan_fingerprint") or ""),
+    )
+    if not result.ok:
+        return {"ok": False, "mutated": False, "executor_id": "operator.notification.telegram.send.v1", "error_code": result.reason, "user_message": "Telegram notification delivery was blocked."}
+    receipt = _notification_receipt(
+        provider="telegram",
+        account_id="telegram-bot-configured",
+        audience={"chat_id_sha256": chat_hash, "recipient_count": 1},
+        message=message,
+        delivered_to=result.delivered_to,
+        provider_message_id=f"fixture-telegram-{operation_id}",
+    )
+    return {
+        "ok": True,
+        "mutated": True,
+        "executor_id": "operator.notification.telegram.send.v1",
+        "resources_touched": [str(transport_path)],
+        "rollback_available": False,
+        "rollback_hint": "External notification delivery is not automatically reversible.",
+        "user_message": "Fixture Telegram notification sent.",
+        "details": {"receipt": receipt, "command_class": "fixture_telegram_send"},
+    }
+
+
+def execute_notification_mark_read(plan: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+    context_failure = _trusted_context_failure(plan, action, capability_id="notification.mark_read", executor_id="operator.notification.mark_read.v1")
+    if context_failure is not None:
+        return context_failure
+    store_path, error = _approved_notification_fixture_path(action, "store_path")
+    if error is not None:
+        return {"ok": False, "mutated": False, "executor_id": "operator.notification.mark_read.v1", **error}
+    assert store_path is not None
+    store = NotificationStore(str(store_path))
+    read_hash = str(action.get("hash") or "").strip()
+    before = store.status()
+    result = store.mark_read(read_hash)
+    if not bool(result.get("ok")):
+        return {"ok": False, "mutated": False, "executor_id": "operator.notification.mark_read.v1", "error_code": str(result.get("error") or "hash_not_found"), "user_message": "Notification mark-read target was not found."}
+    after = store.status()
+    return {
+        "ok": True,
+        "mutated": True,
+        "executor_id": "operator.notification.mark_read.v1",
+        "resources_touched": [str(store_path)],
+        "rollback_available": False,
+        "rollback_hint": "Mark-read state can be changed by marking another notification read.",
+        "user_message": "Marked notification history read.",
+        "details": {"before": before, "after": after},
+    }
+
+
+def execute_notification_prune(plan: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+    context_failure = _trusted_context_failure(plan, action, capability_id="notification.prune", executor_id="operator.notification.prune.v1")
+    if context_failure is not None:
+        return context_failure
+    store_path, error = _approved_notification_fixture_path(action, "store_path")
+    if error is not None:
+        return {"ok": False, "mutated": False, "executor_id": "operator.notification.prune.v1", **error}
+    assert store_path is not None
+    store = NotificationStore(str(store_path), max_items=max(1, int(action.get("max_items") or 1)), max_age_days=0)
+    before = store.status()
+    result = store.prune_now()
+    after = store.status()
+    return {
+        "ok": True,
+        "mutated": int(result.get("removed_total") or 0) > 0,
+        "executor_id": "operator.notification.prune.v1",
+        "resources_touched": [str(store_path)],
+        "rollback_available": False,
+        "rollback_hint": "Pruned notification history is not automatically restored.",
+        "user_message": "Pruned notification history.",
+        "details": {"before": before, "after": after, "result": result},
     }

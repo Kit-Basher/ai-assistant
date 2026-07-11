@@ -25,9 +25,11 @@ Migrated in this checkpoint:
 - `system.service.restart` through `operator.service.restart.v1` for approved
   fixture services
 
-Legacy/unmigrated mutation areas remain audit-visible: communications and
-broader skill-pack mutation paths. Unsupported destructive file, Git, and
-service variants remain denied or deferred rather than silently allowed.
+Implemented notification communications now use Universal Plan metadata.
+Email/calendar providers are unsupported in this checkpoint. The remaining
+legacy/unmigrated mutation area remains broader skill-pack mutation paths.
+Unsupported destructive file, Git, service, and provider variants remain
+denied or deferred rather than silently allowed.
 
 ## Mutation Plan Schema
 

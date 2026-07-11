@@ -37,10 +37,13 @@ MIGRATED_EXECUTORS = {
     "operator.git.commit": "git.commit",
     "operator.git.push": "git.push",
     "operator.service.restart": "system.service.restart",
+    "operator.notification.local.send": "notification.local.send",
+    "operator.notification.telegram.send": "notification.external.send",
+    "operator.notification.mark_read": "notification.mark_read",
+    "operator.notification.prune": "notification.prune",
 }
 
 LEGACY_UNMIGRATED = {
-    "communications.*": "external communication mutation adapters are not enabled as core capabilities",
     "skill_pack.*": "broader skill-pack mutation paths remain future migration work",
 }
 
@@ -89,6 +92,10 @@ def run() -> list[Check]:
         "git.commit",
         "git.push",
         "system.service.restart",
+        "notification.local.send",
+        "notification.external.send",
+        "notification.mark_read",
+        "notification.prune",
     ):
         definition = registry.get(cap_id)
         if definition is None:

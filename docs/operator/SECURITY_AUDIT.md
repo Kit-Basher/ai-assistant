@@ -103,10 +103,12 @@ fresh Debian VM install proof passes.
 ## Non-Blocking Gaps To Track
 
 - Broader managed-action journal rollout is intentionally paused.
-- Universal capability migration is intentionally incomplete. Communications
-  and broader skill-pack mutation paths remain legacy/unmigrated audit
-  findings. Unsupported destructive file, Git, and service-control variants
-  remain denied or deferred unless a bounded policy already controls them.
+- Universal capability migration is intentionally incomplete. Implemented
+  notification communications are centrally gated; email/calendar providers are
+  unsupported. Broader skill-pack mutation paths remain legacy/unmigrated audit
+  findings. Unsupported destructive file, Git, service-control, and provider
+  variants remain denied or deferred unless a bounded policy already controls
+  them.
 - Startup auto-recovery that mutates state is intentionally absent.
 - Direct llama.cpp binary/library management is absent.
 - MCP/tool runtime execution is absent.

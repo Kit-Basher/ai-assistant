@@ -137,7 +137,7 @@ def run() -> list[Check]:
 
     categories = registry.status_categories()
     checks.append(_check("status UX reflects registry truth", bool(categories["requires_confirmation"]) and bool(categories["requires_local_activation"]), json.dumps(categories, sort_keys=True)[:300]))
-    legacy_audit_visible = ["communications", "broader skill-pack mutations"]
+    legacy_audit_visible = ["broader skill-pack mutations"]
     checks.append(
         _check(
             "unmigrated paths reported",

@@ -95,6 +95,10 @@ Confirm:
   verify bounded Universal Plan execution, direct shell Git/systemctl blocking,
   force-push denial, and receipt metadata without mutating real repository
   history or primary services
+- run `python scripts/communications_migration_smoke.py` when notification or
+  communications authorization changes; this gate uses fake providers, fixture
+  Telegram transport logs, and temporary notification stores, and it does not
+  send real email, messages, invitations, notifications, comments, or webhooks
 - run `python scripts/support_bundle_v2_smoke.py` when diagnostics packaging
   feels wrong; this gate verifies the Plan Mode-gated support-bundle executor,
   manifest, bounded summary files, redaction, journal id, and scoped rollback

@@ -5,23 +5,32 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.2-executor-authorization-migration-v1`
-- Commit: `e5e097b48761d1218c218bca079933ce92ad3f5e`
+- Tag: `v0.2.2-files-git-service-migration-v1`
+- Commit: `240bcd134081af79397ffeda7549d2c71674f54b`
 - Fresh Debian VM proof: not run
-- Release status: v0.2.1 lifecycle and release-hardening phase closed; current work is files, Git, and service mutation migration on top of Executor Authorization Migration v1
+- Release status: v0.2.1 lifecycle and release-hardening phase closed; current work is communications mutation migration on top of Files, Git, and Service Mutation Migration v1
 
-## Active Phase: Files, Git, and Service Mutation Migration v1
+## Active Phase: Communications Mutation Migration v1
+
+Files, Git, and service-control mutation lanes now use central capability
+policy and Universal Mutation Plans.
+
+This phase migrates implemented communications mutations, including supported
+notification delivery and notification-history mutation. No email or calendar
+provider is currently implemented in this repository, so those providers remain
+unsupported rather than silently mapped to a generic transport.
+
+Broader skill-pack mutation paths remain future work.
+
+## Completed Checkpoint: Files, Git, and Service Mutation Migration v1
 
 Executor Authorization Migration v1 brought backup, restore, support bundles,
-and memory lifecycle under central authorization.
-
-This phase migrates the remaining local-host mutation areas:
+and memory lifecycle under central authorization. Files, Git, and Service
+Mutation Migration v1 migrated the remaining local-host mutation areas:
 
 - file creation, modification, and deletion;
 - Git commit and push policy boundaries;
 - service restart fixture control.
-
-Communications and broader skill-pack mutations remain future migration work.
 
 ## Completed Checkpoint: Executor Authorization Migration v1
 

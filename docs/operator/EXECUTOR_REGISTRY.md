@@ -219,6 +219,10 @@ The smoke talks to the installed `/chat` API and proves:
   direct shell Git mutation is blocked and force push is denied
 - service restart uses an approved fixture service only; direct shell
   `systemctl` mutation is blocked
+- notification local-send, Telegram fixture send, mark-read, and prune use
+  Universal Plan metadata; direct notification provider delivery is blocked
+  without trusted invocation context, and real email/calendar providers are not
+  implemented in this checkpoint
 - Backup v1 writes a manifest and bounded redacted summary files
 - Restore v1 Validator is read-only
 - Restore v1 execution is proven against isolated fixture state with staging,

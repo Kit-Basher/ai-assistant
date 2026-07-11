@@ -118,7 +118,8 @@ The installed-product smoke proves:
 - Universal Mutation Plans are enforced for the migrated set only. Older
   non-chat API-specific plan surfaces may still have their historical payload
   shape.
-- Executor Registry v1 and Capability Policy v1 cover the migrated local-host
-  set incrementally. Communications and broader skill-pack mutators remain
-  legacy/unmigrated audit findings; unsupported destructive file, Git, and
-  service variants remain denied or deferred.
+- Executor Registry v1 and Capability Policy v1 cover the migrated set
+  incrementally. Implemented notification communications are migrated; broader
+  skill-pack mutators remain legacy/unmigrated audit findings. Unsupported
+  destructive file, Git, service, and provider variants remain denied or
+  deferred.

@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from agent.capability_policy import validate_trusted_invocation_context
+
 
 @dataclass(frozen=True)
 class DeliveryTarget:
@@ -39,7 +41,7 @@ class TelegramTarget:
         configured = bool(self._token and self._chat_id)
         return DeliveryTarget(id="telegram", kind="telegram", enabled=self._enabled, configured=configured)
 
-    def deliver(self, notification: dict[str, Any]) -> DeliveryResult:
+    def deliver(self, notification: dict[str, Any], *, trusted_invocation_context: dict[str, Any] | None = None, plan_fingerprint: str = "") -> DeliveryResult:
         descriptor = self.target
         if not descriptor.enabled:
             return DeliveryResult(ok=False, delivered_to="none", error_kind="delivery_disabled", reason="delivery_disabled")
@@ -50,6 +52,14 @@ class TelegramTarget:
                 error_kind="telegram_not_configured_or_no_chat",
                 reason="telegram_not_configured_or_no_chat",
             )
+        valid, reason, _context = validate_trusted_invocation_context(
+            trusted_invocation_context,
+            capability_id="notification.external.send",
+            executor_id="operator.notification.telegram.send.v1",
+            plan_fingerprint=str(plan_fingerprint or ""),
+        )
+        if not valid:
+            return DeliveryResult(ok=False, delivered_to="none", error_kind=reason, reason="generic_bypass_blocked")
         try:
             text = str(notification.get("message") or "").strip()
             self._send_fn(self._token, self._chat_id, text)
@@ -72,8 +82,16 @@ class LocalTarget:
     def target(self) -> DeliveryTarget:
         return DeliveryTarget(id="local", kind="local", enabled=self._enabled, configured=True)
 
-    def deliver(self, notification: dict[str, Any]) -> DeliveryResult:
+    def deliver(self, notification: dict[str, Any], *, trusted_invocation_context: dict[str, Any] | None = None, plan_fingerprint: str = "") -> DeliveryResult:
         _ = notification
         if not self._enabled:
             return DeliveryResult(ok=False, delivered_to="none", error_kind="delivery_disabled", reason="delivery_disabled")
+        valid, reason, _context = validate_trusted_invocation_context(
+            trusted_invocation_context,
+            capability_id="notification.local.send",
+            executor_id="operator.notification.local.send.v1",
+            plan_fingerprint=str(plan_fingerprint or ""),
+        )
+        if not valid:
+            return DeliveryResult(ok=False, delivered_to="none", error_kind=reason, reason="generic_bypass_blocked")
         return DeliveryResult(ok=True, delivered_to="local", error_kind=None, reason="sent_local")
