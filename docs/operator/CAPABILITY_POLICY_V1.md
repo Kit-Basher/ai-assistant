@@ -2,8 +2,8 @@
 
 Checkpoint truth:
 
-- Tag: `v0.2.1`
-- Commit: `f900954c8086588592ff91c502c89057aa630ed2`
+- Tag: `v0.2.2-capability-policy-schema-v1`
+- Commit: `514aef3960847593fa9b62455f6fdffecf6da2bd`
 
 Capability Policy v1 is the first foundation checkpoint for centrally enforced
 assistant tool authorization. It does not migrate every executor. It defines the
@@ -91,10 +91,11 @@ Migrated executor definitions declare trusted capability ids:
 - `operator.cleanup.v1` -> `cleanup.execute`
 - `operator.update.v1` -> `system.update`
 - `operator.uninstall.v1` -> `system.uninstall`
+- `operator.package.install.v1` -> `system.package.install`
 
-Package install is not an Executor Registry executor yet, but the confirmed
-Plan Mode path gates `system.package.install` before calling the shell install
-primitive.
+Package install is now an Executor Registry executor. The confirmed Plan Mode
+path gates `system.package.install`, creates trusted invocation context, and
+then calls the shell install primitive through `operator.package.install.v1`.
 
 Executor capability ids are trusted registration metadata. User text cannot
 choose or replace them.
@@ -111,6 +112,7 @@ actions:
 - risk;
 - target fingerprint;
 - Plan fingerprint;
+- Mutation Plan schema version for Universal Plan Mode migrated actions;
 - receipt and runtime revalidation requirements;
 - local activation requirement where applicable.
 
@@ -164,9 +166,11 @@ Migrated Executor Registry results and journals include:
 - authorization decision id;
 - confirmation timestamp.
 
-Update and uninstall host-lifecycle handoff records include a bounded
-`capability_policy` summary. Uninstall receipts carry the same summary. Raw
-prompts, secrets, tokens, and bearer strings remain redacted.
+Universal Plan Mode migrated receipts also include Mutation Plan schema version,
+Plan id, Plan fingerprint, target fingerprint, authorization decision id, and
+execution outcome. Update and uninstall host-lifecycle handoff records include a
+bounded `capability_policy` summary. Uninstall receipts carry the same summary.
+Raw prompts, secrets, tokens, and bearer strings remain redacted.
 
 ## Skill-Pack Boundary
 
@@ -182,6 +186,8 @@ Run:
 ```bash
 python scripts/capability_policy_smoke.py
 python scripts/capability_policy_audit.py
+python scripts/universal_plan_mode_smoke.py
+python scripts/universal_plan_mode_audit.py
 ```
 
 The smoke proves registry load, schema validation, read-only allow, Plan and
@@ -195,14 +201,13 @@ warnings.
 
 ## Limitations
 
-- This is not universal Plan Mode enforcement yet.
+- Universal Plan Mode enforcement covers only the first migrated set.
 - File, Git, service-control, communication, backup, restore, support-bundle,
   and broad skill-pack mutation paths are not fully migrated.
-- Package install uses the central gate and shell trusted context but is not
-  yet dispatched through Executor Registry.
-- Generic bypass hardening is proven for migrated package install only in this
-  checkpoint; broader shell/file/subprocess brokers remain next-phase work.
+- Generic bypass hardening is proven for migrated package install and lifecycle
+  operations in this checkpoint; broader shell/file/subprocess brokers remain
+  next-phase work.
 
 Recommended next checkpoint:
 
-`v0.2.2-capability-policy-schema-v1`
+`v0.2.2-universal-plan-mode-v1`

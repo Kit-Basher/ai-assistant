@@ -47,6 +47,8 @@ Commands:
 - `python scripts/operator_lifecycle_smoke.py`
 - `python scripts/memory_lifecycle_smoke.py`
 - `python scripts/plan_mode_v2_smoke.py`
+- `python scripts/universal_plan_mode_smoke.py`
+- `python scripts/universal_plan_mode_audit.py`
 - `python scripts/capability_policy_smoke.py`
 - `python scripts/capability_policy_audit.py`
 - `python scripts/executor_registry_smoke.py`
@@ -140,6 +142,20 @@ uninstall.
 bindings, receipt/revalidation/bypass requirements, and explicit warnings for
 legacy unmigrated action paths. Warnings for documented unmigrated actions are
 expected in this foundation checkpoint.
+
+`universal_plan_mode_smoke.py` is the Universal Plan Mode v1 focused proof. It
+proves the Mutation Plan schema, package inspection no-mutation behavior,
+package Executor Registry dispatch, direct shell package bypass blocking,
+cleanup/update Universal Plan metadata, uninstall activation blocking,
+cancellation, expiry, duplicate handling, changed-target rejection, receipt
+metadata, and legacy-action visibility. It is non-destructive, does not install
+a new package, does not enable primary uninstall, and does not uninstall the
+primary installation.
+
+`universal_plan_mode_audit.py` reports migrated mutating executors, Plan schema
+compliance, receipt metadata, direct package mutation blocking, shell trusted
+context requirements, and explicit warnings for legacy/unmigrated mutation
+areas.
 
 `executor_registry_smoke.py` is the installed Executor Registry v1 gate. It
 proves preview-only memory delete plans do not execute; live daily-driver

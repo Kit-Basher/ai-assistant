@@ -39,8 +39,11 @@ fresh Debian VM install proof passes.
   managed-service actions only. It must not expose arbitrary shell, arbitrary
   Podman/Docker, host networking, broad filesystem writes, or hidden sudo.
   Capability Policy v1 centrally gates package install, cleanup, update, and
-  uninstall. The package-install shell primitive rejects direct mutation without
-  a trusted invocation context from a confirmed Plan.
+  uninstall. Universal Plan Mode v1 adds a shared Mutation Plan schema,
+  fingerprint, confirmation binding, cancellation/expiry handling, and receipt
+  metadata for the same migrated set. The package-install shell primitive
+  rejects direct mutation without a trusted invocation context from a confirmed
+  Executor Registry dispatch.
 - Telegram: optional by default. Inactive optional Telegram must not fail core
   readiness. Raw tokens must not appear in status/chat/doctor output.
 - Backup/restore/support: backup paths include sensitive local state. Support
@@ -70,6 +73,12 @@ fresh Debian VM install proof passes.
   Plan blocking, local activation requirement, and generic package-install
   bypass blocking. Audit warnings for documented unmigrated actions are
   expected until later authorization-migration checkpoints.
+- `python scripts/universal_plan_mode_smoke.py` and
+  `python scripts/universal_plan_mode_audit.py` cover the Universal Mutation
+  Plan schema, package registry dispatch, migrated executor Plan metadata,
+  direct shell package bypass blocking, cancellation, expiry, duplicate
+  handling, changed-target rejection, uninstall activation blocking, receipt
+  metadata, and documented legacy visibility.
 
 ## Release Blockers
 

@@ -74,6 +74,12 @@ Confirm:
   executor capability binding, receipt metadata, or generic package-install
   bypass protection changes; these gates are non-destructive and do not enable
   primary uninstall
+- run `python scripts/universal_plan_mode_smoke.py` and
+  `python scripts/universal_plan_mode_audit.py` when Mutation Plan schema,
+  confirmation binding, package-install registry dispatch, cancellation,
+  expiry, duplicate confirmation, or migrated executor Plan metadata changes;
+  these gates are non-destructive, do not install a new package, and do not
+  enable primary uninstall
 - run `python scripts/executor_registry_smoke.py` when Plan Mode apply behavior
   feels wrong; this gate verifies preview-only executor refusals, the safe
   support-bundle executor, journal ids, stale confirmation rejection, and

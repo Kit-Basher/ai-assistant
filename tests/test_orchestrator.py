@@ -4309,10 +4309,15 @@ class TestOrchestrator(unittest.TestCase):
             chat_runtime_adapter=_FrontdoorRuntimeAdapter(),
         )
 
+        installed = {"value": False}
+
         def _fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
             if argv == ["/usr/bin/dpkg-query", "-W", "-f=${db:Status-Status}\n", "ripgrep"]:
+                if installed["value"]:
+                    return subprocess.CompletedProcess(argv, 0, "installed\n", "")
                 return subprocess.CompletedProcess(argv, 1, "", "no packages found matching ripgrep\n")
-            if argv == ["apt-get", "install", "-y", "ripgrep"]:
+            if argv == ["/usr/bin/apt-get", "install", "-y", "--", "ripgrep"]:
+                installed["value"] = True
                 return subprocess.CompletedProcess(argv, 0, "Installing ripgrep\n", "")
             raise AssertionError(f"unexpected argv: {argv!r}")
 
@@ -4332,10 +4337,13 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIn("install ripgrep", preview.text.lower())
         self.assertIn(("shell_preview_install_package", ("apt", "ripgrep", None, False, None)), runtime_truth.calls)
         self.assertEqual("action_tool", confirm.data["route"])
-        self.assertEqual(["shell"], confirm.data["used_tools"])
+        self.assertEqual(["executor_registry", "shell"], confirm.data["used_tools"])
         self.assertFalse(confirm.data["used_llm"])
-        self.assertIn("Installing ripgrep", confirm.text)
+        self.assertIn("Installed ripgrep through Executor Registry v1", confirm.text)
         self.assertIn(("shell_install_package", ("apt", "ripgrep", None, False, None)), runtime_truth.calls)
+        executor_result = confirm.data.get("runtime_payload", {}).get("executor_result", {})
+        self.assertEqual("operator.package.install.v1", executor_result.get("executor_id"))
+        self.assertEqual("system.package.install", executor_result.get("capability_id"))
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_natural_package_install_request_gets_confirmation_preview(self) -> None:

@@ -100,6 +100,12 @@ Run `python scripts/capability_policy_smoke.py` and
 `python scripts/capability_policy_audit.py` when lifecycle authorization
 metadata or central gate behavior changes.
 
+Run `python scripts/universal_plan_mode_smoke.py` and
+`python scripts/universal_plan_mode_audit.py` when lifecycle Plan metadata,
+confirmation binding, cancellation/expiry, or migrated executor dispatch
+changes. These proofs keep primary uninstall disabled and use fixture or
+activation-blocked paths for destructive operations.
+
 Run `python scripts/v0_2_1_release_closure.py --expected-commit f900954` for
 the v0.2.1 sequential installed-product closure proof. It intentionally avoids
 parallel HTTP-heavy proof suites and never enables primary uninstall.

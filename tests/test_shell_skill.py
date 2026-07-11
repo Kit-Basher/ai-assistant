@@ -77,13 +77,13 @@ class TestShellSkill(unittest.TestCase):
     def test_install_requests_use_structured_install_path(self) -> None:
         with patch(
             "agent.shell_skill.subprocess.run",
-            return_value=subprocess.CompletedProcess(["apt-get", "-s", "install", "-y", "ripgrep"], 0, "ok", ""),
+            return_value=subprocess.CompletedProcess(["/usr/bin/apt-get", "-s", "install", "-y", "--", "ripgrep"], 0, "ok", ""),
         ) as run_mock:
             result = self.skill.install_package(manager="apt", package="ripgrep", dry_run=True)
 
         self.assertTrue(result["ok"])
         self.assertFalse(result["mutated"])
-        self.assertEqual(["apt-get", "-s", "install", "-y", "ripgrep"], result["argv"])
+        self.assertEqual(["/usr/bin/apt-get", "-s", "install", "-y", "--", "ripgrep"], result["argv"])
         run_mock.assert_called_once()
 
     def test_debian_package_state_uses_exact_dpkg_query_without_shell(self) -> None:

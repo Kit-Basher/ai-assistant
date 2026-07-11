@@ -5,27 +5,36 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.1`
-- Commit: `f900954c8086588592ff91c502c89057aa630ed2`
+- Tag: `v0.2.2-capability-policy-schema-v1`
+- Commit: `514aef3960847593fa9b62455f6fdffecf6da2bd`
 - Fresh Debian VM proof: not run
-- Release status: v0.2.1 lifecycle and release-hardening phase closed; current work is post-release authorization foundation
+- Release status: v0.2.1 lifecycle and release-hardening phase closed; current work is Universal Plan Mode enforcement on top of Capability Policy v1
 
-## Next Phase: Tool Authorization and Plan Mode Maturity
+## Active Phase: Universal Plan Mode Enforcement v1
 
-The v0.2.1 lifecycle roadmap is complete.
+Capability Policy Schema v1 established the authorization vocabulary and central
+gate.
 
-The next phase applies the same safety model to all mutating assistant
-capabilities:
+This phase standardizes the complete mutation journey:
 
-- central capability policy;
-- read-only versus mutating classification;
-- Plan Mode as the universal mutation gateway;
-- capability-scoped confirmation and activation;
-- durable operation status and receipts;
-- adversarial bypass prevention.
+1. inspect and validate;
+2. produce a versioned mutation Plan;
+3. bind confirmation to the Plan;
+4. revalidate runtime truth;
+5. authorize execution;
+6. mutate through the trusted executor;
+7. record durable outcome and receipt.
 
-The first checkpoint is Capability Policy Schema and Central Authorization Gate
-v1.
+The first migrated actions are package install, cleanup, update, and uninstall.
+Legacy mutation paths remain audit-visible and are not claimed as universally
+protected yet.
+
+## Completed Checkpoint: Capability Policy Schema and Central Authorization Gate v1
+
+The v0.2.1 lifecycle roadmap is complete. Capability Policy Schema v1 added the
+central capability registry, structured authorization decisions, trusted
+invocation context, capability metadata in Plan Mode and receipts, and central
+enforcement for cleanup, update, uninstall, and package-install bypass blocking.
 
 ## Completed Phase: v0.2.1 Release Closure and Installed-Product Hardening
 

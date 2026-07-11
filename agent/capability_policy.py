@@ -34,6 +34,16 @@ REASON_POLICY_CHANGED = "policy_changed"
 REASON_ACTIVATION_INVALID = "activation_invalid"
 REASON_CONFLICTING_OPERATION = "conflicting_operation"
 REASON_GENERIC_BYPASS_BLOCKED = "generic_bypass_blocked"
+REASON_MUTATION_PLAN_MISSING = "mutation_plan_missing"
+REASON_MUTATION_PLAN_INVALID = "mutation_plan_invalid"
+REASON_MUTATION_PLAN_EXPIRED = "mutation_plan_expired"
+REASON_MUTATION_PLAN_CANCELLED = "mutation_plan_cancelled"
+REASON_MUTATION_PLAN_FINGERPRINT_MISMATCH = "mutation_plan_fingerprint_mismatch"
+REASON_MUTATION_PLAN_TARGET_CHANGED = "mutation_plan_target_changed"
+REASON_MUTATION_PLAN_POLICY_CHANGED = "mutation_plan_policy_changed"
+REASON_MUTATION_PLAN_ACTIVATION_CHANGED = "mutation_plan_activation_changed"
+REASON_MUTATION_PLAN_THREAD_MISMATCH = "mutation_plan_thread_mismatch"
+REASON_MUTATION_PLAN_SESSION_MISMATCH = "mutation_plan_session_mismatch"
 
 
 def utc_now_iso() -> str:

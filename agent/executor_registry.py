@@ -27,6 +27,11 @@ from .host_lifecycle import (
     HOST_LIFECYCLE_RUNNER_VERSION,
     attach_approved_hash,
 )
+from .mutation_plan import (
+    MUTATION_PLAN_SCHEMA_VERSION,
+    build_mutation_plan,
+    validate_mutation_plan,
+)
 from .primary_uninstall_policy import (
     build_policy_context,
     consume_primary_uninstall_marker,
@@ -176,6 +181,7 @@ class ExecutorResult:
     target_fingerprint: str = ""
     authorization_decision_id: str = ""
     confirmation_timestamp: str = ""
+    mutation_plan_schema_version: int = MUTATION_PLAN_SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, Any]:
         payload = {
@@ -202,6 +208,7 @@ class ExecutorResult:
             "target_fingerprint": self.target_fingerprint,
             "authorization_decision_id": self.authorization_decision_id,
             "confirmation_timestamp": self.confirmation_timestamp,
+            "mutation_plan_schema_version": int(self.mutation_plan_schema_version),
         }
         return redact_executor_value(payload)
 
@@ -344,6 +351,7 @@ class ExecutorRegistry:
                 target_fingerprint=str(authorization_metadata.get("target_fingerprint") or target_fingerprint),
                 authorization_decision_id=str(authorization_metadata.get("authorization_decision_id") or ""),
                 confirmation_timestamp=str(authorization_metadata.get("confirmation_timestamp") or ""),
+                mutation_plan_schema_version=int(authorization_metadata.get("mutation_plan_schema_version") or MUTATION_PLAN_SCHEMA_VERSION),
             )
             self.journal.append(
                 {
@@ -422,26 +430,31 @@ class ExecutorRegistry:
         trusted_capability_id = str(spec.capability_id or capability_id or "").strip()
         if trusted_capability_id:
             capability_id = trusted_capability_id
-            if not plan_fingerprint:
-                plan_fingerprint = stable_fingerprint(
-                    {
-                        "plan_id": plan_id,
-                        "action_type": action_type,
-                        "target": target,
-                        "resources_affected": plan.get("resources_affected") if isinstance(plan.get("resources_affected"), list) else [],
-                        "capability_id": capability_id,
-                        "executor_id": spec.executor_id,
-                    }
+            try:
+                mutation_plan = _ensure_universal_mutation_plan(
+                    plan,
+                    action=action,
+                    capability_id=capability_id,
+                    executor_id=spec.executor_id,
+                    action_type=action_type,
+                    target=target,
                 )
+            except Exception as exc:  # noqa: BLE001 - malformed plans must fail closed.
+                return _result(
+                    ok=False,
+                    mutated=False,
+                    executor_id=spec.executor_id,
+                    error_code="mutation_plan_invalid",
+                    user_message="I blocked execution because the confirmed mutation Plan was invalid.",
+                    rollback_available=False,
+                    rollback_hint="No rollback needed because nothing changed.",
+                    details={"exception": exc.__class__.__name__},
+                )
+            if not plan_fingerprint:
+                plan_fingerprint = str(mutation_plan.get("plan_fingerprint") or "")
                 plan["plan_fingerprint"] = plan_fingerprint
             if not target_fingerprint:
-                target_fingerprint = stable_fingerprint(
-                    {
-                        "action_type": action_type,
-                        "target": target,
-                        "resources_affected": plan.get("resources_affected") if isinstance(plan.get("resources_affected"), list) else [],
-                    }
-                )
+                target_fingerprint = str(mutation_plan.get("target_fingerprint") or "")
                 plan["target_fingerprint"] = target_fingerprint
             activation_context = _activation_context_for_capability(capability_id, plan=plan, action=action)
             decision = authorize_capability(
@@ -475,6 +488,7 @@ class ExecutorRegistry:
                 "target_fingerprint": target_fingerprint,
                 "authorization_decision_id": decision.decision_id,
                 "confirmation_timestamp": utc_now_iso(),
+                "mutation_plan_schema_version": MUTATION_PLAN_SCHEMA_VERSION,
             }
             action["authorization_decision"] = decision.to_dict()
             action["trusted_invocation_context"] = TrustedInvocationContext(
@@ -530,6 +544,7 @@ class ExecutorRegistry:
                     target_fingerprint=str(authorization_metadata.get("target_fingerprint") or target_fingerprint),
                     authorization_decision_id=str(authorization_metadata.get("authorization_decision_id") or ""),
                     confirmation_timestamp=str(authorization_metadata.get("confirmation_timestamp") or ""),
+                    mutation_plan_schema_version=int(authorization_metadata.get("mutation_plan_schema_version") or MUTATION_PLAN_SCHEMA_VERSION),
                 )
         except ExecutorPartialFailure as exc:
             return _result(
@@ -568,6 +583,7 @@ class ExecutorRegistry:
                 "target_fingerprint": result.target_fingerprint or str(authorization_metadata.get("target_fingerprint") or target_fingerprint),
                 "authorization_decision_id": result.authorization_decision_id or str(authorization_metadata.get("authorization_decision_id") or ""),
                 "confirmation_timestamp": result.confirmation_timestamp or str(authorization_metadata.get("confirmation_timestamp") or ""),
+                "mutation_plan_schema_version": int(authorization_metadata.get("mutation_plan_schema_version") or result.mutation_plan_schema_version),
             }
         )
         self.journal.append(
@@ -600,14 +616,67 @@ def _activation_context_for_capability(capability_id: str, *, plan: dict[str, An
     return {"valid": False, "reason_code": reason}
 
 
+def _ensure_universal_mutation_plan(
+    plan: dict[str, Any],
+    *,
+    action: dict[str, Any],
+    capability_id: str,
+    executor_id: str,
+    action_type: str,
+    target: str,
+) -> dict[str, Any]:
+    existing = plan.get("mutation_plan") if isinstance(plan.get("mutation_plan"), dict) else None
+    if existing is not None:
+        validate_mutation_plan(existing)
+        if existing.get("capability_id") != capability_id or existing.get("executor_id") != executor_id:
+            raise ValueError("mutation_plan_executor_or_capability_mismatch")
+        return existing
+    expires_at = int(plan.get("expires_at") or (int(datetime.now(timezone.utc).timestamp()) + 600))
+    resources = plan.get("resources_affected") if isinstance(plan.get("resources_affected"), list) else []
+    target_snapshot = {
+        "action_type": action_type,
+        "target": target,
+        "params": action.get("params") if isinstance(action.get("params"), dict) else {},
+        "resources_affected": resources,
+    }
+    mutation_inventory = [{"resource": str(item), "effect": "may_change"} for item in resources]
+    if not mutation_inventory:
+        mutation_inventory = [{"target": target, "effect": "capability_specific"}]
+    universal = build_mutation_plan(
+        plan_id=str(plan.get("plan_id") or action.get("pending_id") or ""),
+        capability_id=capability_id,
+        executor_id=executor_id,
+        expires_at_epoch=expires_at,
+        thread_id=str(action.get("thread_id") or action.get("session_thread_id") or ""),
+        session_id=str(action.get("session_id") or ""),
+        actor_id=str(action.get("user_id") or action.get("actor_id") or ""),
+        target_snapshot=target_snapshot,
+        mutation_inventory=mutation_inventory,
+        preserved_resources=plan.get("preserved_resources") if isinstance(plan.get("preserved_resources"), list) else [],
+        expected_side_effects=plan.get("expected_side_effects") if isinstance(plan.get("expected_side_effects"), list) else [],
+        recovery={
+            "rollback_supported": bool(plan.get("rollback_supported")),
+            "rollback_scope": str(plan.get("rollback_scope") or ""),
+        },
+        activation_fingerprint=str(plan.get("activation_fingerprint") or "") or None,
+    )
+    plan["mutation_plan"] = universal
+    plan["target_fingerprint"] = str(universal.get("target_fingerprint") or "")
+    plan["plan_fingerprint"] = str(universal.get("plan_fingerprint") or "")
+    plan["mutation_plan_schema_version"] = MUTATION_PLAN_SCHEMA_VERSION
+    return universal
+
+
 def _capability_policy_record(action: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any] | None:
     decision = action.get("authorization_decision") if isinstance(action.get("authorization_decision"), dict) else {}
     capability_id = str(decision.get("capability_id") or plan.get("capability_id") or "").strip()
     if not capability_id:
         return None
+    mutation_plan = plan.get("mutation_plan") if isinstance(plan.get("mutation_plan"), dict) else {}
     return {
         "capability_id": capability_id,
         "policy_schema_version": int(decision.get("policy_version") or plan.get("policy_schema_version") or POLICY_SCHEMA_VERSION),
+        "mutation_plan_schema_version": int(mutation_plan.get("schema_version") or plan.get("mutation_plan_schema_version") or MUTATION_PLAN_SCHEMA_VERSION),
         "authorization_mode": str(decision.get("authorization_mode") or ""),
         "risk_level": str(decision.get("risk_level") or plan.get("risk_level") or ""),
         "plan_fingerprint": str(decision.get("plan_fingerprint") or plan.get("plan_fingerprint") or ""),

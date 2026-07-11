@@ -23,8 +23,6 @@ from pathlib import Path
 from agent.intent_router import route_message
 from agent.capability_policy import (
     POLICY_SCHEMA_VERSION,
-    TrustedInvocationContext,
-    authorize_capability,
     build_default_capability_registry,
     capability_for_action_type,
     stable_fingerprint,
@@ -109,6 +107,11 @@ from agent.report_followups import resource_followup
 from agent.resource_insights import classify_memory_pressure, summarize_resource_report
 from agent.changed_report import build_changed_report_from_system_facts
 from agent.policy import build_canonical_plan, evaluate_policy
+from agent.mutation_plan import (
+    MUTATION_PLAN_SCHEMA_VERSION,
+    MutationPlanStore,
+    build_mutation_plan,
+)
 import agent.opinion_gate as opinion_gate
 from agent.skills_loader import SkillLoader
 from agent.ask_timeframe import parse_timeframe
@@ -659,6 +662,7 @@ class Orchestrator:
             Path(db.db_path).expanduser().resolve().parent / "managed_actions.db"
         )
         self._executor_registry = ExecutorRegistry(Path(db.db_path).expanduser().resolve().parent / "executor_registry_journal.jsonl")
+        self._mutation_plan_store = MutationPlanStore(Path(db.db_path).expanduser().resolve().parent / "mutation_plans_v1.json")
         self._executor_registry.register(
             ExecutorSpec(
                 executor_id="operator.support_bundle.v1",
@@ -677,6 +681,17 @@ class Orchestrator:
                 run=create_additive_backup,
                 rollback_available=True,
                 rollback_hint="Remove only the newly created backup directory.",
+            )
+        )
+        self._executor_registry.register(
+            ExecutorSpec(
+                executor_id="operator.package.install.v1",
+                action_type="package.install",
+                status="enabled",
+                run=self._execute_package_install_v1,
+                rollback_available=False,
+                rollback_hint="Remove the package manually with the system package manager if needed.",
+                capability_id="system.package.install",
             )
         )
         self._executor_registry.register(
@@ -3114,6 +3129,15 @@ class Orchestrator:
             return "preview_only"
         return "enabled"
 
+    @staticmethod
+    def _canonical_plan_executor_id(action_type: str) -> str:
+        return {
+            "package.install": "operator.package.install.v1",
+            "operator.cleanup": "operator.cleanup.v1",
+            "operator.update": "operator.update.v1",
+            "operator.uninstall": "operator.uninstall.v1",
+        }.get(str(action_type or "").strip().lower(), "")
+
     def _build_canonical_pending_plan(
         self,
         *,
@@ -3166,32 +3190,68 @@ class Orchestrator:
         if capability_id:
             registry = build_default_capability_registry()
             definition = registry.get(capability_id)
-            target_fingerprint = stable_fingerprint(
-                {
+            executor_id = self._canonical_plan_executor_id(action_type)
+            mutation_plan = None
+            if executor_id:
+                target_snapshot = {
                     "action_type": action_type,
                     "target": target,
-                    "resources_affected": resources_affected,
+                    "params": params,
+                    "preview": preview_payload if isinstance(preview_payload, dict) else {},
                 }
-            )
-            plan_fingerprint = stable_fingerprint(
-                {
-                    "plan_id": pending_id,
-                    "action_type": action_type,
-                    "target": target,
-                    "resources_affected": resources_affected,
-                    "capability_id": capability_id,
-                    "policy_schema_version": POLICY_SCHEMA_VERSION,
-                    "target_fingerprint": target_fingerprint,
-                }
-            )
+                mutation_inventory = [
+                    {"resource": str(item), "effect": "may_change"}
+                    for item in resources_affected
+                ] or [{"target": target, "effect": "capability_specific"}]
+                mutation_plan = build_mutation_plan(
+                    plan_id=pending_id,
+                    capability_id=capability_id,
+                    executor_id=executor_id,
+                    expires_at_epoch=int(expires_at),
+                    thread_id=str(action.get("thread_id") or action.get("session_thread_id") or ""),
+                    session_id=str(action.get("session_id") or ""),
+                    actor_id=str(action.get("user_id") or ""),
+                    target_snapshot=target_snapshot,
+                    mutation_inventory=mutation_inventory,
+                    preserved_resources=preview_payload.get("preserved_resources") if isinstance(preview_payload, dict) and isinstance(preview_payload.get("preserved_resources"), list) else [],
+                    expected_side_effects=preview_payload.get("expected_side_effects") if isinstance(preview_payload, dict) and isinstance(preview_payload.get("expected_side_effects"), list) else [],
+                    recovery={"rollback_supported": rollback_supported, "rollback_scope": rollback_scope},
+                    activation_fingerprint=str(preview_payload.get("primary_uninstall_marker_fingerprint") or "") if isinstance(preview_payload, dict) else None,
+                )
+                self._mutation_plan_store.save(mutation_plan)
+                target_fingerprint = str(mutation_plan.get("target_fingerprint") or "")
+                plan_fingerprint = str(mutation_plan.get("plan_fingerprint") or "")
+            else:
+                target_fingerprint = stable_fingerprint(
+                    {
+                        "action_type": action_type,
+                        "target": target,
+                        "resources_affected": resources_affected,
+                    }
+                )
+                plan_fingerprint = stable_fingerprint(
+                    {
+                        "plan_id": pending_id,
+                        "action_type": action_type,
+                        "target": target,
+                        "resources_affected": resources_affected,
+                        "capability_id": capability_id,
+                        "policy_schema_version": POLICY_SCHEMA_VERSION,
+                        "target_fingerprint": target_fingerprint,
+                    }
+                )
             plan.update(
                 {
                     "capability_id": capability_id,
                     "policy_schema_version": POLICY_SCHEMA_VERSION,
+                    "mutation_plan_schema_version": MUTATION_PLAN_SCHEMA_VERSION,
                     "target_fingerprint": target_fingerprint,
                     "plan_fingerprint": plan_fingerprint,
+                    "executor_id": executor_id,
                 }
             )
+            if mutation_plan is not None:
+                plan["mutation_plan"] = mutation_plan
             if definition is not None:
                 plan.update(
                     {
@@ -3218,6 +3278,8 @@ class Orchestrator:
             f"Action type: {str(plan.get('action_type') or '').strip()}.",
             f"Capability: {str(plan.get('capability_title') or 'legacy/unmapped').strip()} ({str(plan.get('capability_id') or 'legacy.unmapped').strip()}).",
             f"Authorization: {str(plan.get('authorization_mode') or 'legacy').strip()}.",
+            f"Mutation Plan schema: {str(plan.get('mutation_plan_schema_version') or 'legacy').strip()}.",
+            f"Executor ID: {str(plan.get('executor_id') or 'legacy/unmapped').strip()}.",
             f"Target: {str(plan.get('target') or '').strip()}.",
             f"Scope: {str(plan.get('scope') or '').strip()}.",
             f"Mutation level: {str(plan.get('mutation_level') or '').strip()}.",
@@ -3279,6 +3341,8 @@ class Orchestrator:
         else:
             plan = pending.action.get("canonical_plan") if isinstance(pending.action, dict) and isinstance(pending.action.get("canonical_plan"), dict) else {}
             plan_id = str(plan.get("plan_id") or (pending.action if isinstance(pending.action, dict) else {}).get("pending_id") or "").strip()
+            if plan_id:
+                self._mutation_plan_store.cancel(plan_id)
             message = f"Okay — I cancelled the pending Plan Mode action{f' {plan_id}' if plan_id else ''}. Nothing ran."
         return self._runtime_truth_response(
             text=message,
@@ -3295,6 +3359,11 @@ class Orchestrator:
         if pending is None:
             message = "There is no current Plan Mode action to revise. Tell me the action you want and I will show a fresh preview."
         else:
+            if isinstance(pending.action, dict):
+                plan = pending.action.get("canonical_plan") if isinstance(pending.action.get("canonical_plan"), dict) else {}
+                plan_id = str(plan.get("plan_id") or pending.action.get("pending_id") or "").strip()
+                if plan_id:
+                    self._mutation_plan_store.cancel(plan_id)
             message = "I cancelled the previous Plan Mode action. Tell me the revised action you want, and I will show a fresh preview before anything mutates."
         return self._runtime_truth_response(
             text=message,
@@ -3326,9 +3395,10 @@ class Orchestrator:
         now_epoch = int(datetime.now(timezone.utc).timestamp())
         pending_id = f"confirm-{uuid.uuid4().hex[:10]}"
         expires_at = now_epoch + 600
+        active_thread_id = self._active_thread_id_for_user(user_id)
         canonical_plan = self._build_canonical_pending_plan(
             pending_id=pending_id,
-            action={**dict(action), "mutating": bool(mutating)},
+            action={**dict(action), "mutating": bool(mutating), "thread_id": active_thread_id, "user_id": user_id},
             title=title,
             preview_payload=preview_payload,
             expires_at=expires_at,
@@ -3342,7 +3412,7 @@ class Orchestrator:
             "pending_id": pending_id,
             "expires_at": expires_at,
             "title": title,
-            "thread_id": self._active_thread_id_for_user(user_id),
+            "thread_id": active_thread_id,
             "canonical_plan": canonical_plan,
         }
         pending = PendingAction(
@@ -3363,7 +3433,7 @@ class Orchestrator:
                 "options": ["yes", "no"],
                 "created_at": now_epoch,
                 "expires_at": expires_at,
-                "thread_id": self._active_thread_id_for_user(user_id),
+                "thread_id": active_thread_id,
                 "status": PENDING_STATUS_WAITING_FOR_USER,
                 "context": {
                     "operation": str(action.get("operation") or "").strip() or None,
@@ -3416,6 +3486,7 @@ class Orchestrator:
             pending_id = str(pending.action.get("pending_id") or "").strip()
         if pending_id:
             self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_EXPIRED)
+            self._mutation_plan_store.transition(pending_id, "expired")
         first = "That confirmation expired, so I didn’t make any changes."
         if action_title:
             first = f"That confirmation expired for {action_title}, so I didn’t make any changes."
@@ -3582,6 +3653,9 @@ class Orchestrator:
     def _execute_confirmed_native_mutation(self, user_id: str, action: dict[str, Any]) -> OrchestratorResponse:
         operation = str(action.get("operation") or "").strip().lower()
         params = action.get("params") if isinstance(action.get("params"), dict) else {}
+        canonical_plan_for_status = action.get("canonical_plan") if isinstance(action.get("canonical_plan"), dict) else {}
+        mutation_plan_for_status = canonical_plan_for_status.get("mutation_plan") if isinstance(canonical_plan_for_status.get("mutation_plan"), dict) else {}
+        mutation_plan_id = str(mutation_plan_for_status.get("plan_id") or canonical_plan_for_status.get("plan_id") or "").strip()
         if operation == "managed_local_service_setup_preview":
             params = action.get("params") if isinstance(action.get("params"), dict) else {}
             service_id = str(params.get("service_id") or "searxng").strip() or "searxng"
@@ -4034,66 +4108,61 @@ class Orchestrator:
             )
         if operation == "shell_install_package":
             plan = action.get("canonical_plan") if isinstance(action.get("canonical_plan"), dict) else {}
-            target_fingerprint = str(plan.get("target_fingerprint") or "").strip()
-            plan_fingerprint = str(plan.get("plan_fingerprint") or "").strip()
-            if not plan_fingerprint:
-                plan_fingerprint = stable_fingerprint(
-                    {
-                        "plan_id": str(action.get("pending_id") or ""),
-                        "action_type": "package.install",
-                        "target": str(params.get("package") or ""),
-                        "capability_id": "system.package.install",
-                        "policy_schema_version": POLICY_SCHEMA_VERSION,
-                    }
-                )
-            decision = authorize_capability(
-                "system.package.install",
-                request_context={"origin": "plan_mode_confirmation", "executor_id": "shell.install_package.v1"},
-                target_snapshot={"target_fingerprint": target_fingerprint},
-                plan_context={
-                    "plan_id": str(action.get("pending_id") or ""),
-                    "plan_fingerprint": plan_fingerprint,
-                    "target_fingerprint": target_fingerprint,
-                    "policy_version": int(plan.get("policy_schema_version") or POLICY_SCHEMA_VERSION),
-                },
-                confirmation_context={"confirmed": True, "pending_id": str(action.get("pending_id") or "")},
-                registry=build_default_capability_registry(),
-            )
-            if not decision.allowed:
-                return self._runtime_truth_response(
-                    text=f"Package installation was confirmed, but capability policy blocked it: {decision.reason_code}. I did not mutate state.",
-                    route="action_tool",
-                    used_tools=["shell"],
-                    ok=False,
-                    error_kind=decision.reason_code,
-                    payload={
-                        "type": "capability_policy_denial",
-                        "operation": operation,
-                        "capability_id": "system.package.install",
-                        "mutated": False,
-                        "authorization": decision.to_dict(),
+            if mutation_plan_id:
+                self._mutation_plan_store.transition(mutation_plan_id, "executing")
+            result = self._executor_registry.execute_confirmed_plan(
+                plan=plan,
+                action={
+                    **dict(action),
+                    "params": {
+                        "manager": str(params.get("manager") or "").strip() or None,
+                        "package": str(params.get("package") or "").strip() or None,
+                        "scope": str(params.get("scope") or "").strip() or None,
+                        "dry_run": bool(params.get("dry_run", False)),
                     },
-                    skip_post_response_hooks=True,
-                )
-            invocation_context = TrustedInvocationContext(
-                capability_id="system.package.install",
-                executor_id="shell.install_package.v1",
-                authorization_decision_id=decision.decision_id,
-                plan_fingerprint=plan_fingerprint,
-                operation_id=str(action.get("pending_id") or ""),
-            ).to_dict()
-            return self._shell_install_package_response(
-                user_id=user_id,
-                manager=str(params.get("manager") or "").strip() or None,
-                package=str(params.get("package") or "").strip() or None,
-                scope=str(params.get("scope") or "").strip() or None,
-                dry_run=bool(params.get("dry_run", False)),
-                confirmed=True,
-                invocation_context=invocation_context,
+                    "origin": "plan_mode_confirmation",
+                },
+            )
+            result_payload = result.to_dict()
+            if result.ok and result.mutated:
+                if mutation_plan_id:
+                    self._mutation_plan_store.transition(mutation_plan_id, "completed")
+                message = result.user_message or f"Package install completed through Executor Registry v1. Journal: {result.journal_id}."
+                error_kind = None
+            elif result.ok:
+                if mutation_plan_id:
+                    self._mutation_plan_store.transition(mutation_plan_id, "completed")
+                message = result.user_message or f"Package install completed with no mutation. Journal: {result.journal_id}."
+                error_kind = None
+            else:
+                if mutation_plan_id:
+                    self._mutation_plan_store.transition(mutation_plan_id, "failed")
+                message = (
+                    f"Package install was confirmed, but the executor did not mutate state. "
+                    f"Reason: {result.error_code or 'executor_failed'}. {result.user_message or ''}"
+                ).strip()
+                error_kind = result.error_code or "package_install_failed"
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_tools=["executor_registry", "shell"],
+                ok=bool(result.ok),
+                error_kind=error_kind,
+                payload={
+                    "type": "package_install_confirmation_result",
+                    "operation": operation,
+                    "mutated": bool(result.mutated),
+                    "summary": message,
+                    "executor_result": result_payload,
+                    "journal_id": result.journal_id,
+                },
+                skip_post_response_hooks=True,
             )
         if operation.startswith("operator_lifecycle_"):
             action_label = str(params.get("action_label") or operation.replace("operator_lifecycle_", "")).strip() or "operator action"
             plan = action.get("canonical_plan") if isinstance(action.get("canonical_plan"), dict) else {}
+            if mutation_plan_id and str(plan.get("capability_id") or "") in {"cleanup.execute", "system.update", "system.uninstall"}:
+                self._mutation_plan_store.transition(mutation_plan_id, "executing")
             registry_action = dict(action)
             if operation == "operator_lifecycle_support_bundle":
                 registry_action["diagnostics"] = self._support_bundle_diagnostics_snapshot()
@@ -4107,18 +4176,24 @@ class Orchestrator:
             result = self._executor_registry.execute_confirmed_plan(plan=plan, action=registry_action)
             result_payload = result.to_dict()
             if result.ok and result.mutated:
+                if mutation_plan_id and str(plan.get("capability_id") or "") in {"cleanup.execute", "system.update", "system.uninstall"}:
+                    self._mutation_plan_store.transition(mutation_plan_id, "completed")
                 message = (
                     f"{action_label} executed through Executor Registry v1. "
                     f"mutated=true. Journal: {result.journal_id}. {result.user_message}"
                 )
                 error_kind = None
             elif result.ok:
+                if mutation_plan_id and str(plan.get("capability_id") or "") in {"cleanup.execute", "system.update", "system.uninstall"}:
+                    self._mutation_plan_store.transition(mutation_plan_id, "completed")
                 message = (
                     f"{action_label} completed through Executor Registry v1. "
                     f"mutated=false. Journal: {result.journal_id}. {result.user_message}"
                 )
                 error_kind = None
             else:
+                if mutation_plan_id and str(plan.get("capability_id") or "") in {"cleanup.execute", "system.update", "system.uninstall"}:
+                    self._mutation_plan_store.transition(mutation_plan_id, "failed")
                 message = (
                     f"{action_label} was confirmed, but the executor did not mutate state. "
                     f"Reason: {result.error_code or 'executor_not_enabled'}. "
@@ -14820,6 +14895,183 @@ class Orchestrator:
         payload = dict(payload) if isinstance(payload, dict) else {}
         return self._shell_command_payload_response(payload)
 
+    def _execute_package_install_v1(self, plan: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+        started_at = datetime.now(timezone.utc).isoformat()
+        params = action.get("params") if isinstance(action.get("params"), dict) else {}
+        manager = str(params.get("manager") or "apt").strip().lower() or "apt"
+        package = str(params.get("package") or plan.get("target") or "").strip()
+        scope = str(params.get("scope") or "").strip() or None
+        dry_run = bool(params.get("dry_run", False))
+        plan_id = str(plan.get("plan_id") or action.get("pending_id") or "").strip()
+        operation_id = f"pkg-install-{uuid.uuid4().hex[:12]}"
+        receipt_root = Path(self.db.db_path).expanduser().resolve().parent / "package_install_receipts"
+        receipt_root.mkdir(parents=True, exist_ok=True)
+        receipt_path = receipt_root / f"{operation_id}.json"
+        truth = self._runtime_truth()
+        if truth is None or not callable(getattr(truth, "shell_preview_install_package", None)) or not callable(getattr(truth, "shell_install_package", None)):
+            return {
+                "ok": False,
+                "mutated": False,
+                "executor_id": "operator.package.install.v1",
+                "error_code": "package_executor_unavailable",
+                "user_message": "Package installation is unavailable because the shell runtime is not available.",
+                "details": {"receipt_path": str(receipt_path)},
+            }
+        preview = truth.shell_preview_install_package(manager=manager, package=package, scope=scope, dry_run=dry_run)
+        preview = dict(preview) if isinstance(preview, dict) else {}
+        if not bool(preview.get("ok")):
+            return {
+                "ok": False,
+                "mutated": False,
+                "executor_id": "operator.package.install.v1",
+                "error_code": str(preview.get("blocked_reason") or preview.get("error_kind") or "package_preview_failed"),
+                "user_message": str(preview.get("message") or "Package installation revalidation failed."),
+                "details": {"preview": preview, "receipt_path": str(receipt_path)},
+            }
+        normalized_package = str(preview.get("package") or "").strip()
+        if normalized_package != package:
+            return {
+                "ok": False,
+                "mutated": False,
+                "executor_id": "operator.package.install.v1",
+                "error_code": "mutation_plan_target_changed",
+                "user_message": "The package target changed after preview, so I blocked installation.",
+                "details": {"planned_package": package, "current_package": normalized_package, "receipt_path": str(receipt_path)},
+            }
+        prior_state = preview.get("package_state") if isinstance(preview.get("package_state"), dict) else {}
+        if manager == "apt" and bool(prior_state.get("installed")) and not dry_run:
+            finished_at = datetime.now(timezone.utc).isoformat()
+            receipt = {
+                "schema_version": "package_install_receipt.v1",
+                "operation_id": operation_id,
+                "capability_id": "system.package.install",
+                "executor_id": "operator.package.install.v1",
+                "policy_schema_version": int(plan.get("policy_schema_version") or POLICY_SCHEMA_VERSION),
+                "mutation_plan_schema_version": int(plan.get("mutation_plan_schema_version") or MUTATION_PLAN_SCHEMA_VERSION),
+                "plan_id": plan_id,
+                "plan_fingerprint": str(plan.get("plan_fingerprint") or ""),
+                "target_fingerprint": str(plan.get("target_fingerprint") or ""),
+                "authorization_mode": str(plan.get("authorization_mode") or "plan_and_confirm"),
+                "risk_level": str(plan.get("risk_level") or "high"),
+                "authorization_decision_id": str((action.get("authorization_decision") or {}).get("decision_id") if isinstance(action.get("authorization_decision"), dict) else ""),
+                "confirmation_timestamp": str((action.get("authorization_decision") or {}).get("created_at") if isinstance(action.get("authorization_decision"), dict) else ""),
+                "normalized_package": normalized_package,
+                "manager": manager,
+                "prior_package_state": prior_state,
+                "final_package_state": prior_state,
+                "command_class": f"{manager}_install",
+                "exit_status": None,
+                "output_summary": {"stdout_chars": 0, "stderr_chars": 0, "timed_out": False, "truncated": False},
+                "verification": {"installed": True, "verified": True},
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "outcome": "already_installed",
+            }
+            receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
+            return {
+                "ok": True,
+                "mutated": False,
+                "executor_id": "operator.package.install.v1",
+                "resources_touched": [str(receipt_path)],
+                "rollback_available": False,
+                "rollback_hint": "No rollback was needed because the package was already installed.",
+                "error_code": None,
+                "user_message": f"Package install check completed for {normalized_package}; it was already installed. Receipt: {receipt_path}.",
+                "details": {
+                    "receipt_id": operation_id,
+                    "receipt_path": str(receipt_path),
+                    "prior_package_state": prior_state,
+                    "final_package_state": prior_state,
+                    "install_result": {"ok": True, "already_installed": True, "exit_code": None, "timed_out": False, "truncated": False},
+                },
+            }
+        install_payload = truth.shell_install_package(
+            manager=manager,
+            package=normalized_package,
+            scope=scope,
+            dry_run=dry_run,
+            invocation_context=action.get("trusted_invocation_context") if isinstance(action.get("trusted_invocation_context"), dict) else None,
+        )
+        install_payload = dict(install_payload) if isinstance(install_payload, dict) else {}
+        if bool(install_payload.get("mutated")) and manager == "apt":
+            try:
+                shell_skill = truth._shell_skill() if callable(getattr(truth, "_shell_skill", None)) else None
+                if shell_skill is None:
+                    shell_skill = getattr(truth, "shell_skill", None)
+                if shell_skill is not None and callable(getattr(shell_skill, "invalidate_package_state_cache", None)):
+                    shell_skill.invalidate_package_state_cache()
+            except Exception:
+                pass
+        verify = truth.shell_preview_install_package(manager=manager, package=normalized_package, scope=scope, dry_run=True)
+        verify = dict(verify) if isinstance(verify, dict) else {}
+        final_state = verify.get("package_state") if isinstance(verify.get("package_state"), dict) else {}
+        verified = bool(install_payload.get("ok")) and (manager != "apt" or bool(final_state.get("installed")) or dry_run)
+        finished_at = datetime.now(timezone.utc).isoformat()
+        receipt = {
+            "schema_version": "package_install_receipt.v1",
+            "operation_id": operation_id,
+            "capability_id": "system.package.install",
+            "executor_id": "operator.package.install.v1",
+            "policy_schema_version": int(plan.get("policy_schema_version") or POLICY_SCHEMA_VERSION),
+            "mutation_plan_schema_version": int(plan.get("mutation_plan_schema_version") or MUTATION_PLAN_SCHEMA_VERSION),
+            "plan_id": plan_id,
+            "plan_fingerprint": str(plan.get("plan_fingerprint") or ""),
+            "target_fingerprint": str(plan.get("target_fingerprint") or ""),
+            "authorization_mode": str(plan.get("authorization_mode") or "plan_and_confirm"),
+            "risk_level": str(plan.get("risk_level") or "high"),
+            "authorization_decision_id": str((action.get("authorization_decision") or {}).get("decision_id") if isinstance(action.get("authorization_decision"), dict) else ""),
+            "confirmation_timestamp": str((action.get("authorization_decision") or {}).get("created_at") if isinstance(action.get("authorization_decision"), dict) else ""),
+            "normalized_package": normalized_package,
+            "manager": manager,
+            "prior_package_state": prior_state,
+            "final_package_state": final_state,
+            "command_class": f"{manager}_install",
+            "exit_status": install_payload.get("exit_code"),
+            "output_summary": {
+                "stdout_chars": len(str(install_payload.get("stdout") or "")),
+                "stderr_chars": len(str(install_payload.get("stderr") or "")),
+                "timed_out": bool(install_payload.get("timed_out")),
+                "truncated": bool(install_payload.get("truncated")),
+            },
+            "verification": {"installed": bool(final_state.get("installed")), "verified": verified},
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "outcome": "completed" if verified else "failed",
+        }
+        receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
+        return {
+            "ok": bool(verified),
+            "mutated": bool(install_payload.get("mutated")),
+            "executor_id": "operator.package.install.v1",
+            "resources_touched": [str(receipt_path)],
+            "rollback_available": False,
+            "rollback_hint": "Remove the package manually with the system package manager if needed.",
+            "error_code": None if verified else str(install_payload.get("blocked_reason") or install_payload.get("error_kind") or "package_install_verification_failed"),
+            "user_message": (
+                f"Installed {normalized_package} through Executor Registry v1. Receipt: {receipt_path}."
+                if verified and bool(install_payload.get("mutated"))
+                else (
+                    f"Package install check completed for {normalized_package}; no package mutation was needed. Receipt: {receipt_path}."
+                    if verified
+                    else f"Package installation for {normalized_package} did not verify. Receipt: {receipt_path}."
+                )
+            ),
+            "details": {
+                "receipt_id": operation_id,
+                "receipt_path": str(receipt_path),
+                "prior_package_state": prior_state,
+                "final_package_state": final_state,
+                "install_result": {
+                    "ok": bool(install_payload.get("ok")),
+                    "blocked_reason": install_payload.get("blocked_reason"),
+                    "error_kind": install_payload.get("error_kind"),
+                    "exit_code": install_payload.get("exit_code"),
+                    "timed_out": bool(install_payload.get("timed_out")),
+                    "truncated": bool(install_payload.get("truncated")),
+                },
+            },
+        }
+
     def _shell_install_package_response(
         self,
         user_id: str,
@@ -14890,15 +15142,19 @@ class Orchestrator:
                 route="action_tool",
                 reason="shell_install_package_unavailable",
             )
-        payload = truth.shell_install_package(
-            manager=manager,
-            package=package,
-            scope=scope,
-            dry_run=dry_run,
-            invocation_context=invocation_context,
+        return self._runtime_truth_response(
+            text="Package installation requires a Universal Plan Mode confirmation and Executor Registry dispatch. I did not mutate state.",
+            route="action_tool",
+            used_tools=["shell"],
+            ok=False,
+            error_kind="mutation_plan_missing",
+            payload={
+                "type": "package_install_direct_mutation_blocked",
+                "capability_id": "system.package.install",
+                "mutated": False,
+            },
+            skip_post_response_hooks=True,
         )
-        payload = dict(payload) if isinstance(payload, dict) else {}
-        return self._shell_command_payload_response(payload)
 
     def _model_controller_switch_back_response(self, user_id: str, *, confirmed: bool = False) -> OrchestratorResponse:
         truth = self._runtime_truth()

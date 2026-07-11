@@ -398,10 +398,10 @@ class ShellSkill(FileSystemSkill):
         assert resolved_cwd is not None
 
         if normalized_manager == "apt":
-            argv = ["apt-get"]
+            argv = ["/usr/bin/apt-get" if Path("/usr/bin/apt-get").is_file() else "apt-get"]
             if dry_run:
                 argv.append("-s")
-            argv.extend(["install", "-y", normalized_package])
+            argv.extend(["install", "-y", "--", normalized_package])
         else:
             if normalized_scope is None:
                 normalized_scope = "user"
@@ -675,7 +675,7 @@ class ShellSkill(FileSystemSkill):
             valid_context, reason, context = validate_trusted_invocation_context(
                 invocation_context,
                 capability_id="system.package.install",
-                executor_id="shell.install_package.v1",
+                executor_id="operator.package.install.v1",
                 plan_fingerprint=str((invocation_context or {}).get("plan_fingerprint") or ""),
             )
             if not valid_context:

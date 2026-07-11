@@ -97,8 +97,9 @@ because they overlap current docs.
 ## Current Next Work
 
 1. Build Tool Authorization and Plan Mode maturity on top of the completed
-   v0.2.1 lifecycle roadmap. The current foundation checkpoint is Capability
-   Policy Schema and Central Authorization Gate v1.
+   v0.2.1 lifecycle roadmap. The current active checkpoint is Universal Plan
+   Mode Enforcement v1, following Capability Policy Schema and Central
+   Authorization Gate v1.
 2. Keep managed SearXNG live verification separate from isolated proof:
    `prove_core_workflows.py` can honestly report search `BLOCKED` when no
    backend is configured, while live `/search/status` proves the configured
@@ -108,8 +109,8 @@ because they overlap current docs.
    write, verify the result, and roll back only owned resources.
 4. If adding more managed local services or sandboxed tool/MCP runtimes, start
    from `docs/design/MANAGED_LOCAL_SERVICES_AND_SANDBOXED_TOOLS.md`.
-5. Keep unmigrated mutating actions audit-visible until universal Plan Mode
-   enforcement and executor authorization migration are complete.
+5. Keep unmigrated mutating actions audit-visible until Universal Plan Mode
+   enforcement and later executor authorization migration batches cover them.
 
 ## Do Not Start Until Later
 

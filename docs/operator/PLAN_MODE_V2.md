@@ -24,6 +24,8 @@ Every chat-native Plan Mode preview now exposes a canonical Plan object with:
 - `staleness_policy`
 - `capability_id` for migrated actions
 - `policy_schema_version` for migrated actions
+- `mutation_plan_schema_version` for Universal Plan Mode migrated actions
+- `executor_id` for Universal Plan Mode migrated actions
 - `target_fingerprint` and `plan_fingerprint` for migrated actions
 
 The same fields are included in the user-visible preview text and in the
@@ -38,6 +40,12 @@ confirmation is bound to capability id, policy version, Plan fingerprint,
 target fingerprint, executor id, expiry, and thread/session. A changed target,
 stale Plan, policy version change, or missing local uninstall activation fails
 closed with `mutated=false`.
+
+Universal Plan Mode v1 adds a structured Mutation Plan security object for the
+same migrated actions. Rendered preview text is display only; authorization uses
+the canonical Mutation Plan fingerprint. Package install is now dispatched
+through `operator.package.install.v1` in the Executor Registry instead of a
+direct shell mutation path. See `docs/operator/UNIVERSAL_PLAN_MODE_V1.md`.
 
 ## User Flows
 
@@ -72,6 +80,8 @@ Run:
 
 ```bash
 python scripts/plan_mode_v2_smoke.py
+python scripts/universal_plan_mode_smoke.py
+python scripts/universal_plan_mode_audit.py
 python scripts/capability_policy_smoke.py
 python scripts/executor_registry_smoke.py
 ```
@@ -98,11 +108,14 @@ The installed-product smoke proves:
 - Capability Policy v1 adds central authorization decisions for package
   install, cleanup, update, and uninstall while leaving unmigrated actions
   audit-visible.
+- Universal Plan Mode v1 proves the shared Mutation Plan schema, cancellation,
+  expiry, duplicate handling, package-install registry dispatch, package shell
+  bypass blocking, lifecycle Plan metadata, and uninstall activation blocking.
 
 ## Remaining Gaps
 
 - Several lifecycle lanes are still preview-only by design.
-- Canonical Plan objects are now exposed for chat-native previews, but older
+- Universal Mutation Plans are enforced for the migrated set only. Older
   non-chat API-specific plan surfaces may still have their historical payload
   shape.
 - Executor Registry v1 and Capability Policy v1 cover only a representative

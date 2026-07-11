@@ -6,7 +6,10 @@ The registry owns executor lookup, refusal for non-enabled executors, canonical
 result fields, and an append-only redacted mutation journal.
 
 Capability Policy v1 adds central authorization metadata for migrated
-executors. See `docs/operator/CAPABILITY_POLICY_V1.md`.
+executors. Universal Plan Mode v1 adds a shared Mutation Plan security object,
+fingerprint, and receipt metadata for the migrated mutating set. See
+`docs/operator/CAPABILITY_POLICY_V1.md` and
+`docs/operator/UNIVERSAL_PLAN_MODE_V1.md`.
 
 ## Result Schema
 
@@ -34,6 +37,7 @@ Every registry result includes:
 - `target_fingerprint`
 - `authorization_decision_id`
 - `confirmation_timestamp`
+- `mutation_plan_schema_version`
 
 ## Enforcement
 
@@ -50,6 +54,10 @@ Every registry result includes:
 - Migrated mutating executors call the central capability gate before mutation.
   A denied decision returns `mutated=false` and is journaled.
 - Executor capability ids come from trusted registration code, not user text.
+- Migrated mutating executors require a valid Universal Mutation Plan before
+  mutation. If a legacy canonical plan reaches the registry for a migrated
+  action, the registry synthesizes and validates the v1 Mutation Plan before
+  authorization.
 
 ## Journal
 
@@ -65,12 +73,18 @@ unredacted payloads.
 
 Current enabled executors:
 
+- `package.install` via `operator.package.install.v1`
 - `operator.support_bundle` via `operator.support_bundle.v1`
 - `operator.backup` via `operator.backup.v1`
 - `operator.cleanup` via `operator.cleanup.v1`
 - `operator.restore` via `operator.restore.v1`
 - `operator.update` via `operator.update.v1`
 - `operator.uninstall` via `operator.uninstall.v1`
+
+`package.install` installs an allowlisted Debian package through the shell
+package primitive only after Plan Mode confirmation, capability authorization,
+and trusted invocation context creation. Already-installed packages return a
+verified no-op receipt. It is bound to `system.package.install`.
 
 `operator.support_bundle` creates a Support Bundle v2 diagnostics package in a
 temporary directory. It is additive and returns a `journal_id`. Rollback is
@@ -136,6 +150,8 @@ Run:
 ```bash
 python scripts/capability_policy_smoke.py
 python scripts/capability_policy_audit.py
+python scripts/universal_plan_mode_smoke.py
+python scripts/universal_plan_mode_audit.py
 python scripts/executor_registry_smoke.py
 python scripts/support_bundle_v2_smoke.py
 python scripts/backup_v1_smoke.py
@@ -157,6 +173,8 @@ The smoke talks to the installed `/chat` API and proves:
 - support bundle creates only a redacted temporary diagnostics artifact
 - Support Bundle v2 writes a manifest and bounded summary files
 - backup has an enabled executor and returns a journal id
+- package install is an enabled executor path, while direct shell package
+  mutation remains blocked without trusted context
 - Backup v1 writes a manifest and bounded redacted summary files
 - Restore v1 Validator is read-only
 - Restore v1 execution is proven against isolated fixture state with staging,
