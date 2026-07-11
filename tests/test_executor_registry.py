@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -34,12 +35,17 @@ from agent.executor_registry import (
     create_additive_backup,
     create_redacted_support_bundle,
     execute_cleanup,
+    execute_file_create,
+    execute_git_commit,
+    execute_git_push,
+    execute_service_restart,
     execute_uninstall_v1,
     execute_update_v1,
     restore_backup_v1,
     support_bundle_redact,
 )
 from agent.capability_policy import POLICY_SCHEMA_VERSION
+from agent.mutation_plan import build_mutation_plan
 
 
 def _plan(**overrides):
@@ -72,6 +78,30 @@ def _trusted_action(
         "policy_version": POLICY_SCHEMA_VERSION,
     }
     return payload
+
+
+def _mutation_plan(
+    *,
+    plan_id: str,
+    capability_id: str,
+    executor_id: str,
+    action_type: str,
+    target: str,
+) -> dict:
+    plan = build_mutation_plan(
+        plan_id=plan_id,
+        capability_id=capability_id,
+        executor_id=executor_id,
+        expires_at_epoch=4_102_444_800,
+        thread_id="test-thread",
+        session_id="test-session",
+        target_snapshot={"action_type": action_type, "target": target},
+        mutation_inventory=[{"action_type": action_type, "target": target}],
+        recovery={"rollback_supported": True},
+    )
+    wrapped = dict(plan)
+    wrapped["mutation_plan"] = dict(plan)
+    return wrapped
 
 
 def _write_release(path: Path, commit: str) -> None:
@@ -1157,6 +1187,138 @@ class ExecutorRegistryTests(unittest.TestCase):
             self.assertFalse(result["ok"])
             self.assertFalse(result["mutated"])
             self.assertEqual("generic_bypass_blocked", result["error_code"])
+
+    def test_file_executor_rejects_direct_bypass_and_symlink_target(self) -> None:
+        root = Path(self.tmpdir.name) / "files"
+        root.mkdir()
+        target = root / "link.txt"
+        target.symlink_to(root / "missing.txt")
+        plan = _mutation_plan(
+            plan_id="file-create-test",
+            capability_id="files.create",
+            executor_id="operator.file.create.v1",
+            action_type="operator.file.create",
+            target=str(target),
+        )
+        direct = execute_file_create(plan, {"pending_id": "file-create-test", "target_path": str(target), "approved_roots": [str(root)], "content": "x"})
+        self.assertFalse(direct["ok"])
+        self.assertFalse(direct["mutated"])
+        self.assertEqual("generic_bypass_blocked", direct["error_code"])
+
+        trusted = execute_file_create(
+            plan,
+            _trusted_action(
+                {"pending_id": "file-create-test", "target_path": str(target), "approved_roots": [str(root)], "content": "x"},
+                capability_id="files.create",
+                executor_id="operator.file.create.v1",
+                plan=plan,
+            ),
+        )
+        self.assertFalse(trusted["ok"])
+        self.assertFalse(trusted["mutated"])
+        self.assertEqual("file_symlink_target_blocked", trusted["error_code"])
+
+    def test_git_commit_revalidates_staged_diff_and_push_denies_force(self) -> None:
+        repo = Path(self.tmpdir.name) / "repo"
+        repo.mkdir()
+
+        def git(*args: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(["/usr/bin/git", *args], cwd=str(repo), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10, check=False)
+
+        git("init")
+        git("config", "user.email", "agent-fixture@example.test")
+        git("config", "user.name", "Agent Fixture")
+        tracked = repo / "tracked.txt"
+        tracked.write_text("before\n", encoding="utf-8")
+        git("add", "tracked.txt")
+        git("commit", "-m", "initial")
+        tracked.write_text("after\n", encoding="utf-8")
+        git("add", "tracked.txt")
+
+        import hashlib
+
+        old_hash = hashlib.sha256(git("diff", "--cached", "--binary").stdout.encode("utf-8", errors="replace")).hexdigest()
+        tracked.write_text("changed-again\n", encoding="utf-8")
+        git("add", "tracked.txt")
+        plan = _mutation_plan(
+            plan_id="git-commit-test",
+            capability_id="git.commit",
+            executor_id="operator.git.commit.v1",
+            action_type="operator.git.commit",
+            target=str(repo),
+        )
+        result = execute_git_commit(
+            plan,
+            _trusted_action(
+                {
+                    "pending_id": "git-commit-test",
+                    "repository_root": str(repo),
+                    "approved_roots": [str(Path(self.tmpdir.name))],
+                    "staged_diff_sha256": old_hash,
+                    "commit_message": "fixture commit",
+                },
+                capability_id="git.commit",
+                executor_id="operator.git.commit.v1",
+                plan=plan,
+            ),
+        )
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["mutated"])
+        self.assertEqual("git_staged_diff_changed", result["error_code"])
+
+        push_plan = _mutation_plan(
+            plan_id="git-push-test",
+            capability_id="git.push",
+            executor_id="operator.git.push.v1",
+            action_type="operator.git.push",
+            target=str(repo),
+        )
+        force = execute_git_push(
+            push_plan,
+            _trusted_action(
+                {
+                    "pending_id": "git-push-test",
+                    "repository_root": str(repo),
+                    "approved_roots": [str(Path(self.tmpdir.name))],
+                    "remote": "origin",
+                    "branch": "master",
+                    "force": True,
+                },
+                capability_id="git.push",
+                executor_id="operator.git.push.v1",
+                plan=push_plan,
+            ),
+        )
+        self.assertFalse(force["ok"])
+        self.assertFalse(force["mutated"])
+        self.assertEqual("git_force_push_denied", force["error_code"])
+
+    def test_service_restart_requires_allowlisted_fixture_service(self) -> None:
+        service_root = Path(self.tmpdir.name) / "services"
+        plan = _mutation_plan(
+            plan_id="service-restart-test",
+            capability_id="system.service.restart",
+            executor_id="operator.service.restart.v1",
+            action_type="operator.service.restart",
+            target="ssh.service",
+        )
+        result = execute_service_restart(
+            plan,
+            _trusted_action(
+                {
+                    "pending_id": "service-restart-test",
+                    "service_name": "ssh.service",
+                    "allowed_services": ["personal-agent-proof-restart.service"],
+                    "service_fixture_root": str(service_root),
+                },
+                capability_id="system.service.restart",
+                executor_id="operator.service.restart.v1",
+                plan=plan,
+            ),
+        )
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["mutated"])
+        self.assertEqual("service_not_allowlisted", result["error_code"])
 
     def test_support_bundle_redacts_sensitive_values(self) -> None:
         payload = {

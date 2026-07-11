@@ -18,8 +18,9 @@ This lane is safe by default:
   confirmation: isolated fixture removal, or a structured no-mutation blocker
   for the live daily-driver install unless a safe isolated target is approved
 - support bundle wording must say secrets are redacted
-- cleanup, update, and uninstall are bound to Capability Policy v1 ids
-  (`cleanup.execute`, `system.update`, `system.uninstall`) before mutation.
+- cleanup, update, uninstall, backup, restore, support-bundle, memory
+  lifecycle, bounded file, Git, and service fixture lanes are bound to
+  Capability Policy v1 ids before migrated mutation.
   Primary uninstall still requires local activation in addition to confirmation.
 
 ## Current Product Flow
@@ -48,16 +49,17 @@ The mutating prompts return a preview with:
 - no mutation during preview
 
 For this checkpoint, lifecycle execution is still partial but no longer purely
-preview-only. Backup, support bundle, cleanup, restore, update, and uninstall
-have bounded Executor Registry paths with central capability authorization.
-Memory lifecycle mutation lanes are classified under capability policy but
-remain preview-only where no bounded executor exists. Host Lifecycle Runner v1
-is the shared external runner for update/uninstall fixture handoff. Update v1 is
-intentionally conservative for the live installed runtime: dirty checkouts and
-non-no-op live promotion are blocked unless a rollback-safe active-install
-handoff is proven. Uninstall v1 is also conservative: isolated fixture removal
-is executable, while live daily-driver uninstall is guarded and returns a
-no-mutation blocker.
+preview-only. Backup, support bundle, cleanup, restore, update, uninstall,
+bounded file create/modify/delete, Git commit/push policy boundaries, and
+service restart fixtures have bounded Executor Registry paths with central
+capability authorization. Memory lifecycle mutation lanes are classified under
+capability policy and use shared authorization metadata where execution exists.
+Host Lifecycle Runner v1 is the shared external runner for update/uninstall
+fixture handoff. Update v1 is intentionally conservative for the live installed
+runtime: dirty checkouts and non-no-op live promotion are blocked unless a
+rollback-safe active-install handoff is proven. Uninstall v1 is also
+conservative: isolated fixture removal is executable, while live daily-driver
+uninstall is guarded and returns a no-mutation blocker.
 
 ## Proof
 
@@ -108,6 +110,11 @@ Run `python scripts/universal_plan_mode_smoke.py` and
 confirmation binding, cancellation/expiry, or migrated executor dispatch
 changes. These proofs keep primary uninstall disabled and use fixture or
 activation-blocked paths for destructive operations.
+
+Run `python scripts/files_git_service_migration_smoke.py` when file, Git, or
+service-control authorization changes. It uses isolated temporary files, a
+temporary Git repository, and fixture service state; it does not mutate real
+repository history or primary services.
 
 Run `python scripts/v0_2_1_release_closure.py --expected-commit f900954` for
 the v0.2.1 sequential installed-product closure proof. It intentionally avoids

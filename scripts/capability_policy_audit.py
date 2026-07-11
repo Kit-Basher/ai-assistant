@@ -31,12 +31,15 @@ MIGRATED_EXECUTORS = {
     "memory.export": "memory.export",
     "memory.redact": "memory.redact",
     "memory.cleanup": "memory.compact",
+    "operator.file.create": "files.create",
+    "operator.file.modify": "files.modify",
+    "operator.file.delete": "files.delete",
+    "operator.git.commit": "git.commit",
+    "operator.git.push": "git.push",
+    "operator.service.restart": "system.service.restart",
 }
 
 LEGACY_UNMIGRATED = {
-    "files.*": "file mutation tools are not migrated in v1",
-    "git.*": "git mutation tools are not migrated in v1",
-    "system.service.*": "service-control mutation tools are not migrated in v1",
     "communications.*": "external communication mutation adapters are not enabled as core capabilities",
     "skill_pack.*": "broader skill-pack mutation paths remain future migration work",
 }
@@ -80,6 +83,12 @@ def run() -> list[Check]:
         "memory.export",
         "memory.redact",
         "memory.compact",
+        "files.create",
+        "files.modify",
+        "files.delete",
+        "git.commit",
+        "git.push",
+        "system.service.restart",
     ):
         definition = registry.get(cap_id)
         if definition is None:

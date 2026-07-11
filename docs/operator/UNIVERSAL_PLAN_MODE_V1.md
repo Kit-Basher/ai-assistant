@@ -17,10 +17,17 @@ Migrated in this checkpoint:
 - `support_bundle.create` through `operator.support_bundle.v1`
 - memory lifecycle preview lanes through `memory.forget`, `memory.export`,
   `memory.redact`, and `memory.compact`
+- `files.create`, `files.modify`, and `files.delete` through bounded file
+  executors
+- `git.commit` through `operator.git.commit.v1`
+- `git.push` through `operator.git.push.v1` as an external-side-effect-aware
+  bounded policy lane; force push remains denied
+- `system.service.restart` through `operator.service.restart.v1` for approved
+  fixture services
 
-Legacy/unmigrated mutation areas remain audit-visible: file mutation, Git
-mutation, service control, communications, and broader skill-pack mutation
-paths.
+Legacy/unmigrated mutation areas remain audit-visible: communications and
+broader skill-pack mutation paths. Unsupported destructive file, Git, and
+service variants remain denied or deferred rather than silently allowed.
 
 ## Mutation Plan Schema
 
@@ -88,6 +95,13 @@ before mutation:
 - support bundle rechecks local artifact creation and redaction boundaries
 - memory mutation lanes recheck target scope and fingerprints where an executor
   is implemented
+- file mutation rechecks canonical path, approved root, regular-file type,
+  symlink status, expected content hash, and staged rollback/deletion behavior
+- Git commit rechecks repository root, staged diff fingerprint, HEAD, and
+  command class; Git push rechecks repository and refuses force/external push
+  mutation in this checkpoint
+- service restart rechecks the exact allowlisted fixture service and writes
+  only fixture state
 
 Lifecycle-specific operation records remain separate from the conversational
 Mutation Plan.
@@ -103,6 +117,21 @@ context issued by the Executor Registry. Direct lower-level calls fail with
 Memory lifecycle destructive execution remains preview-only where no executor
 exists, but the mutation lanes now have stable capabilities and Universal Plan
 metadata.
+
+## Files, Git, And Services
+
+Files, Git, and Service Mutation Migration v1 extends this contract to bounded
+local-host mutation fixtures:
+
+- file create/modify/delete use exact paths, approved roots, symlink rejection,
+  expected hashes, rollback copies, and deletion staging;
+- Git commit uses a repository target model and staged diff fingerprint;
+- Git push is classified as an external side effect and force push is denied in
+  this checkpoint;
+- service restart is limited to approved fixture services and does not stop,
+  disable, or restart the primary Personal Agent service.
+
+Direct lower-level shell `git` and `systemctl` mutation attempts remain blocked.
 
 ## Package Executor
 

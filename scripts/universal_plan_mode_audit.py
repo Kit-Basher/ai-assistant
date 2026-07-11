@@ -35,12 +35,15 @@ MIGRATED_MUTATIONS = {
     "memory.export": ("operator.memory.export.v1", "memory.export"),
     "memory.redact": ("operator.memory.redact.v1", "memory.redact"),
     "memory.cleanup": ("operator.memory.compact.v1", "memory.compact"),
+    "operator.file.create": ("operator.file.create.v1", "files.create"),
+    "operator.file.modify": ("operator.file.modify.v1", "files.modify"),
+    "operator.file.delete": ("operator.file.delete.v1", "files.delete"),
+    "operator.git.commit": ("operator.git.commit.v1", "git.commit"),
+    "operator.git.push": ("operator.git.push.v1", "git.push"),
+    "operator.service.restart": ("operator.service.restart.v1", "system.service.restart"),
 }
 
 LEGACY_VISIBLE = {
-    "file mutation": "not migrated in this checkpoint",
-    "git mutation": "not migrated in this checkpoint",
-    "service control": "not migrated in this checkpoint",
     "communications": "not migrated in this checkpoint",
     "broader skill-pack mutation": "not migrated in this checkpoint",
 }

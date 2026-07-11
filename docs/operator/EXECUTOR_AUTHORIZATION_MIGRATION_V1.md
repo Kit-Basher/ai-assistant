@@ -155,6 +155,10 @@ Expected remaining warnings:
 - communications;
 - broader skill-pack mutation paths.
 
+The later Files, Git, and Service Mutation Migration v1 checkpoint supersedes
+the first three warnings. The active expected warnings are communications and
+broader skill-pack mutation paths.
+
 ## Proof
 
 Focused proof:
@@ -166,7 +170,7 @@ python scripts/executor_authorization_migration_smoke.py
 The smoke uses isolated temp fixtures for backup/restore/support-bundle and
 does not overwrite live memory or live Personal Agent state.
 
-Current expected shape:
+Historical expected shape for this checkpoint:
 
 ```text
 PASS=<n> WARN=5 FAIL=0

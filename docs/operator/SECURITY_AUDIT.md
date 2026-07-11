@@ -84,6 +84,11 @@ fresh Debian VM install proof passes.
   classification under central capability policy and Universal Plan metadata.
   It uses isolated fixtures and proves backup/support/restore direct helper
   bypasses fail with `mutated=false`.
+- `python scripts/files_git_service_migration_smoke.py` covers bounded file
+  create/modify/delete, Git commit/push policy boundaries, service restart
+  fixtures, direct shell Git/systemctl blocking, symlink/path traversal
+  rejection, force-push denial, and receipt metadata. It uses isolated files,
+  an isolated temporary Git repository, and fixture service state only.
 
 ## Release Blockers
 
@@ -98,10 +103,10 @@ fresh Debian VM install proof passes.
 ## Non-Blocking Gaps To Track
 
 - Broader managed-action journal rollout is intentionally paused.
-- Universal capability migration is intentionally incomplete. File, Git,
-  communication, service-control, and broader skill-pack mutation paths remain
-  legacy/unmigrated audit findings unless another bounded policy already
-  controls them.
+- Universal capability migration is intentionally incomplete. Communications
+  and broader skill-pack mutation paths remain legacy/unmigrated audit
+  findings. Unsupported destructive file, Git, and service-control variants
+  remain denied or deferred unless a bounded policy already controls them.
 - Startup auto-recovery that mutates state is intentionally absent.
 - Direct llama.cpp binary/library management is absent.
 - MCP/tool runtime execution is absent.

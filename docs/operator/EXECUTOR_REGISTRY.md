@@ -80,6 +80,12 @@ Current enabled executors:
 - `operator.restore` via `operator.restore.v1`
 - `operator.update` via `operator.update.v1`
 - `operator.uninstall` via `operator.uninstall.v1`
+- `operator.file.create` via `operator.file.create.v1`
+- `operator.file.modify` via `operator.file.modify.v1`
+- `operator.file.delete` via `operator.file.delete.v1`
+- `operator.git.commit` via `operator.git.commit.v1`
+- `operator.git.push` via `operator.git.push.v1`
+- `operator.service.restart` via `operator.service.restart.v1`
 
 `package.install` installs an allowlisted Debian package through the shell
 package primitive only after Plan Mode confirmation, capability authorization,
@@ -130,6 +136,26 @@ approved isolated fixture; it does not stop services or remove runtime files
 from ordinary installed-product proofs. See
 `docs/operator/UNINSTALL_EXECUTOR_V1.md`. It is bound to `system.uninstall`.
 
+`operator.file.create`, `operator.file.modify`, and `operator.file.delete`
+perform bounded local-file fixture mutations only after Universal Plan
+authorization. They require canonical paths under approved roots, reject
+symlink targets and pseudo-filesystems, enforce expected hashes for modify and
+delete, write through temporary siblings, preserve rollback copies for
+overwrites, and stage deletions instead of permanent unlink. They are bound to
+`files.create`, `files.modify`, and `files.delete`.
+
+`operator.git.commit` commits an already staged diff in an approved repository
+after the staged diff fingerprint is revalidated. It does not stage files
+implicitly and does not accept arbitrary Git options. `operator.git.push`
+records the external-side-effect policy boundary and denies force push; actual
+remote push execution remains deferred until a dedicated remote proof exists.
+They are bound to `git.commit` and `git.push`.
+
+`operator.service.restart` is limited to exact allowlisted fixture services and
+fixture state roots. It does not restart, stop, disable, or mutate the primary
+Personal Agent service during proofs. It is bound to
+`system.service.restart`.
+
 ## Preview-Only Lanes
 
 These remain preview-only in v1:
@@ -160,6 +186,7 @@ python scripts/capability_policy_audit.py
 python scripts/universal_plan_mode_smoke.py
 python scripts/universal_plan_mode_audit.py
 python scripts/executor_authorization_migration_smoke.py
+python scripts/files_git_service_migration_smoke.py
 python scripts/executor_registry_smoke.py
 python scripts/support_bundle_v2_smoke.py
 python scripts/backup_v1_smoke.py
@@ -185,6 +212,13 @@ The smoke talks to the installed `/chat` API and proves:
 - backup has an enabled executor and returns a journal id
 - package install is an enabled executor path, while direct shell package
   mutation remains blocked without trusted context
+- bounded file create/modify/delete use Universal Plan metadata, approved
+  roots, symlink rejection, rollback copies, deletion staging, and receipt
+  metadata
+- Git commit uses Universal Plan metadata and staged diff fingerprinting;
+  direct shell Git mutation is blocked and force push is denied
+- service restart uses an approved fixture service only; direct shell
+  `systemctl` mutation is blocked
 - Backup v1 writes a manifest and bounded redacted summary files
 - Restore v1 Validator is read-only
 - Restore v1 execution is proven against isolated fixture state with staging,

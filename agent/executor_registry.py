@@ -3381,3 +3381,290 @@ def create_redacted_support_bundle(plan: dict[str, Any], action: dict[str, Any])
         "user_message": f"Support bundle created at {root}. It contains redacted diagnostics only.",
         "details": {"artifact_path": str(root), "files": included_files, "manifest_path": str(root / "manifest.json")},
     }
+
+
+_BLOCKED_FILE_ROOTS = tuple(Path(path) for path in ("/proc", "/sys", "/dev", "/run"))
+_MAX_FILE_EXECUTOR_BYTES = 256 * 1024
+
+
+def _path_digest(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _is_under(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _approved_file_target(action: dict[str, Any]) -> tuple[Path | None, dict[str, Any] | None]:
+    raw = str(action.get("target_path") or "").strip()
+    if not raw:
+        return None, {"error_code": "file_target_missing", "message": "No target file path was provided."}
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        base = Path(str(action.get("base_dir") or Path.cwd())).expanduser().resolve(strict=False)
+        candidate = base / candidate
+    if candidate.is_symlink():
+        return None, {"error_code": "file_symlink_target_blocked", "message": "Symlink file targets are blocked."}
+    for parent_candidate in candidate.parents:
+        if parent_candidate.is_symlink():
+            return None, {"error_code": "file_symlink_parent_blocked", "message": "Symlink parent directories are blocked."}
+        if parent_candidate.exists():
+            break
+    resolved = candidate.resolve(strict=False)
+    if any(resolved == root or root in resolved.parents for root in _BLOCKED_FILE_ROOTS):
+        return None, {"error_code": "file_pseudo_filesystem_blocked", "message": "Pseudo-filesystem file mutation is blocked."}
+    roots = [Path(str(item)).expanduser().resolve(strict=False) for item in action.get("approved_roots", []) if str(item).strip()] if isinstance(action.get("approved_roots"), list) else []
+    if not roots:
+        roots = [Path(tempfile.gettempdir()).resolve()]
+    if not any(_is_under(resolved, root) or resolved == root for root in roots):
+        return None, {"error_code": "file_target_outside_approved_roots", "message": "The target is outside approved file mutation roots."}
+    parent = resolved.parent
+    if resolved.exists() and not resolved.is_file():
+        return None, {"error_code": "file_target_not_regular_file", "message": "Only regular file targets are supported."}
+    return resolved, None
+
+
+def _file_snapshot(path: Path) -> dict[str, Any]:
+    exists = path.exists()
+    stat_result = path.stat() if exists else None
+    return {
+        "canonical_path": str(path),
+        "resource_type": "file" if path.is_file() else ("missing" if not exists else "other"),
+        "exists": exists,
+        "owner": int(stat_result.st_uid) if stat_result is not None else None,
+        "mode": oct(stat_result.st_mode & 0o777) if stat_result is not None else None,
+        "size": int(stat_result.st_size) if stat_result is not None else 0,
+        "mtime": int(stat_result.st_mtime_ns) if stat_result is not None else None,
+        "content_hash": _path_digest(path) if exists and path.is_file() and int(stat_result.st_size) <= _MAX_FILE_EXECUTOR_BYTES else None,
+        "parent_root": str(path.parent),
+        "protected": False,
+        "symlink_status": "symlink" if path.is_symlink() else "not_symlink",
+        "mount_status": "mount_point" if path.exists() and path.is_mount() else "not_mount_point",
+    }
+
+
+def execute_file_create(plan: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+    context_failure = _trusted_context_failure(plan, action, capability_id="files.create", executor_id="operator.file.create.v1")
+    if context_failure is not None:
+        return context_failure
+    target, error = _approved_file_target(action)
+    if error is not None:
+        return {"ok": False, "mutated": False, "executor_id": "operator.file.create.v1", **error}
+    assert target is not None
+    if target.exists() and not bool(action.get("overwrite")):
+        return {"ok": False, "mutated": False, "executor_id": "operator.file.create.v1", "error_code": "file_exists_overwrite_not_allowed", "user_message": "File creation was blocked because the target already exists."}
+    content = str(action.get("content") or "")
+    if len(content.encode("utf-8")) > _MAX_FILE_EXECUTOR_BYTES:
+        return {"ok": False, "mutated": False, "executor_id": "operator.file.create.v1", "error_code": "file_content_too_large", "user_message": "File content exceeded the bounded write size."}
+    before = _file_snapshot(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    rollback_path = None
+    if target.exists():
+        rollback_path = target.with_name(f".{target.name}.rollback-{uuid.uuid4().hex[:8]}")
+        shutil.copy2(target, rollback_path)
+    temp = target.with_name(f".{target.name}.tmp-{uuid.uuid4().hex[:8]}")
+    temp.write_text(content, encoding="utf-8")
+    os.replace(temp, target)
+    after = _file_snapshot(target)
+    return {
+        "ok": True,
+        "mutated": True,
+        "executor_id": "operator.file.create.v1",
+        "resources_touched": [str(target), *([str(rollback_path)] if rollback_path else [])],
+        "rollback_available": rollback_path is not None,
+        "rollback_hint": f"Restore rollback copy at {rollback_path}." if rollback_path else f"Remove newly created file {target}.",
+        "user_message": f"Created file {target}.",
+        "details": {"before": before, "after": after, "rollback_path": str(rollback_path) if rollback_path else None},
+    }
+
+
+def execute_file_modify(plan: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+    context_failure = _trusted_context_failure(plan, action, capability_id="files.modify", executor_id="operator.file.modify.v1")
+    if context_failure is not None:
+        return context_failure
+    target, error = _approved_file_target(action)
+    if error is not None:
+        return {"ok": False, "mutated": False, "executor_id": "operator.file.modify.v1", **error}
+    assert target is not None
+    if not target.is_file():
+        return {"ok": False, "mutated": False, "executor_id": "operator.file.modify.v1", "error_code": "file_modify_target_missing", "user_message": "File modification requires an existing regular file."}
+    expected_hash = str(action.get("expected_hash") or "").strip()
+    current_hash = _path_digest(target) or ""
+    if expected_hash and expected_hash != current_hash:
+        return {"ok": False, "mutated": False, "executor_id": "operator.file.modify.v1", "error_code": "file_changed_since_preview", "user_message": "The file changed after preview. Ask for a fresh Plan.", "details": {"current_hash": current_hash}}
+    content = str(action.get("content") or "")
+    if len(content.encode("utf-8")) > _MAX_FILE_EXECUTOR_BYTES:
+        return {"ok": False, "mutated": False, "executor_id": "operator.file.modify.v1", "error_code": "file_content_too_large", "user_message": "File content exceeded the bounded write size."}
+    before = _file_snapshot(target)
+    rollback_path = target.with_name(f".{target.name}.rollback-{uuid.uuid4().hex[:8]}")
+    shutil.copy2(target, rollback_path)
+    temp = target.with_name(f".{target.name}.tmp-{uuid.uuid4().hex[:8]}")
+    temp.write_text(content, encoding="utf-8")
+    os.replace(temp, target)
+    after = _file_snapshot(target)
+    return {
+        "ok": True,
+        "mutated": True,
+        "executor_id": "operator.file.modify.v1",
+        "resources_touched": [str(target), str(rollback_path)],
+        "rollback_available": True,
+        "rollback_hint": f"Restore rollback copy at {rollback_path}.",
+        "user_message": f"Modified file {target}.",
+        "details": {"before": before, "after": after, "rollback_path": str(rollback_path)},
+    }
+
+
+def execute_file_delete(plan: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+    context_failure = _trusted_context_failure(plan, action, capability_id="files.delete", executor_id="operator.file.delete.v1")
+    if context_failure is not None:
+        return context_failure
+    target, error = _approved_file_target(action)
+    if error is not None:
+        return {"ok": False, "mutated": False, "executor_id": "operator.file.delete.v1", **error}
+    assert target is not None
+    if not target.is_file():
+        return {"ok": False, "mutated": False, "executor_id": "operator.file.delete.v1", "error_code": "file_delete_target_missing", "user_message": "File deletion requires an existing regular file."}
+    expected_hash = str(action.get("expected_hash") or "").strip()
+    current_hash = _path_digest(target) or ""
+    if expected_hash and expected_hash != current_hash:
+        return {"ok": False, "mutated": False, "executor_id": "operator.file.delete.v1", "error_code": "file_changed_since_preview", "user_message": "The file changed after preview. Ask for a fresh Plan.", "details": {"current_hash": current_hash}}
+    staging_root = Path(str(action.get("delete_staging_root") or target.parent / ".personal-agent-deleted")).expanduser().resolve(strict=False)
+    if not (_is_under(staging_root, target.parent) or staging_root == target.parent):
+        return {"ok": False, "mutated": False, "executor_id": "operator.file.delete.v1", "error_code": "delete_staging_outside_parent", "user_message": "Delete staging must stay under the target parent."}
+    before = _file_snapshot(target)
+    staging_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    staged = staging_root / f"{target.name}.{uuid.uuid4().hex[:8]}"
+    os.replace(target, staged)
+    return {
+        "ok": True,
+        "mutated": True,
+        "executor_id": "operator.file.delete.v1",
+        "resources_touched": [str(target), str(staged)],
+        "rollback_available": True,
+        "rollback_hint": f"Move {staged} back to {target}.",
+        "user_message": f"Moved deleted file {target} to recoverable staging.",
+        "details": {"before": before, "staged_path": str(staged), "permanent_delete": False},
+    }
+
+
+def _run_git(repo: Path, args: list[str], *, timeout: float = 10.0) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["/usr/bin/git", *args], cwd=str(repo), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=False)
+
+
+def _git_repository(action: dict[str, Any]) -> tuple[Path | None, dict[str, Any] | None]:
+    raw = str(action.get("repository_root") or "").strip()
+    if not raw:
+        return None, {"error_code": "git_repository_missing", "user_message": "No Git repository root was provided."}
+    repo = Path(raw).expanduser().resolve(strict=False)
+    if repo.is_symlink() or not (repo / ".git").exists():
+        return None, {"error_code": "git_repository_invalid", "user_message": "The Git target is not an approved repository root."}
+    roots = [Path(str(item)).expanduser().resolve(strict=False) for item in action.get("approved_roots", []) if str(item).strip()] if isinstance(action.get("approved_roots"), list) else []
+    if roots and not any(repo == root or _is_under(repo, root) for root in roots):
+        return None, {"error_code": "git_repository_outside_approved_roots", "user_message": "The repository is outside approved roots."}
+    return repo, None
+
+
+def _git_fingerprint(repo: Path) -> dict[str, Any]:
+    head = _run_git(repo, ["rev-parse", "HEAD"])
+    branch = _run_git(repo, ["rev-parse", "--abbrev-ref", "HEAD"])
+    staged = _run_git(repo, ["diff", "--cached", "--name-status"])
+    staged_patch = _run_git(repo, ["diff", "--cached", "--binary"])
+    status = _run_git(repo, ["status", "--porcelain=v1"])
+    return {
+        "repository_root": str(repo),
+        "head_commit": (head.stdout or "").strip(),
+        "current_branch": (branch.stdout or "").strip(),
+        "staged_files": (staged.stdout or "").strip().splitlines(),
+        "staged_diff_sha256": hashlib.sha256((staged_patch.stdout or "").encode("utf-8", errors="replace")).hexdigest(),
+        "working_tree_status": (status.stdout or "").strip().splitlines(),
+    }
+
+
+def execute_git_commit(plan: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+    context_failure = _trusted_context_failure(plan, action, capability_id="git.commit", executor_id="operator.git.commit.v1")
+    if context_failure is not None:
+        return context_failure
+    repo, error = _git_repository(action)
+    if error is not None:
+        return {"ok": False, "mutated": False, "executor_id": "operator.git.commit.v1", **error}
+    assert repo is not None
+    before = _git_fingerprint(repo)
+    expected = str(action.get("staged_diff_sha256") or "").strip()
+    if expected and expected != before["staged_diff_sha256"]:
+        return {"ok": False, "mutated": False, "executor_id": "operator.git.commit.v1", "error_code": "git_staged_diff_changed", "user_message": "The staged Git diff changed after preview. Ask for a fresh Plan.", "details": {"current": before}}
+    if not before["staged_files"]:
+        return {"ok": False, "mutated": False, "executor_id": "operator.git.commit.v1", "error_code": "git_nothing_staged", "user_message": "No staged changes were available to commit.", "details": {"current": before}}
+    message = str(action.get("commit_message") or "").strip()
+    if not message or "\x00" in message or len(message.encode("utf-8")) > 4096:
+        return {"ok": False, "mutated": False, "executor_id": "operator.git.commit.v1", "error_code": "git_commit_message_invalid", "user_message": "The commit message was missing or invalid."}
+    proc = _run_git(repo, ["commit", "-m", message], timeout=20.0)
+    if proc.returncode != 0:
+        return {"ok": False, "mutated": False, "executor_id": "operator.git.commit.v1", "error_code": "git_commit_failed", "user_message": "Git commit failed before verification.", "details": {"stderr": (proc.stderr or "")[-1000:]}}
+    after = _git_fingerprint(repo)
+    return {
+        "ok": True,
+        "mutated": True,
+        "executor_id": "operator.git.commit.v1",
+        "resources_touched": [str(repo)],
+        "rollback_available": True,
+        "rollback_hint": f"Previous HEAD was {before['head_commit']}; use a reviewed revert/reset plan if needed.",
+        "user_message": f"Created Git commit {after['head_commit'][:12]} on {after['current_branch']}.",
+        "details": {"before": before, "after": after, "commit_message_sha256": hashlib.sha256(message.encode('utf-8')).hexdigest()},
+    }
+
+
+def execute_git_push(plan: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+    context_failure = _trusted_context_failure(plan, action, capability_id="git.push", executor_id="operator.git.push.v1")
+    if context_failure is not None:
+        return context_failure
+    if bool(action.get("force")):
+        return {"ok": False, "mutated": False, "executor_id": "operator.git.push.v1", "error_code": "git_force_push_denied", "user_message": "Force push is denied by policy."}
+    return {"ok": False, "mutated": False, "executor_id": "operator.git.push.v1", "error_code": "git_push_external_side_effect_not_enabled", "user_message": "Git push remains preview-only until an external remote proof is configured."}
+
+
+def execute_service_restart(plan: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+    context_failure = _trusted_context_failure(plan, action, capability_id="system.service.restart", executor_id="operator.service.restart.v1")
+    if context_failure is not None:
+        return context_failure
+    service = str(action.get("service_name") or "").strip()
+    allowed = {str(item).strip() for item in action.get("allowed_services", []) if str(item).strip()} if isinstance(action.get("allowed_services"), list) else set()
+    if not service or service not in allowed:
+        return {"ok": False, "mutated": False, "executor_id": "operator.service.restart.v1", "error_code": "service_not_allowlisted", "user_message": "Service restart was blocked because the unit is not allowlisted."}
+    if service == "personal-agent-api.service" and not bool(action.get("allow_primary_api_restart")):
+        return {"ok": False, "mutated": False, "executor_id": "operator.service.restart.v1", "error_code": "service_protected", "user_message": "Primary API restart requires the dedicated restart/reconnect path."}
+    fixture_root = str(action.get("service_fixture_root") or "").strip()
+    if not fixture_root:
+        return {"ok": False, "mutated": False, "executor_id": "operator.service.restart.v1", "error_code": "service_fixture_required", "user_message": "This proof executor only restarts fixture services."}
+    root = Path(fixture_root).expanduser().resolve(strict=False)
+    if root.is_symlink() or not (root == Path(tempfile.gettempdir()).resolve() or _is_under(root, Path(tempfile.gettempdir()).resolve())):
+        return {"ok": False, "mutated": False, "executor_id": "operator.service.restart.v1", "error_code": "service_fixture_root_unapproved", "user_message": "Fixture service root is not approved."}
+    root.mkdir(parents=True, exist_ok=True)
+    state_path = root / f"{service}.state.json"
+    before = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {"active_state": "inactive", "restart_count": 0}
+    after = {
+        "service_name": service,
+        "active_state": "active",
+        "restart_count": int(before.get("restart_count") or 0) + 1,
+        "restarted_at": utc_now_iso(),
+    }
+    state_path.write_text(json.dumps(after, sort_keys=True) + "\n", encoding="utf-8")
+    return {
+        "ok": True,
+        "mutated": True,
+        "executor_id": "operator.service.restart.v1",
+        "resources_touched": [str(state_path)],
+        "rollback_available": False,
+        "rollback_hint": "Fixture restart has no rollback requirement.",
+        "user_message": f"Restarted fixture service {service}.",
+        "details": {"service_name": service, "before": before, "after": after, "command_class": "fixture_systemctl_user_restart"},
+    }

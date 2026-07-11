@@ -151,6 +151,12 @@ from agent.executor_registry import (
     create_additive_backup,
     create_redacted_support_bundle,
     execute_cleanup,
+    execute_file_create,
+    execute_file_delete,
+    execute_file_modify,
+    execute_git_commit,
+    execute_git_push,
+    execute_service_restart,
     execute_uninstall_v1,
     execute_update_v1,
     restore_backup_v1,
@@ -716,6 +722,72 @@ class Orchestrator:
                 rollback_available=True,
                 rollback_hint="Use the pre-restore safety snapshot created before restore mutation.",
                 capability_id="restore.execute",
+            )
+        )
+        self._executor_registry.register(
+            ExecutorSpec(
+                executor_id="operator.file.create.v1",
+                action_type="operator.file.create",
+                status="enabled",
+                run=execute_file_create,
+                rollback_available=True,
+                rollback_hint="Remove the created file or restore the rollback copy if one was made.",
+                capability_id="files.create",
+            )
+        )
+        self._executor_registry.register(
+            ExecutorSpec(
+                executor_id="operator.file.modify.v1",
+                action_type="operator.file.modify",
+                status="enabled",
+                run=execute_file_modify,
+                rollback_available=True,
+                rollback_hint="Restore the rollback copy created next to the modified file.",
+                capability_id="files.modify",
+            )
+        )
+        self._executor_registry.register(
+            ExecutorSpec(
+                executor_id="operator.file.delete.v1",
+                action_type="operator.file.delete",
+                status="enabled",
+                run=execute_file_delete,
+                rollback_available=True,
+                rollback_hint="Move the staged file back to its original path.",
+                capability_id="files.delete",
+            )
+        )
+        self._executor_registry.register(
+            ExecutorSpec(
+                executor_id="operator.git.commit.v1",
+                action_type="operator.git.commit",
+                status="enabled",
+                run=execute_git_commit,
+                rollback_available=True,
+                rollback_hint="Use a reviewed revert/reset plan against the recorded previous HEAD if needed.",
+                capability_id="git.commit",
+            )
+        )
+        self._executor_registry.register(
+            ExecutorSpec(
+                executor_id="operator.git.push.v1",
+                action_type="operator.git.push",
+                status="preview_only",
+                run=execute_git_push,
+                rollback_available=False,
+                rollback_hint="Push is an external side effect and remains disabled until a remote proof is configured.",
+                capability_id="git.push",
+            )
+        )
+        self._executor_registry.register(
+            ExecutorSpec(
+                executor_id="operator.service.restart.v1",
+                action_type="operator.service.restart",
+                status="enabled",
+                run=execute_service_restart,
+                rollback_available=False,
+                rollback_hint="Fixture service restart is verified by final status.",
+                capability_id="system.service.restart",
             )
         )
         self._executor_registry.register(

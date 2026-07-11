@@ -5,24 +5,33 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.2-universal-plan-mode-v1`
-- Commit: `401b6e5e46b1581b02c8697cc1b3480d5af20361`
+- Tag: `v0.2.2-executor-authorization-migration-v1`
+- Commit: `e5e097b48761d1218c218bca079933ce92ad3f5e`
 - Fresh Debian VM proof: not run
-- Release status: v0.2.1 lifecycle and release-hardening phase closed; current work is executor authorization migration on top of Capability Policy v1 and Universal Plan Mode v1
+- Release status: v0.2.1 lifecycle and release-hardening phase closed; current work is files, Git, and service mutation migration on top of Executor Authorization Migration v1
 
-## Active Phase: Executor Authorization Migration v1
+## Active Phase: Files, Git, and Service Mutation Migration v1
 
-Universal Plan Mode v1 established one mutation protocol.
+Executor Authorization Migration v1 brought backup, restore, support bundles,
+and memory lifecycle under central authorization.
 
-This phase migrates the next legacy executor group:
+This phase migrates the remaining local-host mutation areas:
+
+- file creation, modification, and deletion;
+- Git commit and push policy boundaries;
+- service restart fixture control.
+
+Communications and broader skill-pack mutations remain future migration work.
+
+## Completed Checkpoint: Executor Authorization Migration v1
+
+Universal Plan Mode v1 established one mutation protocol. Executor
+Authorization Migration v1 migrated the next legacy executor group:
 
 - backup creation;
 - restore execution;
 - support-bundle creation;
 - memory lifecycle mutation.
-
-Files, Git, service control, communications, and broader skill-pack mutations
-remain future migration work.
 
 ## Completed Checkpoint: Universal Plan Mode Enforcement v1
 

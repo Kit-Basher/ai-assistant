@@ -51,6 +51,7 @@ Commands:
 - `python scripts/universal_plan_mode_audit.py`
 - `python scripts/capability_policy_smoke.py`
 - `python scripts/capability_policy_audit.py`
+- `python scripts/files_git_service_migration_smoke.py`
 - `python scripts/executor_registry_smoke.py`
 - `python scripts/support_bundle_v2_smoke.py`
 - `python scripts/backup_v1_smoke.py`
@@ -156,6 +157,14 @@ primary installation.
 compliance, receipt metadata, direct package mutation blocking, shell trusted
 context requirements, and explicit warnings for legacy/unmigrated mutation
 areas.
+
+`files_git_service_migration_smoke.py` is the focused Files, Git, and Service
+Mutation Migration v1 proof. It verifies bounded file create/modify/delete,
+symlink/path-traversal blocking, Git status/diff read-only behavior, Git commit
+with staged diff fingerprint, force-push denial, direct shell Git blocking,
+fixture service restart, unknown-service blocking, direct `systemctl` blocking,
+and receipt metadata. It uses isolated temporary roots and does not mutate real
+repository history or primary services.
 
 `executor_authorization_migration_smoke.py` is the focused Executor
 Authorization Migration v1 proof. It verifies Backup v1 creation, Restore v1

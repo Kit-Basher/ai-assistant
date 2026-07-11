@@ -89,6 +89,12 @@ Confirm:
   isolated fixtures to verify central capability policy, Universal Plan
   metadata, receipts, and direct lower-level bypass blocking without live
   restore or live memory overwrite
+- run `python scripts/files_git_service_migration_smoke.py` when file, Git, or
+  service-control authorization changes; this gate uses isolated temporary
+  files, an isolated temporary Git repository, and fixture service state to
+  verify bounded Universal Plan execution, direct shell Git/systemctl blocking,
+  force-push denial, and receipt metadata without mutating real repository
+  history or primary services
 - run `python scripts/support_bundle_v2_smoke.py` when diagnostics packaging
   feels wrong; this gate verifies the Plan Mode-gated support-bundle executor,
   manifest, bounded summary files, redaction, journal id, and scoped rollback
