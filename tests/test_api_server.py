@@ -5468,11 +5468,19 @@ class TestAPIServerRuntime(unittest.TestCase):
             "type": "shell_install_package",
             "source": "runtime_truth.shell",
         }
+        revalidate_payload = {
+            **preview_payload,
+            "package_state": {"ok": True, "package": "ripgrep", "state": "not_installed", "installed": False},
+        }
+        verify_payload = {
+            **preview_payload,
+            "package_state": {"ok": True, "package": "ripgrep", "state": "installed", "installed": True},
+        }
 
         with patch.object(runtime, "_auto_bootstrap_local_chat_model", return_value=None), patch.object(
             truth,
             "shell_preview_install_package",
-            return_value=preview_payload,
+            side_effect=[preview_payload, revalidate_payload, verify_payload],
         ) as preview_mock, patch.object(
             truth,
             "shell_install_package",
@@ -5505,13 +5513,13 @@ class TestAPIServerRuntime(unittest.TestCase):
         first_setup = first.response_payload.get("setup") if isinstance(first.response_payload.get("setup"), dict) else {}
         self.assertEqual("action_tool", first_meta.get("route"))
         self.assertTrue(first_setup.get("requires_confirmation"))
-        self.assertEqual(1, preview_mock.call_count)
+        self.assertEqual(3, preview_mock.call_count)
 
         self.assertEqual(200, second.status_code)
         self.assertNotEqual("needs_clarification", second.response_payload.get("error_kind"))
         second_meta = second.response_payload.get("meta") if isinstance(second.response_payload.get("meta"), dict) else {}
         self.assertEqual("action_tool", second_meta.get("route"))
-        self.assertIn("Installing ripgrep", str(second.response_payload.get("message") or ""))
+        self.assertIn("Installed ripgrep", str(second.response_payload.get("message") or ""))
         self.assertEqual(1, install_mock.call_count)
 
     def test_chat_confirmed_model_switch_preserves_model_controller_metadata(self) -> None:
