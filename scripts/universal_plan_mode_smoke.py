@@ -212,10 +212,10 @@ def run() -> list[Check]:
     categories = {
         "pending": bool(package_plan.get("plan_id")),
         "operation_truth": bool(package_result.get("journal_id")),
-        "legacy_visible": ["backup", "restore", "files", "git", "service-control", "communications"],
+        "legacy_visible": ["files", "git", "service-control", "communications", "broader skill-pack mutations"],
     }
     checks.append(_pass("status UX reads Plan/operation truth", json.dumps(categories, sort_keys=True)))
-    checks.append(_pass("legacy actions remain audit-visible", ", ".join(categories["legacy_visible"])))
+    checks.append(_pass("remaining legacy actions remain audit-visible", ", ".join(categories["legacy_visible"])))
     return checks
 
 

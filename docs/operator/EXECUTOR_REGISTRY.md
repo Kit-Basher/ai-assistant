@@ -89,12 +89,14 @@ verified no-op receipt. It is bound to `system.package.install`.
 `operator.support_bundle` creates a Support Bundle v2 diagnostics package in a
 temporary directory. It is additive and returns a `journal_id`. Rollback is
 limited to removing the newly created temporary support bundle directory. See
-`docs/operator/SUPPORT_BUNDLE.md`.
+`docs/operator/SUPPORT_BUNDLE.md`. It is bound to `support_bundle.create` and
+requires trusted invocation context before the helper writes an artifact.
 
 `operator.backup` creates a Backup v1 directory under the approved Personal
 Agent local backup path. It is additive and returns a `journal_id`. Rollback is
 limited to removing the newly created backup directory. See
-`docs/operator/BACKUP_V1.md`.
+`docs/operator/BACKUP_V1.md`. It is bound to `backup.create` and requires
+trusted invocation context before the helper writes an artifact.
 
 `operator.cleanup` deletes only preview-identified, revalidated, owned
 Personal Agent artifacts such as generated cleanup fixtures, old backups, old
@@ -107,7 +109,9 @@ preference values for system-resource baselines/context. It stages content,
 creates a pre-restore safety snapshot, verifies live state after apply, and
 attempts rollback from the snapshot on post-mutation failure. It does not
 restore secrets, logs, arbitrary files, model caches, runtime releases, or
-untrusted executable/pack content.
+untrusted executable/pack content. It is bound to `restore.execute` and
+requires trusted invocation context before the helper creates restore locks,
+staging directories, snapshots, or state changes.
 
 `operator.update` is enabled for bounded Update v1 outcomes: isolated
 staged-release fixture promotion/rollback proof through Host Lifecycle Runner
@@ -130,7 +134,10 @@ from ordinary installed-product proofs. See
 
 These remain preview-only in v1:
 
-- memory delete/export/redact/dedupe/control executors
+- memory delete/export/redact/dedupe/control executors remain preview-only
+  where no destructive executor is implemented, but mutation lanes are now
+  classified as `memory.forget`, `memory.export`, `memory.redact`, or
+  `memory.compact`
 - repair lifecycle executors unless a separate bounded executor is already
   used by an existing managed-service path
 
@@ -152,6 +159,7 @@ python scripts/capability_policy_smoke.py
 python scripts/capability_policy_audit.py
 python scripts/universal_plan_mode_smoke.py
 python scripts/universal_plan_mode_audit.py
+python scripts/executor_authorization_migration_smoke.py
 python scripts/executor_registry_smoke.py
 python scripts/support_bundle_v2_smoke.py
 python scripts/backup_v1_smoke.py
@@ -171,6 +179,8 @@ The smoke talks to the installed `/chat` API and proves:
 - cleanup has an enabled executor plan and can be cancelled without mutation
 - support bundle has an enabled executor and returns a journal id
 - support bundle creates only a redacted temporary diagnostics artifact
+- support bundle, backup, and restore helpers block direct calls without
+  trusted invocation context
 - Support Bundle v2 writes a manifest and bounded summary files
 - backup has an enabled executor and returns a journal id
 - package install is an enabled executor path, while direct shell package

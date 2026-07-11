@@ -4,6 +4,11 @@ Backup v1 is the first additive backup executor behind Plan Mode v2 and
 Executor Registry v1. It creates a new local backup directory with redacted
 summaries only. It does not restore, overwrite, delete, or stop services.
 
+Executor Authorization Migration v1 binds backup creation to `backup.create`.
+The executor uses Universal Mutation Plan metadata, central capability
+authorization, trusted invocation context, and receipt metadata. Direct helper
+calls without trusted context are blocked before artifact creation.
+
 ## Flow
 
 User-facing prompt:

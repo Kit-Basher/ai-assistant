@@ -21,6 +21,7 @@ from .capability_policy import (
     build_default_capability_registry,
     capability_for_action_type,
     stable_fingerprint,
+    validate_trusted_invocation_context,
 )
 from .host_lifecycle import (
     HOST_LIFECYCLE_OPERATION_SCHEMA_VERSION,
@@ -82,6 +83,38 @@ SECRET_KEY_HINTS = (
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _trusted_context_failure(
+    plan: dict[str, Any],
+    action: dict[str, Any],
+    *,
+    capability_id: str,
+    executor_id: str,
+) -> dict[str, Any] | None:
+    """Return a structured no-mutation failure when a migrated executor is called directly."""
+    valid, reason, _context = validate_trusted_invocation_context(
+        action.get("trusted_invocation_context") if isinstance(action.get("trusted_invocation_context"), dict) else None,
+        capability_id=capability_id,
+        executor_id=executor_id,
+        plan_fingerprint=str(plan.get("plan_fingerprint") or ""),
+    )
+    if valid:
+        return None
+    return {
+        "ok": False,
+        "mutated": False,
+        "executor_id": executor_id,
+        "error_code": reason or "generic_bypass_blocked",
+        "user_message": f"Capability policy blocked direct execution of {capability_id}. Use the Executor Registry Plan flow.",
+        "rollback_available": False,
+        "rollback_hint": "No rollback needed because nothing changed.",
+        "details": {
+            "capability_id": capability_id,
+            "policy_schema_version": POLICY_SCHEMA_VERSION,
+            "blocked_before_mutation": True,
+        },
+    }
 
 
 def redact_executor_value(value: Any, *, key_hint: str = "") -> Any:
@@ -1338,6 +1371,14 @@ def _restore_from_snapshot(snapshot_root: Path, db_path: Path) -> bool:
 
 
 def restore_backup_v1(plan: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+    context_failure = _trusted_context_failure(
+        plan,
+        action,
+        capability_id="restore.execute",
+        executor_id="operator.restore.v1",
+    )
+    if context_failure is not None:
+        return context_failure
     plan_id = str(plan.get("plan_id") or action.get("pending_id") or "unknown").strip() or "unknown"
     state_root = _approved_restore_root(action)
     db_path = Path(str(action.get("db_path") or "")).expanduser().resolve()
@@ -3007,6 +3048,14 @@ def build_backup_manifest(
 
 
 def create_additive_backup(plan: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+    context_failure = _trusted_context_failure(
+        plan,
+        action,
+        capability_id="backup.create",
+        executor_id="operator.backup.v1",
+    )
+    if context_failure is not None:
+        return context_failure
     plan_id = str(plan.get("plan_id") or action.get("pending_id") or "unknown").strip() or "unknown"
     backup_root = _approved_backup_root(action)
     root = _artifact_dir(backup_root, prefix="personal-agent-backup")
@@ -3189,6 +3238,14 @@ def create_additive_backup(plan: dict[str, Any], action: dict[str, Any]) -> dict
 
 
 def create_redacted_support_bundle(plan: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+    context_failure = _trusted_context_failure(
+        plan,
+        action,
+        capability_id="support_bundle.create",
+        executor_id="operator.support_bundle.v1",
+    )
+    if context_failure is not None:
+        return context_failure
     plan_id = str(plan.get("plan_id") or action.get("pending_id") or "unknown").strip() or "unknown"
     root = Path(tempfile.mkdtemp(prefix="personal-agent-support-"))
     diagnostics = action.get("diagnostics") if isinstance(action.get("diagnostics"), dict) else {}

@@ -28,17 +28,21 @@ MIGRATED_MUTATIONS = {
     "operator.cleanup": ("operator.cleanup.v1", "cleanup.execute"),
     "operator.update": ("operator.update.v1", "system.update"),
     "operator.uninstall": ("operator.uninstall.v1", "system.uninstall"),
+    "operator.support_bundle": ("operator.support_bundle.v1", "support_bundle.create"),
+    "operator.backup": ("operator.backup.v1", "backup.create"),
+    "operator.restore": ("operator.restore.v1", "restore.execute"),
+    "memory.delete_all": ("operator.memory.forget.v1", "memory.forget"),
+    "memory.export": ("operator.memory.export.v1", "memory.export"),
+    "memory.redact": ("operator.memory.redact.v1", "memory.redact"),
+    "memory.cleanup": ("operator.memory.compact.v1", "memory.compact"),
 }
 
 LEGACY_VISIBLE = {
-    "support bundle": "legacy/additive executor, future authorization migration batch",
-    "backup": "legacy/additive executor, future authorization migration batch",
-    "restore": "legacy mutating executor, future authorization migration batch",
-    "memory lifecycle": "preview-only or legacy lanes remain audit-visible",
     "file mutation": "not migrated in this checkpoint",
     "git mutation": "not migrated in this checkpoint",
     "service control": "not migrated in this checkpoint",
     "communications": "not migrated in this checkpoint",
+    "broader skill-pack mutation": "not migrated in this checkpoint",
 }
 
 

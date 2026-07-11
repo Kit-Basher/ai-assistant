@@ -18,9 +18,11 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BASE_URL = "http://127.0.0.1:8765"
 SECRET_PATTERNS = (
     re.compile(r"\b\d{8,12}:[A-Za-z0-9_-]{30,}\b"),
+    re.compile(r"bot\d{8,12}:[A-Za-z0-9_-]{30,}", re.IGNORECASE),
     re.compile(r"\b(?:sk|sk-proj|xoxb|ghp)_[A-Za-z0-9_-]{16,}\b"),
     re.compile(r"bearer\s+[A-Za-z0-9._-]{16,}", re.IGNORECASE),
 )
+TELEGRAM_BOT_URL_RE = re.compile(r"bot\d{8,12}:[A-Za-z0-9_-]{30,}", re.IGNORECASE)
 
 
 @dataclass
@@ -101,6 +103,10 @@ def _contains_secret(text: str) -> bool:
     return any(pattern.search(text) for pattern in SECRET_PATTERNS)
 
 
+def _redact_output(text: str) -> str:
+    return TELEGRAM_BOT_URL_RE.sub("bot[REDACTED]", str(text or ""))
+
+
 def _check(name: str, status: str, detail: str, command: str, next_action: str = "No action.") -> Check:
     if _contains_secret(detail):
         return Check(name, "FAIL", "Output looked like it exposed a secret/token.", command, "Redact this output.")
@@ -130,6 +136,8 @@ def _telegram_service_detail(timeout: float) -> str:
     logs_text = (logs.stdout or logs.stderr or "").strip()
     if not logs_text:
         logs_text = "No recent service log entries."
+    status_text = _redact_output(status_text)
+    logs_text = _redact_output(logs_text)
     return f"systemctl rc={status.returncode}: {status_text[:700]}\njournalctl rc={logs.returncode}: {logs_text[:700]}"
 
 

@@ -21,8 +21,9 @@ Summary:
   activation marker. Purge remains unsupported.
 - Release warnings are zero at the v0.2.1 checkpoint.
 - The next phase is Tool Authorization and Plan Mode Maturity. Capability
-  Policy Schema and Central Authorization Gate v1 are complete; Universal Plan
-  Mode Enforcement v1 is the active checkpoint.
+  Policy Schema and Central Authorization Gate v1 and Universal Plan Mode
+  Enforcement v1 are complete; Executor Authorization Migration v1 is the
+  active checkpoint.
 
 ## Recent Release Tags
 
@@ -30,7 +31,8 @@ Summary:
 | --- | --- | --- | --- |
 | `v0.2.1` | 2026-07-10 | `f900954` | Lifecycle and release-hardening closure. |
 | `v0.2.2-capability-policy-schema-v1` | 2026-07-10 | `514aef3` | Capability Policy Schema v1 and central authorization gate foundation. |
-| `v0.2.2-universal-plan-mode-v1` | not cut | pending | Recommended checkpoint for Universal Plan Mode Enforcement v1. |
+| `v0.2.2-universal-plan-mode-v1` | 2026-07-10 | `401b6e5` | Universal Mutation Plan v1 and shared confirmation/receipt contract. |
+| `v0.2.2-executor-authorization-migration-v1` | not cut | pending | Recommended checkpoint for Backup v1, Restore v1, support-bundle, and memory lifecycle authorization migration. |
 | `v0.2.0-managed-searxng` | 2026-06-14 | `f26ba6f` | Managed local SearXNG safe web search. |
 | `v0.2.0-plan-mode-policy` | 2026-06-14 | `e88281b` | Central Plan Mode policy layer. |
 | `v0.2.0-plan-mode-pack-lifecycle` | 2026-06-14 | `7096852` | Plan Mode enforcement for external pack lifecycle writes. |

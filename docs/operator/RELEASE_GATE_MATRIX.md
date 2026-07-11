@@ -157,6 +157,13 @@ compliance, receipt metadata, direct package mutation blocking, shell trusted
 context requirements, and explicit warnings for legacy/unmigrated mutation
 areas.
 
+`executor_authorization_migration_smoke.py` is the focused Executor
+Authorization Migration v1 proof. It verifies Backup v1 creation, Restore v1
+fixture execution, support-bundle creation, memory lifecycle mutation
+classification, common Plan/receipt metadata, and direct lower-level bypass
+blocking for migrated artifact helpers. It uses isolated fixtures and does not
+overwrite live memory or live Personal Agent state.
+
 `executor_registry_smoke.py` is the installed Executor Registry v1 gate. It
 proves preview-only memory delete plans do not execute; live daily-driver
 uninstall confirmation is guarded with `mutated=false`; cleanup plans are

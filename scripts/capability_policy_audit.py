@@ -24,16 +24,21 @@ MIGRATED_EXECUTORS = {
     "operator.cleanup": "cleanup.execute",
     "operator.update": "system.update",
     "operator.uninstall": "system.uninstall",
+    "operator.support_bundle": "support_bundle.create",
+    "operator.backup": "backup.create",
+    "operator.restore": "restore.execute",
+    "memory.delete_all": "memory.forget",
+    "memory.export": "memory.export",
+    "memory.redact": "memory.redact",
+    "memory.cleanup": "memory.compact",
 }
 
 LEGACY_UNMIGRATED = {
-    "operator.support_bundle": "support bundle creation remains registry legacy in this checkpoint",
-    "operator.backup": "Backup v1 remains behaviorally unchanged and audit-visible",
-    "operator.restore": "Restore v1 remains behaviorally unchanged and audit-visible",
-    "memory.lifecycle": "memory lifecycle mutation lanes remain preview-only or legacy",
     "files.*": "file mutation tools are not migrated in v1",
     "git.*": "git mutation tools are not migrated in v1",
+    "system.service.*": "service-control mutation tools are not migrated in v1",
     "communications.*": "external communication mutation adapters are not enabled as core capabilities",
+    "skill_pack.*": "broader skill-pack mutation paths remain future migration work",
 }
 
 
@@ -63,7 +68,19 @@ def run() -> list[Check]:
             checks.append(_pass(f"{action_type} bound", expected))
         else:
             checks.append(_fail(f"{action_type} bound", f"actual={actual!r} expected={expected!r}"))
-    for cap_id in ("system.update", "system.uninstall", "system.package.install", "cleanup.execute"):
+    for cap_id in (
+        "system.update",
+        "system.uninstall",
+        "system.package.install",
+        "cleanup.execute",
+        "backup.create",
+        "restore.execute",
+        "support_bundle.create",
+        "memory.forget",
+        "memory.export",
+        "memory.redact",
+        "memory.compact",
+    ):
         definition = registry.get(cap_id)
         if definition is None:
             checks.append(_fail(f"{cap_id} registered"))

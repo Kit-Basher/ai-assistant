@@ -79,6 +79,11 @@ fresh Debian VM install proof passes.
   direct shell package bypass blocking, cancellation, expiry, duplicate
   handling, changed-target rejection, uninstall activation blocking, receipt
   metadata, and documented legacy visibility.
+- `python scripts/executor_authorization_migration_smoke.py` covers Backup v1,
+  Restore v1, support-bundle creation, and memory lifecycle mutation
+  classification under central capability policy and Universal Plan metadata.
+  It uses isolated fixtures and proves backup/support/restore direct helper
+  bypasses fail with `mutated=false`.
 
 ## Release Blockers
 
@@ -94,9 +99,9 @@ fresh Debian VM install proof passes.
 
 - Broader managed-action journal rollout is intentionally paused.
 - Universal capability migration is intentionally incomplete. File, Git,
-  communication, service-control, backup, restore, and support-bundle mutation
-  paths remain legacy/unmigrated audit findings unless another bounded policy
-  already controls them.
+  communication, service-control, and broader skill-pack mutation paths remain
+  legacy/unmigrated audit findings unless another bounded policy already
+  controls them.
 - Startup auto-recovery that mutates state is intentionally absent.
 - Direct llama.cpp binary/library management is absent.
 - MCP/tool runtime execution is absent.

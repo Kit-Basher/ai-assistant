@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from agent.orchestrator import Orchestrator
+from agent.capability_policy import POLICY_SCHEMA_VERSION
 from agent.executor_registry import restore_backup_v1
 from memory.db import MemoryDB
 
@@ -175,6 +176,14 @@ def run() -> list[Check]:
                                 "db_path": str(Path(rollback_db.db_path)),
                                 "backup_root": str(fake_home / ".local/share/personal-agent/backups"),
                                 "restore_backup_path": str(rollback_backup),
+                                "trusted_invocation_context": {
+                                    "capability_id": "restore.execute",
+                                    "executor_id": "operator.restore.v1",
+                                    "authorization_decision_id": "authz-restore-smoke",
+                                    "plan_fingerprint": "",
+                                    "operation_id": "restore-smoke-rollback",
+                                    "policy_version": POLICY_SCHEMA_VERSION,
+                                },
                             },
                         )
                     checks.append(

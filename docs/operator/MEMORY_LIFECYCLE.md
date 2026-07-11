@@ -65,6 +65,11 @@ The smoke talks to `http://127.0.0.1:8765` and verifies:
 
 ## Remaining Gaps
 
-Do not claim full memory lifecycle completion yet. Bounded executors for
-thread/global memory toggles, export, redaction, dedupe, forget-topic, and
-delete-all are still future work and must keep Plan Mode confirmation.
+Executor Authorization Migration v1 classifies memory mutation lanes as
+`memory.forget`, `memory.export`, `memory.redact`, or `memory.compact` and
+requires Universal Mutation Plan metadata for those lanes.
+
+Do not claim full memory lifecycle execution completion yet. Bounded executors
+for thread/global memory toggles, export, redaction, dedupe, forget-topic, and
+delete-all are still future work where not already implemented; they must keep
+Plan Mode confirmation and fail closed with `mutated=false` while preview-only.

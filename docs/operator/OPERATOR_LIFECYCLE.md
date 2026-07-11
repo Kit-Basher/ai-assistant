@@ -49,12 +49,15 @@ The mutating prompts return a preview with:
 
 For this checkpoint, lifecycle execution is still partial but no longer purely
 preview-only. Backup, support bundle, cleanup, restore, update, and uninstall
-have bounded Executor Registry paths. Host Lifecycle Runner v1 is the shared
-external runner for update/uninstall fixture handoff. Update v1 is intentionally
-conservative for the live installed runtime: dirty checkouts and non-no-op live
-promotion are blocked unless a rollback-safe active-install handoff is proven.
-Uninstall v1 is also conservative: isolated fixture removal is executable, while
-live daily-driver uninstall is guarded and returns a no-mutation blocker.
+have bounded Executor Registry paths with central capability authorization.
+Memory lifecycle mutation lanes are classified under capability policy but
+remain preview-only where no bounded executor exists. Host Lifecycle Runner v1
+is the shared external runner for update/uninstall fixture handoff. Update v1 is
+intentionally conservative for the live installed runtime: dirty checkouts and
+non-no-op live promotion are blocked unless a rollback-safe active-install
+handoff is proven. Uninstall v1 is also conservative: isolated fixture removal
+is executable, while live daily-driver uninstall is guarded and returns a
+no-mutation blocker.
 
 ## Proof
 

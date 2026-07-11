@@ -12,10 +12,15 @@ Migrated in this checkpoint:
 - `cleanup.execute` through `operator.cleanup.v1`
 - `system.update` through `operator.update.v1`
 - `system.uninstall` through `operator.uninstall.v1`
+- `backup.create` through `operator.backup.v1`
+- `restore.execute` through `operator.restore.v1`
+- `support_bundle.create` through `operator.support_bundle.v1`
+- memory lifecycle preview lanes through `memory.forget`, `memory.export`,
+  `memory.redact`, and `memory.compact`
 
-Legacy/unmigrated mutation areas remain audit-visible: support bundle, backup,
-restore, memory lifecycle, file mutation, Git mutation, service control, and
-communications.
+Legacy/unmigrated mutation areas remain audit-visible: file mutation, Git
+mutation, service control, communications, and broader skill-pack mutation
+paths.
 
 ## Mutation Plan Schema
 
@@ -77,9 +82,27 @@ before mutation:
   runner readiness
 - uninstall rechecks local activation, preserve-data inventory, final backup
   readiness, and runner readiness
+- backup rechecks destination and source summary boundaries
+- restore rechecks the Backup v1 manifest, checksum/fingerprint, selected
+  categories, target state, and safety snapshot destination
+- support bundle rechecks local artifact creation and redaction boundaries
+- memory mutation lanes recheck target scope and fingerprints where an executor
+  is implemented
 
 Lifecycle-specific operation records remain separate from the conversational
 Mutation Plan.
+
+## Backup, Restore, Support Bundle, And Memory
+
+Executor Authorization Migration v1 extends this contract to Backup v1, Restore
+v1, support-bundle creation, and memory lifecycle mutation classification.
+Backup, restore, and support-bundle execution now require a trusted invocation
+context issued by the Executor Registry. Direct lower-level calls fail with
+`generic_bypass_blocked` and `mutated=false`.
+
+Memory lifecycle destructive execution remains preview-only where no executor
+exists, but the mutation lanes now have stable capabilities and Universal Plan
+metadata.
 
 ## Package Executor
 
@@ -129,6 +152,7 @@ Run:
 ```bash
 python scripts/universal_plan_mode_smoke.py
 python scripts/universal_plan_mode_audit.py
+python scripts/executor_authorization_migration_smoke.py
 python scripts/capability_policy_smoke.py
 python scripts/capability_policy_audit.py
 python scripts/plan_mode_v2_smoke.py

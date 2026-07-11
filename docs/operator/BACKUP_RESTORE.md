@@ -46,6 +46,13 @@ Restore Executor v1 restores only supported non-secret Backup v1 state. It does
 not restore raw secrets, logs, arbitrary files, model caches, runtime releases,
 or executable pack source.
 
+Executor Authorization Migration v1 binds restore execution to
+`restore.execute`. Confirmation uses Universal Mutation Plan metadata, central
+capability authorization, trusted invocation context, a pre-restore safety
+snapshot, and receipt metadata. Direct restore helper calls without trusted
+context are blocked before locks, staging directories, snapshots, or state
+changes are created.
+
 For older full-path manual backups:
 
 1. Stop the user services.

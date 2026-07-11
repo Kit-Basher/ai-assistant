@@ -5,12 +5,26 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.2-capability-policy-schema-v1`
-- Commit: `514aef3960847593fa9b62455f6fdffecf6da2bd`
+- Tag: `v0.2.2-universal-plan-mode-v1`
+- Commit: `401b6e5e46b1581b02c8697cc1b3480d5af20361`
 - Fresh Debian VM proof: not run
-- Release status: v0.2.1 lifecycle and release-hardening phase closed; current work is Universal Plan Mode enforcement on top of Capability Policy v1
+- Release status: v0.2.1 lifecycle and release-hardening phase closed; current work is executor authorization migration on top of Capability Policy v1 and Universal Plan Mode v1
 
-## Active Phase: Universal Plan Mode Enforcement v1
+## Active Phase: Executor Authorization Migration v1
+
+Universal Plan Mode v1 established one mutation protocol.
+
+This phase migrates the next legacy executor group:
+
+- backup creation;
+- restore execution;
+- support-bundle creation;
+- memory lifecycle mutation.
+
+Files, Git, service control, communications, and broader skill-pack mutations
+remain future migration work.
+
+## Completed Checkpoint: Universal Plan Mode Enforcement v1
 
 Capability Policy Schema v1 established the authorization vocabulary and central
 gate.

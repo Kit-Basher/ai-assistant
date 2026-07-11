@@ -20,6 +20,8 @@ future work where to look first.
 | External pack format and safety | `docs/design/EXTERNAL_PACK_FORMAT.md` |
 | Plan Mode policy | `docs/design/PLAN_MODE_POLICY.md` |
 | Capability policy and central authorization gate | `docs/operator/CAPABILITY_POLICY_V1.md` |
+| Universal Mutation Plan contract | `docs/operator/UNIVERSAL_PLAN_MODE_V1.md` |
+| Current executor authorization migration | `docs/operator/EXECUTOR_AUTHORIZATION_MIGRATION_V1.md` |
 | Managed local services and sandboxed tools | `docs/design/MANAGED_LOCAL_SERVICES_AND_SANDBOXED_TOOLS.md` |
 | Managed SearXNG operator details | `docs/operator/SAFE_WEB_SEARCH.md` |
 | Managed-action reliability | `docs/design/MANAGED_ACTION_RELIABILITY_STANDARD.md` and `docs/operator/MANAGED_ACTION_RELIABILITY_AUDIT.md` |
@@ -97,9 +99,12 @@ because they overlap current docs.
 ## Current Next Work
 
 1. Build Tool Authorization and Plan Mode maturity on top of the completed
-   v0.2.1 lifecycle roadmap. The current active checkpoint is Universal Plan
-   Mode Enforcement v1, following Capability Policy Schema and Central
-   Authorization Gate v1.
+   v0.2.1 lifecycle roadmap. The current active checkpoint is Executor
+   Authorization Migration v1, following Capability Policy Schema and Universal
+   Plan Mode Enforcement v1. This batch migrates Backup v1, Restore v1,
+   support-bundle creation, and memory lifecycle mutation. Files, Git, service
+   control, communications, and broader skill-pack mutation paths remain future
+   work.
 2. Keep managed SearXNG live verification separate from isolated proof:
    `prove_core_workflows.py` can honestly report search `BLOCKED` when no
    backend is configured, while live `/search/status` proves the configured

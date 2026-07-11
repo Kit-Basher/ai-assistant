@@ -39,6 +39,7 @@ from agent.executor_registry import (
     restore_backup_v1,
     support_bundle_redact,
 )
+from agent.capability_policy import POLICY_SCHEMA_VERSION
 
 
 def _plan(**overrides):
@@ -50,6 +51,26 @@ def _plan(**overrides):
         "executor_status": "enabled",
     }
     payload.update(overrides)
+    return payload
+
+
+def _trusted_action(
+    action: dict,
+    *,
+    capability_id: str,
+    executor_id: str,
+    plan: dict | None = None,
+) -> dict:
+    payload = dict(action)
+    plan_payload = plan if isinstance(plan, dict) else {}
+    payload["trusted_invocation_context"] = {
+        "capability_id": capability_id,
+        "executor_id": executor_id,
+        "authorization_decision_id": "authz-test",
+        "plan_fingerprint": str(plan_payload.get("plan_fingerprint") or ""),
+        "operation_id": str(plan_payload.get("plan_id") or payload.get("pending_id") or "confirm-test"),
+        "policy_version": POLICY_SCHEMA_VERSION,
+    }
     return payload
 
 
@@ -249,12 +270,12 @@ class ExecutorRegistryTests(unittest.TestCase):
         registry.register(
             ExecutorSpec(
                 executor_id="test.enabled",
-                action_type="operator.support_bundle",
+                action_type="test.fixture",
                 status="enabled",
                 run=_run,
             )
         )
-        result = registry.execute_confirmed_plan(plan=_plan(), action={"pending_id": "confirm-test"})
+        result = registry.execute_confirmed_plan(plan=_plan(action_type="test.fixture"), action={"pending_id": "confirm-test"})
         payload = result.to_dict()
         for key in (
             "ok",
@@ -709,8 +730,8 @@ class ExecutorRegistryTests(unittest.TestCase):
             called = True
             return {"ok": True, "mutated": True}
 
-        registry.register(ExecutorSpec(executor_id="test.enabled", action_type="operator.support_bundle", status="enabled", run=_run))
-        result = registry.execute_confirmed_plan(plan=_plan(plan_id="confirm-a"), action={"pending_id": "confirm-b"})
+        registry.register(ExecutorSpec(executor_id="test.enabled", action_type="test.fixture", status="enabled", run=_run))
+        result = registry.execute_confirmed_plan(plan=_plan(plan_id="confirm-a", action_type="test.fixture"), action={"pending_id": "confirm-b"})
         self.assertFalse(result.ok)
         self.assertFalse(result.mutated)
         self.assertEqual("plan_id_mismatch", result.error_code)
@@ -722,8 +743,8 @@ class ExecutorRegistryTests(unittest.TestCase):
         def _run(plan, action):
             raise RuntimeError("boom")
 
-        registry.register(ExecutorSpec(executor_id="test.boom", action_type="operator.support_bundle", status="enabled", run=_run))
-        result = registry.execute_confirmed_plan(plan=_plan(), action={"pending_id": "confirm-test"})
+        registry.register(ExecutorSpec(executor_id="test.boom", action_type="test.fixture", status="enabled", run=_run))
+        result = registry.execute_confirmed_plan(plan=_plan(action_type="test.fixture"), action={"pending_id": "confirm-test"})
         self.assertFalse(result.ok)
         self.assertFalse(result.mutated)
         self.assertEqual("executor_exception_before_verified_mutation", result.error_code)
@@ -740,8 +761,8 @@ class ExecutorRegistryTests(unittest.TestCase):
                 details={"artifact_path": "/tmp/personal-agent-partial"},
             )
 
-        registry.register(ExecutorSpec(executor_id="test.partial", action_type="operator.support_bundle", status="enabled", run=_run))
-        result = registry.execute_confirmed_plan(plan=_plan(), action={"pending_id": "confirm-test"})
+        registry.register(ExecutorSpec(executor_id="test.partial", action_type="test.fixture", status="enabled", run=_run))
+        result = registry.execute_confirmed_plan(plan=_plan(action_type="test.fixture"), action={"pending_id": "confirm-test"})
         self.assertFalse(result.ok)
         self.assertFalse(result.mutated)
         self.assertEqual("executor_partial_failure", result.error_code)
@@ -900,13 +921,17 @@ class ExecutorRegistryTests(unittest.TestCase):
         backup = self._restore_fixture_backup(root, value="new")
         result = restore_backup_v1(
             _plan(action_type="operator.restore"),
-            {
+            _trusted_action(
+                {
                 "pending_id": "confirm-test",
                 "state_root": str(root),
                 "db_path": str(db_path),
                 "backup_root": str(root / "backups"),
                 "restore_backup_path": str(backup),
-            },
+                },
+                capability_id="restore.execute",
+                executor_id="operator.restore.v1",
+            ),
         )
         self.assertTrue(result["ok"])
         self.assertTrue(result["mutated"])
@@ -929,13 +954,17 @@ class ExecutorRegistryTests(unittest.TestCase):
         backup = self._restore_fixture_backup(root, value="same")
         result = restore_backup_v1(
             _plan(action_type="operator.restore"),
-            {
+            _trusted_action(
+                {
                 "pending_id": "confirm-test",
                 "state_root": str(root),
                 "db_path": str(db_path),
                 "backup_root": str(root / "backups"),
                 "restore_backup_path": str(backup),
-            },
+                },
+                capability_id="restore.execute",
+                executor_id="operator.restore.v1",
+            ),
         )
         self.assertTrue(result["ok"])
         self.assertFalse(result["mutated"])
@@ -948,14 +977,18 @@ class ExecutorRegistryTests(unittest.TestCase):
         backup = self._restore_fixture_backup(root, value="new")
         result = restore_backup_v1(
             _plan(action_type="operator.restore"),
-            {
+            _trusted_action(
+                {
                 "pending_id": "confirm-test",
                 "state_root": str(root),
                 "db_path": str(db_path),
                 "backup_root": str(root / "backups"),
                 "restore_backup_path": str(backup),
                 "restore_fingerprint": "different",
-            },
+                },
+                capability_id="restore.execute",
+                executor_id="operator.restore.v1",
+            ),
         )
         self.assertFalse(result["ok"])
         self.assertFalse(result["mutated"])
@@ -981,13 +1014,17 @@ class ExecutorRegistryTests(unittest.TestCase):
         with patch("agent.executor_registry._current_preferences", side_effect=_current_with_bad_verification):
             result = restore_backup_v1(
                 _plan(action_type="operator.restore"),
-                {
+                _trusted_action(
+                    {
                     "pending_id": "confirm-test",
                     "state_root": str(root),
                     "db_path": str(db_path),
                     "backup_root": str(root / "backups"),
                     "restore_backup_path": str(backup),
-                },
+                    },
+                    capability_id="restore.execute",
+                    executor_id="operator.restore.v1",
+                ),
             )
         self.assertFalse(result["ok"])
         self.assertFalse(result["mutated"])
@@ -1007,8 +1044,8 @@ class ExecutorRegistryTests(unittest.TestCase):
         def _run(plan, action):
             return "not a result"
 
-        registry.register(ExecutorSpec(executor_id="test.malformed", action_type="operator.support_bundle", status="enabled", run=_run))
-        result = registry.execute_confirmed_plan(plan=_plan(), action={"pending_id": "confirm-test"})
+        registry.register(ExecutorSpec(executor_id="test.malformed", action_type="test.fixture", status="enabled", run=_run))
+        result = registry.execute_confirmed_plan(plan=_plan(action_type="test.fixture"), action={"pending_id": "confirm-test"})
         self.assertFalse(result.ok)
         self.assertFalse(result.mutated)
         self.assertEqual("executor_exception_before_verified_mutation", result.error_code)
@@ -1065,7 +1102,10 @@ class ExecutorRegistryTests(unittest.TestCase):
             "executor_journal_recent": [{"confirmation_token": "confirm-secret", "api_key": "sk-secret"}],
         }
 
-        result = create_redacted_support_bundle(_plan(), action)
+        result = create_redacted_support_bundle(
+            _plan(),
+            _trusted_action(action, capability_id="support_bundle.create", executor_id="operator.support_bundle.v1"),
+        )
         artifact = Path(result["details"]["artifact_path"])
         manifest = json.loads((artifact / "manifest.json").read_text(encoding="utf-8"))
 
@@ -1090,6 +1130,33 @@ class ExecutorRegistryTests(unittest.TestCase):
         self.assertTrue(expected.issubset(set(manifest["included_files"])))
         for name in expected:
             self.assertTrue((artifact / name).is_file(), name)
+
+    def test_migrated_artifact_executors_block_direct_calls_without_trusted_context(self) -> None:
+        backup_result = create_additive_backup(
+            _plan(action_type="operator.backup"),
+            {"pending_id": "confirm-test", "backup_root": str(Path(self.tmpdir.name) / "backups")},
+        )
+        support_result = create_redacted_support_bundle(
+            _plan(action_type="operator.support_bundle"),
+            {"pending_id": "confirm-test"},
+        )
+        root = Path(self.tmpdir.name) / "state-bypass"
+        root.mkdir()
+        db_path = self._restore_fixture_db(root, initial_value="old")
+        restore_result = restore_backup_v1(
+            _plan(action_type="operator.restore"),
+            {
+                "pending_id": "confirm-test",
+                "state_root": str(root),
+                "db_path": str(db_path),
+                "backup_root": str(root / "backups"),
+                "restore_backup_path": str(root / "backups/missing"),
+            },
+        )
+        for result in (backup_result, support_result, restore_result):
+            self.assertFalse(result["ok"])
+            self.assertFalse(result["mutated"])
+            self.assertEqual("generic_bypass_blocked", result["error_code"])
 
     def test_support_bundle_redacts_sensitive_values(self) -> None:
         payload = {
@@ -1119,15 +1186,19 @@ class ExecutorRegistryTests(unittest.TestCase):
     def test_support_bundle_output_does_not_write_raw_secrets(self) -> None:
         result = create_redacted_support_bundle(
             _plan(),
-            {
-                "pending_id": "confirm-test",
-                "diagnostics": {
-                    "telegram_status": {"token": "123456:telegram-secret-token"},
-                    "ready": {"message": "Bearer abc.def.ghi"},
-                    "search_status": {"api_key": "sk-test-secret"},
+            _trusted_action(
+                {
+                    "pending_id": "confirm-test",
+                    "diagnostics": {
+                        "telegram_status": {"token": "123456:telegram-secret-token"},
+                        "ready": {"message": "Bearer abc.def.ghi"},
+                        "search_status": {"api_key": "sk-test-secret"},
+                    },
+                    "executor_journal_recent": [{"password": "letmein"}],
                 },
-                "executor_journal_recent": [{"password": "letmein"}],
-            },
+                capability_id="support_bundle.create",
+                executor_id="operator.support_bundle.v1",
+            ),
         )
         artifact = Path(result["details"]["artifact_path"])
         combined = "\n".join(path.read_text(encoding="utf-8") for path in artifact.glob("*.json"))
@@ -1140,28 +1211,32 @@ class ExecutorRegistryTests(unittest.TestCase):
         huge_payload = "x" * (BACKUP_MAX_FILE_BYTES + 1024)
         result = create_redacted_support_bundle(
             _plan(),
-            {
-                "pending_id": "confirm-test",
-                "diagnostics": {"version": {"git_commit": "abc123", "runtime_instance": "stable"}},
-                "executor_journal_recent": [
-                    {
-                        "journal_id": "executor-old",
-                        "event": "executor_result",
-                        "plan": {"plan_id": "old-plan", "action_type": "operator.backup", "target": "backup"},
-                        "action": {"executor_journal_recent": [{"large": huge_payload}]},
-                        "result": {
+            _trusted_action(
+                {
+                    "pending_id": "confirm-test",
+                    "diagnostics": {"version": {"git_commit": "abc123", "runtime_instance": "stable"}},
+                    "executor_journal_recent": [
+                        {
                             "journal_id": "executor-old",
-                            "plan_id": "old-plan",
-                            "action_type": "operator.backup",
-                            "target": "backup",
-                            "executor_id": "operator.backup.v1",
-                            "ok": True,
-                            "mutated": True,
-                            "resources_touched": [huge_payload],
-                        },
-                    }
-                ],
-            },
+                            "event": "executor_result",
+                            "plan": {"plan_id": "old-plan", "action_type": "operator.backup", "target": "backup"},
+                            "action": {"executor_journal_recent": [{"large": huge_payload}]},
+                            "result": {
+                                "journal_id": "executor-old",
+                                "plan_id": "old-plan",
+                                "action_type": "operator.backup",
+                                "target": "backup",
+                                "executor_id": "operator.backup.v1",
+                                "ok": True,
+                                "mutated": True,
+                                "resources_touched": [huge_payload],
+                            },
+                        }
+                    ],
+                },
+                capability_id="support_bundle.create",
+                executor_id="operator.support_bundle.v1",
+            ),
         )
         artifact = Path(result["details"]["artifact_path"])
         journal_summary = (artifact / "executor_registry_journal_summary.json").read_text(encoding="utf-8")
@@ -1183,10 +1258,14 @@ class ExecutorRegistryTests(unittest.TestCase):
         with patch("agent.executor_registry._write_support_json", side_effect=_fail_after_first):
             result = create_redacted_support_bundle(
                 _plan(),
-                {
-                    "pending_id": "confirm-test",
-                    "diagnostics": {"version": {"git_commit": "abc123", "runtime_instance": "stable"}},
-                },
+                _trusted_action(
+                    {
+                        "pending_id": "confirm-test",
+                        "diagnostics": {"version": {"git_commit": "abc123", "runtime_instance": "stable"}},
+                    },
+                    capability_id="support_bundle.create",
+                    executor_id="operator.support_bundle.v1",
+                ),
             )
         artifact = Path(result["details"]["artifact_path"])
         self.assertFalse(result["ok"])
@@ -1200,24 +1279,28 @@ class ExecutorRegistryTests(unittest.TestCase):
         backup_root = Path(self.tmpdir.name) / "backups"
         result = create_additive_backup(
             _plan(action_type="operator.backup", target="backup assistant"),
-            {
-                "pending_id": "confirm-test",
-                "backup_root": str(backup_root),
-                "diagnostics": {
-                    "version": {"git_commit": "abc123", "runtime_instance": "stable"},
-                    "ready": {"ready": True, "runtime_mode": "READY", "state_label": "Ready"},
-                    "state": {"ok": True, "ready": True},
-                    "search_status": {"enabled": True, "available": True},
-                    "telegram_status": {"configured": True, "token": "123456:telegram-secret-token"},
-                    "packs_state": {"ok": True, "counts": {"enabled": 1}},
+            _trusted_action(
+                {
+                    "pending_id": "confirm-test",
+                    "backup_root": str(backup_root),
+                    "diagnostics": {
+                        "version": {"git_commit": "abc123", "runtime_instance": "stable"},
+                        "ready": {"ready": True, "runtime_mode": "READY", "state_label": "Ready"},
+                        "state": {"ok": True, "ready": True},
+                        "search_status": {"enabled": True, "available": True},
+                        "telegram_status": {"configured": True, "token": "123456:telegram-secret-token"},
+                        "packs_state": {"ok": True, "counts": {"enabled": 1}},
+                    },
+                    "backup_sources": {
+                        "state_database": {"path": str(Path.home() / ".local/share/personal-agent/memory.db"), "size_bytes": 123},
+                        "preferences": {"count": 2},
+                        "memory": {"summary_count": 1},
+                    },
+                    "executor_journal_recent": [{"api_key": "sk-secret"}],
                 },
-                "backup_sources": {
-                    "state_database": {"path": str(Path.home() / ".local/share/personal-agent/memory.db"), "size_bytes": 123},
-                    "preferences": {"count": 2},
-                    "memory": {"summary_count": 1},
-                },
-                "executor_journal_recent": [{"api_key": "sk-secret"}],
-            },
+                capability_id="backup.create",
+                executor_id="operator.backup.v1",
+            ),
         )
         artifact = Path(result["details"]["artifact_path"])
         manifest = json.loads((artifact / "manifest.json").read_text(encoding="utf-8"))
@@ -1248,17 +1331,21 @@ class ExecutorRegistryTests(unittest.TestCase):
     def test_backup_v1_redacts_and_excludes_raw_secret_material(self) -> None:
         result = create_additive_backup(
             _plan(action_type="operator.backup"),
-            {
-                "pending_id": "confirm-test",
-                "backup_root": str(Path(self.tmpdir.name) / "backups"),
-                "diagnostics": {
-                    "telegram_status": {"token": "123456:telegram-secret-token"},
-                    "search_status": {"api_key": "sk-test-secret"},
-                    "ready": {"message": "Bearer abc.def.ghi"},
+            _trusted_action(
+                {
+                    "pending_id": "confirm-test",
+                    "backup_root": str(Path(self.tmpdir.name) / "backups"),
+                    "diagnostics": {
+                        "telegram_status": {"token": "123456:telegram-secret-token"},
+                        "search_status": {"api_key": "sk-test-secret"},
+                        "ready": {"message": "Bearer abc.def.ghi"},
+                    },
+                    "backup_sources": {"state_database": {"path": str(Path.home() / ".local/share/personal-agent/secrets.enc.json")}},
+                    "executor_journal_recent": [{"password": "letmein"}],
                 },
-                "backup_sources": {"state_database": {"path": str(Path.home() / ".local/share/personal-agent/secrets.enc.json")}},
-                "executor_journal_recent": [{"password": "letmein"}],
-            },
+                capability_id="backup.create",
+                executor_id="operator.backup.v1",
+            ),
         )
         artifact = Path(result["details"]["artifact_path"])
         combined = "\n".join(path.read_text(encoding="utf-8") for path in artifact.glob("*.json"))
@@ -1274,29 +1361,33 @@ class ExecutorRegistryTests(unittest.TestCase):
         huge_payload = "x" * (BACKUP_MAX_FILE_BYTES + 1024)
         result = create_additive_backup(
             _plan(action_type="operator.backup"),
-            {
-                "pending_id": "confirm-test",
-                "backup_root": str(Path(self.tmpdir.name) / "backups"),
-                "diagnostics": {"version": {"git_commit": "abc123", "runtime_instance": "stable"}},
-                "executor_journal_recent": [
-                    {
-                        "journal_id": "executor-old",
-                        "event": "executor_result",
-                        "plan": {"plan_id": "old-plan", "action_type": "operator.backup", "target": "backup"},
-                        "action": {"executor_journal_recent": [{"large": huge_payload}]},
-                        "result": {
+            _trusted_action(
+                {
+                    "pending_id": "confirm-test",
+                    "backup_root": str(Path(self.tmpdir.name) / "backups"),
+                    "diagnostics": {"version": {"git_commit": "abc123", "runtime_instance": "stable"}},
+                    "executor_journal_recent": [
+                        {
                             "journal_id": "executor-old",
-                            "plan_id": "old-plan",
-                            "action_type": "operator.backup",
-                            "target": "backup",
-                            "executor_id": "operator.backup.v1",
-                            "ok": True,
-                            "mutated": True,
-                            "resources_touched": [huge_payload],
-                        },
-                    }
-                ],
-            },
+                            "event": "executor_result",
+                            "plan": {"plan_id": "old-plan", "action_type": "operator.backup", "target": "backup"},
+                            "action": {"executor_journal_recent": [{"large": huge_payload}]},
+                            "result": {
+                                "journal_id": "executor-old",
+                                "plan_id": "old-plan",
+                                "action_type": "operator.backup",
+                                "target": "backup",
+                                "executor_id": "operator.backup.v1",
+                                "ok": True,
+                                "mutated": True,
+                                "resources_touched": [huge_payload],
+                            },
+                        }
+                    ],
+                },
+                capability_id="backup.create",
+                executor_id="operator.backup.v1",
+            ),
         )
         artifact = Path(result["details"]["artifact_path"])
         journal_summary = (artifact / "executor_registry_journal_summary.json").read_text(encoding="utf-8")
@@ -1322,11 +1413,15 @@ class ExecutorRegistryTests(unittest.TestCase):
         with patch("agent.executor_registry._write_backup_json", side_effect=_fail_after_first):
             result = create_additive_backup(
                 _plan(action_type="operator.backup"),
-                {
-                    "pending_id": "confirm-test",
-                    "backup_root": str(backup_root),
-                    "diagnostics": {"version": {"git_commit": "abc123", "runtime_instance": "stable"}},
-                },
+                _trusted_action(
+                    {
+                        "pending_id": "confirm-test",
+                        "backup_root": str(backup_root),
+                        "diagnostics": {"version": {"git_commit": "abc123", "runtime_instance": "stable"}},
+                    },
+                    capability_id="backup.create",
+                    executor_id="operator.backup.v1",
+                ),
             )
         artifact = Path(result["details"]["artifact_path"])
         self.assertFalse(result["ok"])
@@ -1340,7 +1435,11 @@ class ExecutorRegistryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             create_additive_backup(
                 _plan(action_type="operator.backup"),
-                {"pending_id": "confirm-test", "backup_root": "/etc/personal-agent-backups"},
+                _trusted_action(
+                    {"pending_id": "confirm-test", "backup_root": "/etc/personal-agent-backups"},
+                    capability_id="backup.create",
+                    executor_id="operator.backup.v1",
+                ),
             )
 
 

@@ -84,6 +84,11 @@ Confirm:
   feels wrong; this gate verifies preview-only executor refusals, the safe
   support-bundle executor, journal ids, stale confirmation rejection, and
   thread/session binding through the installed `/chat` API
+- run `python scripts/executor_authorization_migration_smoke.py` when
+  backup/restore/support-bundle/memory authorization changes; this gate uses
+  isolated fixtures to verify central capability policy, Universal Plan
+  metadata, receipts, and direct lower-level bypass blocking without live
+  restore or live memory overwrite
 - run `python scripts/support_bundle_v2_smoke.py` when diagnostics packaging
   feels wrong; this gate verifies the Plan Mode-gated support-bundle executor,
   manifest, bounded summary files, redaction, journal id, and scoped rollback

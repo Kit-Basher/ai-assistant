@@ -671,6 +671,7 @@ class Orchestrator:
                 run=create_redacted_support_bundle,
                 rollback_available=True,
                 rollback_hint="Remove only the newly created support bundle directory.",
+                capability_id="support_bundle.create",
             )
         )
         self._executor_registry.register(
@@ -681,6 +682,7 @@ class Orchestrator:
                 run=create_additive_backup,
                 rollback_available=True,
                 rollback_hint="Remove only the newly created backup directory.",
+                capability_id="backup.create",
             )
         )
         self._executor_registry.register(
@@ -713,6 +715,7 @@ class Orchestrator:
                 run=restore_backup_v1,
                 rollback_available=True,
                 rollback_hint="Use the pre-restore safety snapshot created before restore mutation.",
+                capability_id="restore.execute",
             )
         )
         self._executor_registry.register(
@@ -3133,9 +3136,16 @@ class Orchestrator:
     def _canonical_plan_executor_id(action_type: str) -> str:
         return {
             "package.install": "operator.package.install.v1",
+            "operator.support_bundle": "operator.support_bundle.v1",
+            "operator.backup": "operator.backup.v1",
+            "operator.restore": "operator.restore.v1",
             "operator.cleanup": "operator.cleanup.v1",
             "operator.update": "operator.update.v1",
             "operator.uninstall": "operator.uninstall.v1",
+            "memory.delete_all": "operator.memory.forget.v1",
+            "memory.export": "operator.memory.export.v1",
+            "memory.redact": "operator.memory.redact.v1",
+            "memory.cleanup": "operator.memory.compact.v1",
         }.get(str(action_type or "").strip().lower(), "")
 
     def _build_canonical_pending_plan(
@@ -4161,7 +4171,15 @@ class Orchestrator:
         if operation.startswith("operator_lifecycle_"):
             action_label = str(params.get("action_label") or operation.replace("operator_lifecycle_", "")).strip() or "operator action"
             plan = action.get("canonical_plan") if isinstance(action.get("canonical_plan"), dict) else {}
-            if mutation_plan_id and str(plan.get("capability_id") or "") in {"cleanup.execute", "system.update", "system.uninstall"}:
+            migrated_capabilities = {
+                "backup.create",
+                "restore.execute",
+                "support_bundle.create",
+                "cleanup.execute",
+                "system.update",
+                "system.uninstall",
+            }
+            if mutation_plan_id and str(plan.get("capability_id") or "") in migrated_capabilities:
                 self._mutation_plan_store.transition(mutation_plan_id, "executing")
             registry_action = dict(action)
             if operation == "operator_lifecycle_support_bundle":
@@ -4176,7 +4194,7 @@ class Orchestrator:
             result = self._executor_registry.execute_confirmed_plan(plan=plan, action=registry_action)
             result_payload = result.to_dict()
             if result.ok and result.mutated:
-                if mutation_plan_id and str(plan.get("capability_id") or "") in {"cleanup.execute", "system.update", "system.uninstall"}:
+                if mutation_plan_id and str(plan.get("capability_id") or "") in migrated_capabilities:
                     self._mutation_plan_store.transition(mutation_plan_id, "completed")
                 message = (
                     f"{action_label} executed through Executor Registry v1. "
@@ -4184,7 +4202,7 @@ class Orchestrator:
                 )
                 error_kind = None
             elif result.ok:
-                if mutation_plan_id and str(plan.get("capability_id") or "") in {"cleanup.execute", "system.update", "system.uninstall"}:
+                if mutation_plan_id and str(plan.get("capability_id") or "") in migrated_capabilities:
                     self._mutation_plan_store.transition(mutation_plan_id, "completed")
                 message = (
                     f"{action_label} completed through Executor Registry v1. "
@@ -4192,7 +4210,7 @@ class Orchestrator:
                 )
                 error_kind = None
             else:
-                if mutation_plan_id and str(plan.get("capability_id") or "") in {"cleanup.execute", "system.update", "system.uninstall"}:
+                if mutation_plan_id and str(plan.get("capability_id") or "") in migrated_capabilities:
                     self._mutation_plan_store.transition(mutation_plan_id, "failed")
                 message = (
                     f"{action_label} was confirmed, but the executor did not mutate state. "

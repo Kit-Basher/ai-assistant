@@ -2,8 +2,8 @@
 
 Checkpoint truth:
 
-- Tag: `v0.2.2-capability-policy-schema-v1`
-- Commit: `514aef3960847593fa9b62455f6fdffecf6da2bd`
+- Tag: `v0.2.2-universal-plan-mode-v1`
+- Commit: `401b6e5e46b1581b02c8697cc1b3480d5af20361`
 
 Capability Policy v1 is the first foundation checkpoint for centrally enforced
 assistant tool authorization. It does not migrate every executor. It defines the
@@ -49,6 +49,11 @@ Migrated read-only capabilities:
 - `system.package.inspect`
 - `system.service.inspect`
 - `system.lifecycle.status`
+- `backup.inspect`
+- `backup.validate`
+- `restore.inspect`
+- `support_bundle.inspect`
+- `memory.inspect`
 
 Migrated mutating capabilities:
 
@@ -56,6 +61,13 @@ Migrated mutating capabilities:
 - `cleanup.execute`
 - `system.update`
 - `system.uninstall`
+- `backup.create`
+- `restore.execute`
+- `support_bundle.create`
+- `memory.forget`
+- `memory.export`
+- `memory.redact`
+- `memory.compact`
 
 Legacy/unmigrated actions remain visible in audit output and are not claimed as
 centrally enforced.
@@ -92,6 +104,11 @@ Migrated executor definitions declare trusted capability ids:
 - `operator.update.v1` -> `system.update`
 - `operator.uninstall.v1` -> `system.uninstall`
 - `operator.package.install.v1` -> `system.package.install`
+- `operator.backup.v1` -> `backup.create`
+- `operator.restore.v1` -> `restore.execute`
+- `operator.support_bundle.v1` -> `support_bundle.create`
+- memory lifecycle preview lanes -> `memory.forget`, `memory.export`,
+  `memory.redact`, or `memory.compact`
 
 Package install is now an Executor Registry executor. The confirmed Plan Mode
 path gates `system.package.install`, creates trusted invocation context, and
@@ -137,8 +154,9 @@ still requires the local marker policy.
 
 ## Generic Bypass Prevention
 
-The shell package-install primitive now requires a trusted invocation context
-before actual mutation. A direct lower-level call without that context returns
+The shell package-install primitive and migrated backup, restore, and
+support-bundle mutation helpers now require a trusted invocation context before
+actual mutation. A direct lower-level call without that context returns
 `generic_bypass_blocked` with `mutated=false`.
 
 The v1 trusted invocation context contains:
@@ -201,12 +219,13 @@ warnings.
 
 ## Limitations
 
-- Universal Plan Mode enforcement covers only the first migrated set.
-- File, Git, service-control, communication, backup, restore, support-bundle,
-  and broad skill-pack mutation paths are not fully migrated.
-- Generic bypass hardening is proven for migrated package install and lifecycle
-  operations in this checkpoint; broader shell/file/subprocess brokers remain
-  next-phase work.
+- Universal Plan Mode enforcement covers the currently migrated set, not every
+  mutating assistant action.
+- File, Git, service-control, communication, and broad skill-pack mutation
+  paths are not fully migrated.
+- Generic bypass hardening is proven for migrated package install, lifecycle
+  operations, backup, restore, and support-bundle helpers in this checkpoint;
+  broader shell/file/subprocess brokers remain next-phase work.
 
 Recommended next checkpoint:
 

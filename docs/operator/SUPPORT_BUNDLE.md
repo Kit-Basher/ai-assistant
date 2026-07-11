@@ -6,6 +6,12 @@ the user confirms, then the executor creates a new temporary diagnostics bundle.
 
 It is not destructive and it does not repair anything.
 
+Executor Authorization Migration v1 binds support-bundle creation to
+`support_bundle.create`. Creation uses Universal Mutation Plan metadata,
+central capability authorization, trusted invocation context, and receipt
+metadata. Direct helper calls without trusted context are blocked before a
+bundle directory is created.
+
 The same redaction helpers are reused by Backup v1 for bounded local backup
 summaries. Support bundles remain temporary diagnostics artifacts; Backup v1
 uses the approved local backup path and still excludes raw secrets.
