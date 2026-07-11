@@ -245,7 +245,7 @@ def run() -> list[Check]:
     ):
         actual = capability_for_action_type(action_type)
         checks.append(_pass(f"{action_type} capability binding", actual) if actual == capability_id else _fail(f"{action_type} capability binding", f"actual={actual!r} expected={capability_id!r}"))
-    for legacy in ("files", "git", "service control", "communications", "broader skill-pack mutations"):
+    for legacy in ("communications", "broader skill-pack mutations"):
         checks.append(_warn(f"remaining legacy warning: {legacy}", "future migration batch"))
     return checks
 
