@@ -161,6 +161,8 @@ from agent.executor_registry import (
     execute_notification_prune,
     execute_notification_telegram_send,
     execute_service_restart,
+    execute_skill_pack_permission_grant,
+    execute_skill_pack_permission_revoke,
     execute_uninstall_v1,
     execute_update_v1,
     restore_backup_v1,
@@ -836,6 +838,28 @@ class Orchestrator:
                 rollback_available=False,
                 rollback_hint="Pruned notification history is not automatically restored.",
                 capability_id="notification.prune",
+            )
+        )
+        self._executor_registry.register(
+            ExecutorSpec(
+                executor_id="operator.skill_pack.permission.grant.v1",
+                action_type="operator.skill_pack.permission.grant",
+                status="enabled",
+                run=execute_skill_pack_permission_grant,
+                rollback_available=True,
+                rollback_hint="Revoke the exact grant id recorded in the receipt.",
+                capability_id="skill_pack.permission.grant",
+            )
+        )
+        self._executor_registry.register(
+            ExecutorSpec(
+                executor_id="operator.skill_pack.permission.revoke.v1",
+                action_type="operator.skill_pack.permission.revoke",
+                status="enabled",
+                run=execute_skill_pack_permission_revoke,
+                rollback_available=False,
+                rollback_hint="Create a new scoped grant if the skill should regain access.",
+                capability_id="skill_pack.permission.revoke",
             )
         )
         self._executor_registry.register(

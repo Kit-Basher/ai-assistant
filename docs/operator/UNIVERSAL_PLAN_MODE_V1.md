@@ -26,8 +26,9 @@ Migrated in this checkpoint:
   fixture services
 
 Implemented notification communications now use Universal Plan metadata.
-Email/calendar providers are unsupported in this checkpoint. The remaining
-legacy/unmigrated mutation area remains broader skill-pack mutation paths.
+Email/calendar providers are unsupported in this checkpoint. Skill-pack
+permission grant/revoke and brokered skill-pack platform API requests now use
+Universal Plan metadata.
 Unsupported destructive file, Git, service, and provider variants remain
 denied or deferred rather than silently allowed.
 
@@ -104,6 +105,8 @@ before mutation:
   mutation in this checkpoint
 - service restart rechecks the exact allowlisted fixture service and writes
   only fixture state
+- skill-pack permission grant/revoke rechecks skill identity, manifest
+  fingerprint, permission id, grant target scope, and grant store location
 
 Lifecycle-specific operation records remain separate from the conversational
 Mutation Plan.
@@ -134,6 +137,26 @@ local-host mutation fixtures:
   disable, or restart the primary Personal Agent service.
 
 Direct lower-level shell `git` and `systemctl` mutation attempts remain blocked.
+
+## Skill-Pack Permission Boundary
+
+Skill-Pack Permission Boundary v1 uses the Universal Plan contract for
+skill-pack permission grant/revoke and for brokered skill-pack mutations mapped
+to migrated executors. Mutation Plans include skill-pack context in target
+snapshots and trusted invocation context:
+
+- skill-pack id, publisher, version, and content fingerprint;
+- permission id;
+- grant id;
+- mapped capability and executor;
+- normalized target scope.
+
+Declared permissions are not grants. New permissions after update, revoked
+grants, expired grants, changed manifests, changed fingerprints, and expanded
+target scopes require a new Plan or fail closed.
+
+This is a Personal Agent platform API boundary. Arbitrary malicious in-process
+Python skill code is not claimed isolated in this checkpoint.
 
 ## Package Executor
 
@@ -183,6 +206,7 @@ Run:
 ```bash
 python scripts/universal_plan_mode_smoke.py
 python scripts/universal_plan_mode_audit.py
+python scripts/skill_pack_permission_boundary_smoke.py
 python scripts/executor_authorization_migration_smoke.py
 python scripts/capability_policy_smoke.py
 python scripts/capability_policy_audit.py

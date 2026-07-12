@@ -173,6 +173,12 @@ class TrustedInvocationContext:
     plan_fingerprint: str
     operation_id: str
     policy_version: int = POLICY_SCHEMA_VERSION
+    caller_type: str = "core"
+    skill_pack_id: str = ""
+    skill_pack_version: str = ""
+    skill_pack_fingerprint: str = ""
+    permission_id: str = ""
+    grant_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -182,6 +188,12 @@ class TrustedInvocationContext:
             "plan_fingerprint": self.plan_fingerprint,
             "operation_id": self.operation_id,
             "policy_version": int(self.policy_version),
+            "caller_type": self.caller_type,
+            "skill_pack_id": self.skill_pack_id,
+            "skill_pack_version": self.skill_pack_version,
+            "skill_pack_fingerprint": self.skill_pack_fingerprint,
+            "permission_id": self.permission_id,
+            "grant_id": self.grant_id,
         }
 
     @classmethod
@@ -196,6 +208,12 @@ class TrustedInvocationContext:
                 plan_fingerprint=str(payload.get("plan_fingerprint") or ""),
                 operation_id=str(payload.get("operation_id") or ""),
                 policy_version=int(payload.get("policy_version") or 0),
+                caller_type=str(payload.get("caller_type") or "core"),
+                skill_pack_id=str(payload.get("skill_pack_id") or ""),
+                skill_pack_version=str(payload.get("skill_pack_version") or ""),
+                skill_pack_fingerprint=str(payload.get("skill_pack_fingerprint") or ""),
+                permission_id=str(payload.get("permission_id") or ""),
+                grant_id=str(payload.get("grant_id") or ""),
             )
         except (TypeError, ValueError):
             return None
@@ -285,10 +303,14 @@ def capability_for_action_type(action_type: str) -> str | None:
         "operator.notification.telegram.send": "notification.external.send",
         "operator.notification.mark_read": "notification.mark_read",
         "operator.notification.prune": "notification.prune",
+        "operator.skill_pack.permission.grant": "skill_pack.permission.grant",
+        "operator.skill_pack.permission.revoke": "skill_pack.permission.revoke",
         "system.package.inspect": "system.package.inspect",
         "system.service.inspect": "system.service.inspect",
         "system.lifecycle.status": "system.lifecycle.status",
         "notification.inspect": "notification.inspect",
+        "skill_pack.inspect": "skill_pack.inspect",
+        "skill_pack.permissions.inspect": "skill_pack.permissions.inspect",
     }.get(str(action_type or "").strip().lower())
 
 
@@ -450,6 +472,8 @@ def _default_capabilities() -> list[CapabilityDefinition]:
         _capability("system.service.inspect", "Inspect service status", "read_only", "local_host", "reversible", "low", "allow"),
         _capability("system.lifecycle.status", "Inspect lifecycle operation status", "read_only", "local_host", "reversible", "low", "allow"),
         _capability("notification.inspect", "Inspect notification state", "read_only", "local_process", "reversible", "low", "allow"),
+        _capability("skill_pack.inspect", "Inspect installed skill packs", "read_only", "local_process", "reversible", "low", "allow"),
+        _capability("skill_pack.permissions.inspect", "Inspect skill-pack permissions", "read_only", "local_process", "reversible", "low", "allow"),
         _capability(
             "system.package.install",
             "Install local package",
@@ -740,6 +764,32 @@ def _default_capabilities() -> list[CapabilityDefinition]:
             "mutating",
             "local_filesystem",
             "conditionally_reversible",
+            "medium",
+            "plan_and_confirm",
+            receipt_required=True,
+            runtime_revalidation_required=True,
+            target_binding_required=True,
+            generic_bypass_forbidden=True,
+        ),
+        _capability(
+            "skill_pack.permission.grant",
+            "Grant skill-pack permission",
+            "mutating",
+            "local_process",
+            "conditionally_reversible",
+            "high",
+            "plan_and_confirm",
+            receipt_required=True,
+            runtime_revalidation_required=True,
+            target_binding_required=True,
+            generic_bypass_forbidden=True,
+        ),
+        _capability(
+            "skill_pack.permission.revoke",
+            "Revoke skill-pack permission",
+            "mutating",
+            "local_process",
+            "reversible",
             "medium",
             "plan_and_confirm",
             receipt_required=True,

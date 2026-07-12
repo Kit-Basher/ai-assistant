@@ -5,12 +5,28 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.2-files-git-service-migration-v1`
-- Commit: `240bcd134081af79397ffeda7549d2c71674f54b`
+- Tag: `v0.2.2-communications-migration-v1`
+- Commit: `24bfca5436d2e2916c02ddad181397083a8979d3`
 - Fresh Debian VM proof: not run
-- Release status: v0.2.1 lifecycle and release-hardening phase closed; current work is communications mutation migration on top of Files, Git, and Service Mutation Migration v1
+- Release status: v0.2.1 lifecycle and release-hardening phase closed; current work is Skill-Pack Permission Boundary v1 on top of Communications Mutation Migration v1
 
-## Active Phase: Communications Mutation Migration v1
+## Active Phase: Skill-Pack Permission Boundary v1
+
+First-party mutation paths now use central capability policy and Universal
+Mutation Plans.
+
+This phase establishes a hard permission boundary for installed skill packs.
+Skill-pack identity, declared permissions, granted permissions, capability
+bindings, and runtime authorization are enforced before privileged platform API
+actions.
+
+No skill pack receives implicit mutation authority.
+
+The current implementation hardens Personal Agent platform APIs and brokered
+executor dispatch. It does not claim process isolation for arbitrary malicious
+in-process Python skill code.
+
+## Completed Checkpoint: Communications Mutation Migration v1
 
 Files, Git, and service-control mutation lanes now use central capability
 policy and Universal Mutation Plans.
@@ -19,8 +35,6 @@ This phase migrates implemented communications mutations, including supported
 notification delivery and notification-history mutation. No email or calendar
 provider is currently implemented in this repository, so those providers remain
 unsupported rather than silently mapped to a generic transport.
-
-Broader skill-pack mutation paths remain future work.
 
 ## Completed Checkpoint: Files, Git, and Service Mutation Migration v1
 
@@ -183,6 +197,14 @@ activation marker remains absent.
   helpers, update-shaped marker survival, marker consumption, reinstall default
   disabled state, and actual-host read-only status. It never enables or
   confirms uninstall against the active primary installation.
+- `python scripts/skill_pack_permission_boundary_smoke.py`: skill-pack
+  platform API permission-boundary proof for v1 manifest validation,
+  declared/granted/effective permission handling, target-scope enforcement,
+  identity/version/fingerprint binding, brokered Universal Plan dispatch,
+  direct helper blocking, shell/HTTP/secret platform API denial, grant
+  revocation, update permission diffs, receipt metadata, and honest
+  in-process Python isolation limitation reporting. It uses fixture skill packs
+  only and does not load untrusted external code into the primary runtime.
 - `python scripts/cleanup_preview_smoke.py`: installed cleanup preview proof
   for old/oversized backup, support bundle, and runtime-release candidates;
   the installed daily-driver plan is cancelled during this smoke.

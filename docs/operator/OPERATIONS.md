@@ -99,6 +99,11 @@ Confirm:
   communications authorization changes; this gate uses fake providers, fixture
   Telegram transport logs, and temporary notification stores, and it does not
   send real email, messages, invitations, notifications, comments, or webhooks
+- run `python scripts/skill_pack_permission_boundary_smoke.py` when skill-pack
+  permission or broker behavior changes; this gate uses fixture skill packs and
+  temporary grant stores only, verifies declared/granted/effective permission
+  handling, target scopes, direct helper blocking, shell/HTTP/secret platform
+  API denial, and records the in-process Python isolation limitation honestly
 - run `python scripts/support_bundle_v2_smoke.py` when diagnostics packaging
   feels wrong; this gate verifies the Plan Mode-gated support-bundle executor,
   manifest, bounded summary files, redaction, journal id, and scoped rollback

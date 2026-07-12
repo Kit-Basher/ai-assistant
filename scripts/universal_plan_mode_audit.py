@@ -45,11 +45,11 @@ MIGRATED_MUTATIONS = {
     "operator.notification.telegram.send": ("operator.notification.telegram.send.v1", "notification.external.send"),
     "operator.notification.mark_read": ("operator.notification.mark_read.v1", "notification.mark_read"),
     "operator.notification.prune": ("operator.notification.prune.v1", "notification.prune"),
+    "operator.skill_pack.permission.grant": ("operator.skill_pack.permission.grant.v1", "skill_pack.permission.grant"),
+    "operator.skill_pack.permission.revoke": ("operator.skill_pack.permission.revoke.v1", "skill_pack.permission.revoke"),
 }
 
-LEGACY_VISIBLE = {
-    "broader skill-pack mutation": "not migrated in this checkpoint",
-}
+LEGACY_VISIBLE: dict[str, str] = {}
 
 
 def _pass(name: str, detail: str = "") -> Check:

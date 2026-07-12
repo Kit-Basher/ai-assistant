@@ -51,6 +51,8 @@ Commands:
 - `python scripts/universal_plan_mode_audit.py`
 - `python scripts/capability_policy_smoke.py`
 - `python scripts/capability_policy_audit.py`
+- `python scripts/communications_migration_smoke.py`
+- `python scripts/skill_pack_permission_boundary_smoke.py`
 - `python scripts/files_git_service_migration_smoke.py`
 - `python scripts/executor_registry_smoke.py`
 - `python scripts/support_bundle_v2_smoke.py`
@@ -136,13 +138,12 @@ through the real `/chat` API.
 proves registry load, schema validation, read-only allow, Plan/confirmation
 requirements, local activation requirement, stale/changed target blocking,
 shell package-install bypass blocking, receipt metadata, status categories, and
-unmigrated action reporting. It is non-destructive and does not enable primary
+unsupported-action reporting. It is non-destructive and does not enable primary
 uninstall.
 
 `capability_policy_audit.py` reports registered capabilities, migrated executor
 bindings, receipt/revalidation/bypass requirements, and explicit warnings for
-legacy unmigrated action paths. Warnings for documented unmigrated actions are
-expected in this foundation checkpoint.
+unsupported or deferred mutation paths.
 
 `universal_plan_mode_smoke.py` is the Universal Plan Mode v1 focused proof. It
 proves the Mutation Plan schema, package inspection no-mutation behavior,
@@ -155,8 +156,7 @@ primary installation.
 
 `universal_plan_mode_audit.py` reports migrated mutating executors, Plan schema
 compliance, receipt metadata, direct package mutation blocking, shell trusted
-context requirements, and explicit warnings for legacy/unmigrated mutation
-areas.
+context requirements, and unsupported or deferred mutation areas.
 
 `files_git_service_migration_smoke.py` is the focused Files, Git, and Service
 Mutation Migration v1 proof. It verifies bounded file create/modify/delete,
@@ -172,8 +172,15 @@ prune history mutation, direct provider-client bypass blocking, secret-content
 blocking, unsupported email/calendar providers, and the narrow active-channel
 response exception. It uses only fake providers and temporary stores and never
 sends real communications.
-and receipt metadata. It uses isolated temporary roots and does not mutate real
-repository history or primary services.
+
+`skill_pack_permission_boundary_smoke.py` is the focused Skill-Pack Permission
+Boundary v1 proof. It verifies manifest validation, declared versus granted
+permission handling, target-scope enforcement, skill identity/version/
+fingerprint binding, brokered Universal Plan dispatch, direct helper blocking,
+shell/HTTP/secret platform API denial, grant revocation, update permission
+diffs, receipt metadata, and the documented in-process Python isolation
+limitation. It uses fixture skill packs only and does not load untrusted
+external code into the primary runtime.
 
 `executor_authorization_migration_smoke.py` is the focused Executor
 Authorization Migration v1 proof. It verifies Backup v1 creation, Restore v1

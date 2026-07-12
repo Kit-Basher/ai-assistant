@@ -86,6 +86,15 @@ Current enabled executors:
 - `operator.git.commit` via `operator.git.commit.v1`
 - `operator.git.push` via `operator.git.push.v1`
 - `operator.service.restart` via `operator.service.restart.v1`
+- `operator.notification.local.send` via `operator.notification.local.send.v1`
+- `operator.notification.telegram.send` via
+  `operator.notification.telegram.send.v1`
+- `operator.notification.mark_read` via `operator.notification.mark_read.v1`
+- `operator.notification.prune` via `operator.notification.prune.v1`
+- `operator.skill_pack.permission.grant` via
+  `operator.skill_pack.permission.grant.v1`
+- `operator.skill_pack.permission.revoke` via
+  `operator.skill_pack.permission.revoke.v1`
 
 `package.install` installs an allowlisted Debian package through the shell
 package primitive only after Plan Mode confirmation, capability authorization,
@@ -155,6 +164,23 @@ They are bound to `git.commit` and `git.push`.
 fixture state roots. It does not restart, stop, disable, or mutate the primary
 Personal Agent service during proofs. It is bound to
 `system.service.restart`.
+
+`operator.notification.local.send`, `operator.notification.telegram.send`,
+`operator.notification.mark_read`, and `operator.notification.prune` are the
+implemented communications migration lanes. They use fake/sandbox providers in
+proofs, bind recipient/content/provider targets in Universal Plans, and do not
+send real external communications during release smokes.
+
+`operator.skill_pack.permission.grant` and
+`operator.skill_pack.permission.revoke` are the Skill-Pack Permission Boundary
+v1 grant-store mutation lanes. They require Universal Plans, trusted invocation
+context, exact skill identity, manifest fingerprint, permission id, target
+scope, and a fixture-bounded grant store under `/tmp` in proofs.
+
+Brokered skill-pack platform API requests do not expose raw Executor Registry
+access to skill code. The invocation broker maps a declared and granted
+permission to a fixed action, capability, and executor, then attaches
+skill-pack provenance to trusted invocation context.
 
 ## Preview-Only Lanes
 

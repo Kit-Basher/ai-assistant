@@ -119,7 +119,7 @@ The installed-product smoke proves:
   non-chat API-specific plan surfaces may still have their historical payload
   shape.
 - Executor Registry v1 and Capability Policy v1 cover the migrated set
-  incrementally. Implemented notification communications are migrated; broader
-  skill-pack mutators remain legacy/unmigrated audit findings. Unsupported
-  destructive file, Git, service, and provider variants remain denied or
-  deferred.
+  incrementally. Implemented notification communications are migrated, and
+  Skill-Pack Permission Boundary v1 gates brokered platform API requests from
+  skill packs. Unsupported destructive file, Git, service, provider, and
+  process-isolation variants remain denied or deferred.

@@ -41,11 +41,11 @@ MIGRATED_EXECUTORS = {
     "operator.notification.telegram.send": "notification.external.send",
     "operator.notification.mark_read": "notification.mark_read",
     "operator.notification.prune": "notification.prune",
+    "operator.skill_pack.permission.grant": "skill_pack.permission.grant",
+    "operator.skill_pack.permission.revoke": "skill_pack.permission.revoke",
 }
 
-LEGACY_UNMIGRATED = {
-    "skill_pack.*": "broader skill-pack mutation paths remain future migration work",
-}
+LEGACY_UNMIGRATED: dict[str, str] = {}
 
 
 def _pass(name: str, detail: str = "") -> Check:
@@ -96,6 +96,8 @@ def run() -> list[Check]:
         "notification.external.send",
         "notification.mark_read",
         "notification.prune",
+        "skill_pack.permission.grant",
+        "skill_pack.permission.revoke",
     ):
         definition = registry.get(cap_id)
         if definition is None:

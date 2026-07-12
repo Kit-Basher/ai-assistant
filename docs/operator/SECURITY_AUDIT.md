@@ -26,9 +26,12 @@ fresh Debian VM install proof passes.
   run JavaScript, download files, import packs, or treat result metadata as
   trusted fact. Search remains disabled until a trusted endpoint or managed
   loopback SearXNG setup is explicitly configured.
-- External packs: text packs are quarantined, normalized, reviewed, approved,
-  enabled, and permission-gated. External pack code execution is not supported.
-  Search results cannot install/import packs directly.
+- External packs and skill packs: text packs are quarantined, normalized,
+  reviewed, approved, enabled, and permission-gated. Skill-Pack Permission
+  Boundary v1 enforces skill identity, manifest permissions, durable grants,
+  target scopes, brokered Executor Registry dispatch, and trusted invocation
+  context for Personal Agent platform APIs. External pack code execution is not
+  supported. Search results cannot install/import packs directly.
 - Managed SearXNG: the approved container image is
   `docker.io/searxng/searxng:latest`; bind is loopback-only; config mount is
   owned and seeded; empty config mounts and arbitrary volume paths are rejected;
@@ -71,8 +74,9 @@ fresh Debian VM install proof passes.
   `python scripts/capability_policy_audit.py` cover the Capability Policy v1
   schema, central gate, migrated executor bindings, receipt metadata, stale
   Plan blocking, local activation requirement, and generic package-install
-  bypass blocking. Audit warnings for documented unmigrated actions are
-  expected until later authorization-migration checkpoints.
+  bypass blocking. Remaining warnings must identify unsupported/deferred
+  variants or documented process-isolation limits, not silently accepted
+  first-party mutation bypasses.
 - `python scripts/universal_plan_mode_smoke.py` and
   `python scripts/universal_plan_mode_audit.py` cover the Universal Mutation
   Plan schema, package registry dispatch, migrated executor Plan metadata,
@@ -89,6 +93,17 @@ fresh Debian VM install proof passes.
   fixtures, direct shell Git/systemctl blocking, symlink/path traversal
   rejection, force-push denial, and receipt metadata. It uses isolated files,
   an isolated temporary Git repository, and fixture service state only.
+- `python scripts/communications_migration_smoke.py` covers implemented
+  notification communications, fake Telegram delivery, local notification
+  records, mark-read/prune history mutation, unsupported email/calendar
+  providers, active-channel exception scope, secret-content blocking, and
+  direct provider-client bypass blocking.
+- `python scripts/skill_pack_permission_boundary_smoke.py` covers skill-pack
+  manifest validation, declared/granted/effective permission handling,
+  target-scope enforcement, identity/version/fingerprint binding, brokered
+  Universal Plan dispatch, direct helper blocking, arbitrary shell/HTTP/secret
+  platform API denial, grant revocation, update permission diffs, receipt
+  metadata, and the documented in-process Python isolation limitation.
 
 ## Release Blockers
 
@@ -103,12 +118,14 @@ fresh Debian VM install proof passes.
 ## Non-Blocking Gaps To Track
 
 - Broader managed-action journal rollout is intentionally paused.
-- Universal capability migration is intentionally incomplete. Implemented
-  notification communications are centrally gated; email/calendar providers are
-  unsupported. Broader skill-pack mutation paths remain legacy/unmigrated audit
-  findings. Unsupported destructive file, Git, service-control, and provider
-  variants remain denied or deferred unless a bounded policy already controls
-  them.
+- Universal capability migration covers the implemented first-party mutation
+  lanes and skill-pack platform API boundary. Email/calendar providers remain
+  unsupported. Unsupported destructive file, Git, service-control, provider,
+  and process-isolation variants remain denied or deferred unless a bounded
+  policy already controls them.
+- Malicious arbitrary in-process Python skill code is not isolated in this
+  checkpoint. Do not enable untrusted external code execution until a real
+  process isolation boundary exists.
 - Startup auto-recovery that mutates state is intentionally absent.
 - Direct llama.cpp binary/library management is absent.
 - MCP/tool runtime execution is absent.

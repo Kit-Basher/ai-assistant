@@ -41,6 +41,7 @@ from .primary_uninstall_policy import (
     consume_primary_uninstall_marker,
     validate_primary_uninstall_marker,
 )
+from .skill_pack_permissions import SkillGrantStore, build_skill_identity
 
 
 SUPPORT_BUNDLE_SCHEMA_VERSION = "support_bundle.v2"
@@ -527,12 +528,19 @@ class ExecutorRegistry:
                 "mutation_plan_schema_version": MUTATION_PLAN_SCHEMA_VERSION,
             }
             action["authorization_decision"] = decision.to_dict()
+            skill_context = action.get("skill_pack_context") if isinstance(action.get("skill_pack_context"), dict) else {}
             action["trusted_invocation_context"] = TrustedInvocationContext(
                 capability_id=capability_id,
                 executor_id=spec.executor_id,
                 authorization_decision_id=decision.decision_id,
                 plan_fingerprint=plan_fingerprint,
                 operation_id=plan_id,
+                caller_type=str(skill_context.get("caller_type") or "core"),
+                skill_pack_id=str(skill_context.get("skill_pack_id") or ""),
+                skill_pack_version=str(skill_context.get("skill_pack_version") or ""),
+                skill_pack_fingerprint=str(skill_context.get("skill_pack_fingerprint") or ""),
+                permission_id=str(skill_context.get("permission_id") or ""),
+                grant_id=str(skill_context.get("grant_id") or ""),
             ).to_dict()
             if not decision.allowed:
                 return _result(
@@ -3916,4 +3924,65 @@ def execute_notification_prune(plan: dict[str, Any], action: dict[str, Any]) -> 
         "rollback_hint": "Pruned notification history is not automatically restored.",
         "user_message": "Pruned notification history.",
         "details": {"before": before, "after": after, "result": result},
+    }
+
+
+def execute_skill_pack_permission_grant(plan: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+    context_failure = _trusted_context_failure(plan, action, capability_id="skill_pack.permission.grant", executor_id="operator.skill_pack.permission.grant.v1")
+    if context_failure is not None:
+        return context_failure
+    store_path = Path(str(action.get("grant_store_path") or "")).expanduser().resolve(strict=False)
+    if not str(store_path) or store_path.is_symlink() or not _is_under(store_path, Path(tempfile.gettempdir()).resolve()):
+        return {"ok": False, "mutated": False, "executor_id": "operator.skill_pack.permission.grant.v1", "error_code": "grant_store_path_unapproved", "user_message": "Skill grant proof store must stay under /tmp."}
+    manifest = action.get("manifest") if isinstance(action.get("manifest"), dict) else {}
+    try:
+        identity = build_skill_identity(
+            manifest,
+            install_source=str(action.get("install_source") or "fixture"),
+            install_path=str(action.get("install_path") or store_path.parent),
+            bundled_or_external=str(action.get("bundled_or_external") or "external"),
+            signature_status=str(action.get("signature_status") or "unsigned"),
+            enabled=bool(action.get("enabled", True)),
+        )
+        grant = SkillGrantStore(store_path).create_grant(
+            identity=identity,
+            permission_id=str(action.get("permission_id") or ""),
+            target_scope=dict(action.get("target_scope") if isinstance(action.get("target_scope"), dict) else {}),
+            granted_by="local_operator_cli",
+            expires_at=str(action.get("expires_at") or "").strip() or None,
+            grant_reason=str(action.get("grant_reason") or "executor_grant"),
+        )
+    except Exception as exc:  # noqa: BLE001 - fail closed with no mutation beyond rejected validation.
+        return {"ok": False, "mutated": False, "executor_id": "operator.skill_pack.permission.grant.v1", "error_code": str(exc) or exc.__class__.__name__, "user_message": "Skill-pack permission grant was blocked by policy."}
+    return {
+        "ok": True,
+        "mutated": True,
+        "executor_id": "operator.skill_pack.permission.grant.v1",
+        "resources_touched": [str(store_path)],
+        "rollback_available": True,
+        "rollback_hint": f"Revoke grant {grant.get('grant_id')}.",
+        "user_message": "Granted a scoped skill-pack permission.",
+        "details": {"grant": grant, "skill_pack": identity.to_dict()},
+    }
+
+
+def execute_skill_pack_permission_revoke(plan: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+    context_failure = _trusted_context_failure(plan, action, capability_id="skill_pack.permission.revoke", executor_id="operator.skill_pack.permission.revoke.v1")
+    if context_failure is not None:
+        return context_failure
+    store_path = Path(str(action.get("grant_store_path") or "")).expanduser().resolve(strict=False)
+    if not str(store_path) or store_path.is_symlink() or not _is_under(store_path, Path(tempfile.gettempdir()).resolve()):
+        return {"ok": False, "mutated": False, "executor_id": "operator.skill_pack.permission.revoke.v1", "error_code": "grant_store_path_unapproved", "user_message": "Skill grant proof store must stay under /tmp."}
+    grant = SkillGrantStore(store_path).revoke_grant(str(action.get("grant_id") or ""), revoked_by="local_operator_cli")
+    if grant is None:
+        return {"ok": False, "mutated": False, "executor_id": "operator.skill_pack.permission.revoke.v1", "error_code": "grant_not_found", "user_message": "No matching active grant was found."}
+    return {
+        "ok": True,
+        "mutated": True,
+        "executor_id": "operator.skill_pack.permission.revoke.v1",
+        "resources_touched": [str(store_path)],
+        "rollback_available": False,
+        "rollback_hint": "Create a new scoped grant if the skill should regain access.",
+        "user_message": "Revoked a skill-pack permission grant.",
+        "details": {"grant": grant},
     }

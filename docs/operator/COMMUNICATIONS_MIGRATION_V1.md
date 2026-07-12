@@ -131,11 +131,12 @@ provider migrations. They are not implemented in this checkpoint, and tests
 prove there is no fallback path that sends email, calendar invitations, or
 webhooks through arbitrary shell or HTTP mutation.
 
-## Remaining Legacy Area
+## Superseded Legacy Area
 
-The remaining expected authorization warning after this migration is broader
-skill-pack mutation paths. Skill-pack permission boundaries and generic bypass
-hardening are future checkpoints.
+At the time of this checkpoint, the remaining expected authorization warning was
+broader skill-pack mutation paths. Skill-Pack Permission Boundary v1 supersedes
+that warning for Personal Agent platform APIs while documenting that arbitrary
+malicious in-process Python skill code is not isolated.
 
 ## Proof
 

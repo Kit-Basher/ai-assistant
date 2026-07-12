@@ -24,6 +24,7 @@ future work where to look first.
 | Current executor authorization migration | `docs/operator/EXECUTOR_AUTHORIZATION_MIGRATION_V1.md` |
 | Files, Git, and service migration | `docs/operator/FILES_GIT_SERVICE_MIGRATION_V1.md` |
 | Communications mutation migration | `docs/operator/COMMUNICATIONS_MIGRATION_V1.md` |
+| Skill-pack permission boundary | `docs/operator/SKILL_PACK_PERMISSION_BOUNDARY_V1.md` |
 | Managed local services and sandboxed tools | `docs/design/MANAGED_LOCAL_SERVICES_AND_SANDBOXED_TOOLS.md` |
 | Managed SearXNG operator details | `docs/operator/SAFE_WEB_SEARCH.md` |
 | Managed-action reliability | `docs/design/MANAGED_ACTION_RELIABILITY_STANDARD.md` and `docs/operator/MANAGED_ACTION_RELIABILITY_AUDIT.md` |
@@ -101,12 +102,14 @@ because they overlap current docs.
 ## Current Next Work
 
 1. Build Tool Authorization and Plan Mode maturity on top of the completed
-   v0.2.1 lifecycle roadmap. The current active checkpoint is Communications
-   Mutation Migration v1, following Capability Policy Schema, Universal Plan
-   Mode Enforcement v1, Executor Authorization Migration v1, and Files/Git/
-   Service Mutation Migration v1. This batch migrates implemented notification
-   communication mutations and records email/calendar providers as unsupported.
-   Broader skill-pack mutation paths remain future work.
+   v0.2.1 lifecycle roadmap. The current active checkpoint is Skill-Pack
+   Permission Boundary v1, following Capability Policy Schema, Universal Plan
+   Mode Enforcement v1, Executor Authorization Migration v1, Files/Git/Service
+   Migration v1, and Communications Migration v1. This batch enforces
+   skill-pack identity, manifest permissions, grant resolution, brokered
+   invocation, Universal Plan dispatch, and platform API denial for ungranted
+   privileged actions. It does not claim process isolation for arbitrary
+   malicious in-process Python skill code.
 2. Keep managed SearXNG live verification separate from isolated proof:
    `prove_core_workflows.py` can honestly report search `BLOCKED` when no
    backend is configured, while live `/search/status` proves the configured
@@ -116,8 +119,8 @@ because they overlap current docs.
    write, verify the result, and roll back only owned resources.
 4. If adding more managed local services or sandboxed tool/MCP runtimes, start
    from `docs/design/MANAGED_LOCAL_SERVICES_AND_SANDBOXED_TOOLS.md`.
-5. Keep unmigrated mutating actions audit-visible until Universal Plan Mode
-   enforcement and later executor authorization migration batches cover them.
+5. Keep unsupported mutating variants audit-visible until a bounded capability,
+   executor, and proof exist.
 
 ## Do Not Start Until Later
 

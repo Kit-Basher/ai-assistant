@@ -74,9 +74,15 @@ Migrated mutating capabilities:
 - `git.commit`
 - `git.push`
 - `system.service.restart`
+- `notification.local.send`
+- `notification.external.send`
+- `notification.mark_read`
+- `notification.prune`
+- `skill_pack.permission.grant`
+- `skill_pack.permission.revoke`
 
-Legacy/unmigrated actions remain visible in audit output and are not claimed as
-centrally enforced.
+Unsupported or deferred mutation variants remain visible in audit output and
+are not claimed as centrally enforced.
 
 ## Authorization Gate
 
@@ -121,6 +127,12 @@ Migrated executor definitions declare trusted capability ids:
 - `operator.git.commit.v1` -> `git.commit`
 - `operator.git.push.v1` -> `git.push`
 - `operator.service.restart.v1` -> `system.service.restart`
+- `operator.notification.local.send.v1` -> `notification.local.send`
+- `operator.notification.telegram.send.v1` -> `notification.external.send`
+- `operator.notification.mark_read.v1` -> `notification.mark_read`
+- `operator.notification.prune.v1` -> `notification.prune`
+- `operator.skill_pack.permission.grant.v1` -> `skill_pack.permission.grant`
+- `operator.skill_pack.permission.revoke.v1` -> `skill_pack.permission.revoke`
 
 Package install is now an Executor Registry executor. The confirmed Plan Mode
 path gates `system.package.install`, creates trusted invocation context, and
@@ -205,10 +217,16 @@ Raw prompts, secrets, tokens, and bearer strings remain redacted.
 
 ## Skill-Pack Boundary
 
-External skill packs cannot define or downgrade core capability policy in v1.
-Mutating pack tools without a recognized capability remain outside the central
-enforcement claim and are audit-visible. Read-only pack behavior remains
-subject to the existing sandbox and pack-governance rules.
+External skill packs cannot define or downgrade core capability policy.
+Skill-Pack Permission Boundary v1 adds manifest permission validation, durable
+grant resolution, a skill-pack invocation broker, and skill-pack provenance in
+trusted invocation context for platform API calls. Declared permissions are not
+authorization grants. Unknown, undeclared, ungranted, expired, revoked, or
+scope-expanded permissions fail closed.
+
+This is a platform API boundary, not a claim of process isolation for arbitrary
+malicious in-process Python skill code. External untrusted skill-pack code
+execution remains unsupported until real process isolation is implemented.
 
 ## Audit Commands
 
@@ -224,27 +242,29 @@ python scripts/universal_plan_mode_audit.py
 The smoke proves registry load, schema validation, read-only allow, Plan and
 confirmation requirements, local activation requirement, stale/changed Plan
 blocking, shell bypass blocking, receipt metadata, status categories, and
-unmigrated action reporting.
+unsupported-action reporting.
 
 The audit reports registered capabilities, migrated executor bindings, policy
-gaps, receipt requirements, bypass requirements, and legacy/unmigrated
-warnings.
+gaps, receipt requirements, bypass requirements, and any remaining legacy or
+unsupported mutation warnings.
 
 ## Limitations
 
-- Universal Plan Mode enforcement covers the currently migrated set, not every
-  mutating assistant action.
+- Universal Plan Mode enforcement covers the currently migrated set. Unsupported
+  destructive variants remain denied or deferred until dedicated bounded
+  executors exist.
 - Implemented notification communications are migrated; email and calendar
   providers are not implemented and remain unsupported rather than routed
-  through generic transports. Broad skill-pack mutation paths are not fully
-  migrated.
+  through generic transports.
+- Skill-pack-triggered platform API mutations are brokered and permission-gated,
+  but this checkpoint does not isolate arbitrary malicious in-process Python.
   Unsupported destructive file, Git, and service-control variants remain
   denied or deferred until dedicated bounded executors exist.
 - Generic bypass hardening is proven for migrated package install, lifecycle
   operations, backup, restore, support-bundle, bounded file, Git, service
-  fixture, and notification helpers in this checkpoint; broader shell/
-  subprocess brokers remain next-phase work.
+  fixture, notification helpers, and skill-pack platform API invocation in this
+  checkpoint; broader generic bypass hardening remains next-phase work.
 
 Recommended next checkpoint:
 
-`v0.2.2-universal-plan-mode-v1`
+`v0.2.2-skill-pack-permission-boundary-v1`
