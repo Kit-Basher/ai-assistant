@@ -13789,6 +13789,11 @@ class AgentRuntime:
             authorization_decision_id=f"authz-{uuid.uuid4().hex[:12]}",
             plan_fingerprint=plan_fingerprint,
             operation_id=operation_id,
+            caller_type="core",
+            caller_id="autopilot_notification",
+            source_module="agent.api_server",
+            source_surface="autopilot_notification",
+            target_fingerprint=plan_fingerprint,
         ).to_dict()
         local_context = TrustedInvocationContext(
             capability_id="notification.local.send",
@@ -13796,6 +13801,11 @@ class AgentRuntime:
             authorization_decision_id=f"authz-{uuid.uuid4().hex[:12]}",
             plan_fingerprint=plan_fingerprint,
             operation_id=operation_id,
+            caller_type="core",
+            caller_id="autopilot_notification",
+            source_module="agent.api_server",
+            source_surface="autopilot_notification",
+            target_fingerprint=plan_fingerprint,
         ).to_dict()
 
         if telegram_descriptor.enabled and telegram_descriptor.configured:

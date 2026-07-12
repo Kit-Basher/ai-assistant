@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from agent.capability_policy import validate_trusted_invocation_context
+from agent.mutation_boundary import assert_authorized_mutation
 
 
 @dataclass(frozen=True)
@@ -52,11 +52,11 @@ class TelegramTarget:
                 error_kind="telegram_not_configured_or_no_chat",
                 reason="telegram_not_configured_or_no_chat",
             )
-        valid, reason, _context = validate_trusted_invocation_context(
+        valid, reason, _context = assert_authorized_mutation(
             trusted_invocation_context,
-            capability_id="notification.external.send",
-            executor_id="operator.notification.telegram.send.v1",
-            plan_fingerprint=str(plan_fingerprint or ""),
+            expected_capability="notification.external.send",
+            expected_executor="operator.notification.telegram.send.v1",
+            expected_plan_fingerprint=str(plan_fingerprint or ""),
         )
         if not valid:
             return DeliveryResult(ok=False, delivered_to="none", error_kind=reason, reason="generic_bypass_blocked")
@@ -86,11 +86,11 @@ class LocalTarget:
         _ = notification
         if not self._enabled:
             return DeliveryResult(ok=False, delivered_to="none", error_kind="delivery_disabled", reason="delivery_disabled")
-        valid, reason, _context = validate_trusted_invocation_context(
+        valid, reason, _context = assert_authorized_mutation(
             trusted_invocation_context,
-            capability_id="notification.local.send",
-            executor_id="operator.notification.local.send.v1",
-            plan_fingerprint=str(plan_fingerprint or ""),
+            expected_capability="notification.local.send",
+            expected_executor="operator.notification.local.send.v1",
+            expected_plan_fingerprint=str(plan_fingerprint or ""),
         )
         if not valid:
             return DeliveryResult(ok=False, delivered_to="none", error_kind=reason, reason="generic_bypass_blocked")
