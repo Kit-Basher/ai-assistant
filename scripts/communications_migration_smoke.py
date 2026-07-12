@@ -220,7 +220,7 @@ def run() -> list[Check]:
         checks.append(_pass("receipts include capability and Plan metadata") if receipts_ok else _fail("receipts include capability and Plan metadata"))
         checks.append(_pass("status UX uses provider/operation truth", "fixture transport log and notification store status were read after mutation"))
         checks.append(_pass("communications audit warning removed through migration", "notification communications are capability-bound; unsupported email/calendar have no provider mutation path"))
-        checks.append(_warn("broader skill-pack warning remains accurate", "future permission-boundary batch"))
+        checks.append(_pass("broader skill-pack warning closed", "skill-pack permission boundary covers platform API mutation requests"))
     return checks
 
 

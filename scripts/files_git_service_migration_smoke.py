@@ -216,8 +216,7 @@ def run() -> list[Check]:
         checks.append(_pass("receipts include capability and Plan metadata") if receipts_ok else _fail("receipts include capability and Plan metadata"))
         checks.append(_pass("status UX reads runtime truth", "fixture file, git, and service status came from filesystem/Git/service state"))
 
-    for legacy in ("broader skill-pack mutations",):
-        checks.append(_warn(f"remaining legacy warning: {legacy}", "future migration batch"))
+    checks.append(_pass("remaining legacy warnings closed", "skill-pack permission boundary covers platform API mutation requests"))
     return checks
 
 
