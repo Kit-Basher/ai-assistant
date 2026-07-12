@@ -25,6 +25,7 @@ future work where to look first.
 | Files, Git, and service migration | `docs/operator/FILES_GIT_SERVICE_MIGRATION_V1.md` |
 | Communications mutation migration | `docs/operator/COMMUNICATIONS_MIGRATION_V1.md` |
 | Skill-pack permission boundary | `docs/operator/SKILL_PACK_PERMISSION_BOUNDARY_V1.md` |
+| Generic mutation bypass hardening | `docs/operator/GENERIC_MUTATION_BYPASS_HARDENING_V1.md` |
 | Managed local services and sandboxed tools | `docs/design/MANAGED_LOCAL_SERVICES_AND_SANDBOXED_TOOLS.md` |
 | Managed SearXNG operator details | `docs/operator/SAFE_WEB_SEARCH.md` |
 | Managed-action reliability | `docs/design/MANAGED_ACTION_RELIABILITY_STANDARD.md` and `docs/operator/MANAGED_ACTION_RELIABILITY_AUDIT.md` |
@@ -102,14 +103,15 @@ because they overlap current docs.
 ## Current Next Work
 
 1. Build Tool Authorization and Plan Mode maturity on top of the completed
-   v0.2.1 lifecycle roadmap. The current active checkpoint is Skill-Pack
-   Permission Boundary v1, following Capability Policy Schema, Universal Plan
-   Mode Enforcement v1, Executor Authorization Migration v1, Files/Git/Service
-   Migration v1, and Communications Migration v1. This batch enforces
-   skill-pack identity, manifest permissions, grant resolution, brokered
-   invocation, Universal Plan dispatch, and platform API denial for ungranted
-   privileged actions. It does not claim process isolation for arbitrary
-   malicious in-process Python skill code.
+   v0.2.1 lifecycle roadmap. The current active checkpoint is Generic Mutation
+   Bypass Hardening v1, following Capability Policy Schema, Universal Plan Mode
+   Enforcement v1, Executor Authorization Migration v1, Files/Git/Service
+   Migration v1, Communications Migration v1, and Skill-Pack Permission
+   Boundary v1. This batch reviews shell, filesystem, network, provider,
+   database, API, background, maintenance, and helper mutation surfaces to prove
+   supported mutation cannot occur outside the central authorization
+   architecture. It does not claim process isolation for arbitrary malicious
+   in-process Python code.
 2. Keep managed SearXNG live verification separate from isolated proof:
    `prove_core_workflows.py` can honestly report search `BLOCKED` when no
    backend is configured, while live `/search/status` proves the configured

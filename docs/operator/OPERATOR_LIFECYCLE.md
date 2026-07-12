@@ -61,12 +61,19 @@ rollback-safe active-install handoff is proven. Uninstall v1 is also
 conservative: isolated fixture removal is executable, while live daily-driver
 uninstall is guarded and returns a no-mutation blocker.
 
+Generic Mutation Bypass Hardening v1 additionally proves direct low-level
+helpers, raw shell/HTTP/DB/secret primitives, copied/expired trusted contexts,
+and late Executor Registry mutation do not bypass the lifecycle authorization
+architecture through supported application paths.
+
 ## Proof
 
 Run:
 
 ```bash
 python scripts/operator_lifecycle_smoke.py
+python scripts/generic_mutation_bypass_audit.py
+python scripts/generic_mutation_bypass_smoke.py
 ```
 
 The smoke talks to `http://127.0.0.1:8765` and verifies:

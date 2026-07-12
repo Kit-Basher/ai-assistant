@@ -53,6 +53,8 @@ Commands:
 - `python scripts/capability_policy_audit.py`
 - `python scripts/communications_migration_smoke.py`
 - `python scripts/skill_pack_permission_boundary_smoke.py`
+- `python scripts/generic_mutation_bypass_audit.py`
+- `python scripts/generic_mutation_bypass_smoke.py`
 - `python scripts/files_git_service_migration_smoke.py`
 - `python scripts/executor_registry_smoke.py`
 - `python scripts/support_bundle_v2_smoke.py`
@@ -181,6 +183,19 @@ shell/HTTP/secret platform API denial, grant revocation, update permission
 diffs, receipt metadata, and the documented in-process Python isolation
 limitation. It uses fixture skill packs only and does not load untrusted
 external code into the primary runtime.
+
+`generic_mutation_bypass_audit.py` is the static Generic Mutation Bypass
+Hardening v1 audit. It scans runtime and script Python for subprocess,
+filesystem, SQL, HTTP mutation, provider, Git, systemctl, secret, registry, and
+trusted-context patterns, then fails on unreviewed critical findings or runtime
+`shell=True`.
+
+`generic_mutation_bypass_smoke.py` is the dynamic bypass denial proof. It uses
+isolated fixtures to verify direct file/Git/service/provider/shell primitives
+deny mutation, raw DB/secret/HTTP/shell primitives deny, stale/copied/expired/
+consumed contexts deny, registry freeze holds, API override fields do not
+select capability/executor/context, and process-isolation limits remain
+reported honestly.
 
 `executor_authorization_migration_smoke.py` is the focused Executor
 Authorization Migration v1 proof. It verifies Backup v1 creation, Restore v1

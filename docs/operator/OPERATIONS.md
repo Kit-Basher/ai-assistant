@@ -104,6 +104,12 @@ Confirm:
   temporary grant stores only, verifies declared/granted/effective permission
   handling, target scopes, direct helper blocking, shell/HTTP/secret platform
   API denial, and records the in-process Python isolation limitation honestly
+- run `python scripts/generic_mutation_bypass_audit.py` and
+  `python scripts/generic_mutation_bypass_smoke.py` when low-level helpers,
+  subprocess/network/file/database/provider code, registry behavior, or trusted
+  context handling changes; these gates use reviewed inventory plus isolated
+  fixtures and do not mutate primary services, real repositories, or external
+  accounts
 - run `python scripts/support_bundle_v2_smoke.py` when diagnostics packaging
   feels wrong; this gate verifies the Plan Mode-gated support-bundle executor,
   manifest, bounded summary files, redaction, journal id, and scoped rollback

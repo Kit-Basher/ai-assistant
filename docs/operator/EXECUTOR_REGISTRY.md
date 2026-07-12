@@ -58,6 +58,15 @@ Every registry result includes:
   mutation. If a legacy canonical plan reaches the registry for a migrated
   action, the registry synthesizes and validates the v1 Mutation Plan before
   authorization.
+- Executor registration rejects duplicate action types and duplicate executor
+  ids. The runtime registry is frozen after trusted startup registration, so
+  skill packs, API payloads, and late runtime code cannot register arbitrary
+  mutating callables.
+- Trusted invocation context issued by the registry includes operation id, Plan
+  fingerprint, target fingerprint, source module/surface, caller provenance,
+  expiry, and single-use intent. Low-level migrated helpers reject missing,
+  copied, expired, consumed, fixture-in-production, or wrong-target contexts
+  with `mutated=false`.
 
 ## Journal
 

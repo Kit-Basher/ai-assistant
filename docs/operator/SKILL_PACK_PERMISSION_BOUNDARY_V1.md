@@ -207,6 +207,15 @@ payloads.
 The audit view is based on registry, grant, Plan, operation, and receipt truth,
 not chat memory.
 
+## Generic Bypass Hardening
+
+Generic Mutation Bypass Hardening v1 extends the same boundary below the broker:
+trusted invocation context now binds caller provenance, operation id, target
+fingerprint, expiry, and single-use state. Direct platform helper calls,
+arbitrary shell, arbitrary HTTP mutation, raw domain DB mutation, raw secret
+read, copied contexts, and registry mutation after freeze are denied through
+supported platform APIs.
+
 ## Proof
 
 Run:
@@ -235,8 +244,8 @@ Expected smoke classification:
 - It does not provide OS/process sandboxing for arbitrary malicious in-process
   Python.
 - External untrusted skill-pack code execution remains unsupported.
-- Future work should add process isolation, broader generic mutation bypass
-  hardening, and full adversarial authorization proof.
+- Future work should add process isolation and full adversarial authorization
+  proof.
 
 Recommended checkpoint tag:
 

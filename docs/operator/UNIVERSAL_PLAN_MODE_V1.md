@@ -158,6 +158,17 @@ target scopes require a new Plan or fail closed.
 This is a Personal Agent platform API boundary. Arbitrary malicious in-process
 Python skill code is not claimed isolated in this checkpoint.
 
+## Generic Bypass Hardening
+
+Generic Mutation Bypass Hardening v1 strengthens the Universal Plan boundary by
+binding trusted invocation context to operation id, Plan fingerprint, target
+fingerprint, caller provenance, expiry, and single-use state. Direct helper
+calls with missing, copied, expired, consumed, fixture-in-production, or
+wrong-target contexts fail before mutation.
+
+The Executor Registry is frozen after trusted startup registration. Runtime
+registration of arbitrary executors is denied.
+
 ## Package Executor
 
 Package install is now an Executor Registry executor:
@@ -207,6 +218,8 @@ Run:
 python scripts/universal_plan_mode_smoke.py
 python scripts/universal_plan_mode_audit.py
 python scripts/skill_pack_permission_boundary_smoke.py
+python scripts/generic_mutation_bypass_audit.py
+python scripts/generic_mutation_bypass_smoke.py
 python scripts/executor_authorization_migration_smoke.py
 python scripts/capability_policy_smoke.py
 python scripts/capability_policy_audit.py

@@ -190,8 +190,11 @@ The v1 trusted invocation context contains:
 - `executor_id`
 - `authorization_decision_id`
 - `plan_fingerprint`
+- `target_fingerprint`
 - `operation_id`
 - `policy_version`
+- caller provenance and expiry/single-use fields
+- skill-pack permission/grant provenance where applicable
 
 The context is created by trusted orchestrator/registry code after the central
 gate allows the confirmed Plan. It is not accepted from user text.
@@ -263,8 +266,11 @@ unsupported mutation warnings.
 - Generic bypass hardening is proven for migrated package install, lifecycle
   operations, backup, restore, support-bundle, bounded file, Git, service
   fixture, notification helpers, and skill-pack platform API invocation in this
-  checkpoint; broader generic bypass hardening remains next-phase work.
+  checkpoint. Generic Mutation Bypass Hardening v1 adds repository-wide static
+  reviewed-inventory scanning and dynamic denial checks for direct helpers,
+  raw DB/secret/HTTP/shell primitives, copied/expired/consumed contexts, and
+  registry mutation after freeze.
 
 Recommended next checkpoint:
 
-`v0.2.2-skill-pack-permission-boundary-v1`
+`v0.2.2-generic-mutation-bypass-hardening-v1`

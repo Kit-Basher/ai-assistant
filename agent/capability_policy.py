@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import re
+import time
 import uuid
 from typing import Any
 
@@ -44,6 +45,8 @@ REASON_MUTATION_PLAN_POLICY_CHANGED = "mutation_plan_policy_changed"
 REASON_MUTATION_PLAN_ACTIVATION_CHANGED = "mutation_plan_activation_changed"
 REASON_MUTATION_PLAN_THREAD_MISMATCH = "mutation_plan_thread_mismatch"
 REASON_MUTATION_PLAN_SESSION_MISMATCH = "mutation_plan_session_mismatch"
+
+TRUSTED_CALLER_TYPES = {"core", "executor", "skill_pack", "lifecycle_runner", "fixture"}
 
 
 def utc_now_iso() -> str:
@@ -179,6 +182,15 @@ class TrustedInvocationContext:
     skill_pack_fingerprint: str = ""
     permission_id: str = ""
     grant_id: str = ""
+    caller_id: str = ""
+    source_module: str = ""
+    source_surface: str = ""
+    issued_at: str = field(default_factory=utc_now_iso)
+    expires_at: str = ""
+    single_use: bool = True
+    parent_operation_id: str = ""
+    target_fingerprint: str = ""
+    consumed: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -194,6 +206,15 @@ class TrustedInvocationContext:
             "skill_pack_fingerprint": self.skill_pack_fingerprint,
             "permission_id": self.permission_id,
             "grant_id": self.grant_id,
+            "caller_id": self.caller_id,
+            "source_module": self.source_module,
+            "source_surface": self.source_surface,
+            "issued_at": self.issued_at,
+            "expires_at": self.expires_at,
+            "single_use": bool(self.single_use),
+            "parent_operation_id": self.parent_operation_id,
+            "target_fingerprint": self.target_fingerprint,
+            "consumed": bool(self.consumed),
         }
 
     @classmethod
@@ -214,6 +235,15 @@ class TrustedInvocationContext:
                 skill_pack_fingerprint=str(payload.get("skill_pack_fingerprint") or ""),
                 permission_id=str(payload.get("permission_id") or ""),
                 grant_id=str(payload.get("grant_id") or ""),
+                caller_id=str(payload.get("caller_id") or ""),
+                source_module=str(payload.get("source_module") or ""),
+                source_surface=str(payload.get("source_surface") or ""),
+                issued_at=str(payload.get("issued_at") or utc_now_iso()),
+                expires_at=str(payload.get("expires_at") or ""),
+                single_use=bool(payload.get("single_use", True)),
+                parent_operation_id=str(payload.get("parent_operation_id") or ""),
+                target_fingerprint=str(payload.get("target_fingerprint") or ""),
+                consumed=bool(payload.get("consumed", False)),
             )
         except (TypeError, ValueError):
             return None
@@ -374,12 +404,21 @@ def validate_trusted_invocation_context(
     capability_id: str,
     executor_id: str,
     plan_fingerprint: str,
+    operation_id: str = "",
+    target_fingerprint: str = "",
+    runtime_mode: str = "production",
 ) -> tuple[bool, str, TrustedInvocationContext | None]:
     context = TrustedInvocationContext.from_dict(payload)
     if context is None:
         return False, REASON_GENERIC_BYPASS_BLOCKED, None
+    if context.consumed:
+        return False, "trusted_context_consumed", context
     if context.policy_version != POLICY_SCHEMA_VERSION:
         return False, REASON_POLICY_CHANGED, context
+    if context.caller_type not in TRUSTED_CALLER_TYPES:
+        return False, "caller_type_invalid", context
+    if context.caller_type == "fixture" and str(runtime_mode or "production") == "production":
+        return False, "fixture_context_denied_in_production", context
     if context.capability_id != capability_id:
         return False, "capability_mismatch", context
     if context.executor_id != executor_id:
@@ -388,8 +427,21 @@ def validate_trusted_invocation_context(
         return False, "authorization_decision_missing", context
     if not context.operation_id:
         return False, "operation_id_missing", context
+    if operation_id and context.operation_id != operation_id:
+        return False, "operation_id_mismatch", context
     if plan_fingerprint and context.plan_fingerprint != plan_fingerprint:
         return False, REASON_STALE_PLAN, context
+    if target_fingerprint and context.target_fingerprint and context.target_fingerprint != target_fingerprint:
+        return False, REASON_TARGET_CHANGED, context
+    if context.expires_at:
+        try:
+            parsed = datetime.fromisoformat(context.expires_at.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            if parsed.timestamp() <= time.time():
+                return False, "trusted_context_expired", context
+        except ValueError:
+            return False, "trusted_context_expiry_invalid", context
     return True, REASON_ALLOWED, context
 
 

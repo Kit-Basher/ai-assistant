@@ -5,26 +5,34 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.2-communications-migration-v1`
-- Commit: `24bfca5436d2e2916c02ddad181397083a8979d3`
+- Tag: `v0.2.2-skill-pack-permission-boundary-v1`
+- Commit: `71e25f3199b542acacabf529ce6c1ad7ccca9382`
 - Fresh Debian VM proof: not run
-- Release status: v0.2.1 lifecycle and release-hardening phase closed; current work is Skill-Pack Permission Boundary v1 on top of Communications Mutation Migration v1
+- Release status: v0.2.1 lifecycle and release-hardening phase closed; current work is Generic Mutation Bypass Hardening v1 on top of Skill-Pack Permission Boundary v1
 
-## Active Phase: Skill-Pack Permission Boundary v1
+## Active Phase: Generic Mutation Bypass Hardening v1
+
+First-party and skill-pack mutation paths now use central capability policy,
+Universal Mutation Plans, trusted invocation context, and Executor Registry
+bindings.
+
+This phase performs a repository-wide bypass review across shell, filesystem,
+network, provider, database, API, background, maintenance, and internal helper
+paths.
+
+The goal is to prove that supported mutation cannot occur outside the central
+authorization architecture.
+
+The current guarantee remains a platform API permission boundary. It does not
+claim process isolation for arbitrary malicious in-process Python code.
+
+## Completed Checkpoint: Skill-Pack Permission Boundary v1
 
 First-party mutation paths now use central capability policy and Universal
-Mutation Plans.
-
-This phase establishes a hard permission boundary for installed skill packs.
-Skill-pack identity, declared permissions, granted permissions, capability
-bindings, and runtime authorization are enforced before privileged platform API
-actions.
-
-No skill pack receives implicit mutation authority.
-
-The current implementation hardens Personal Agent platform APIs and brokered
-executor dispatch. It does not claim process isolation for arbitrary malicious
-in-process Python skill code.
+Mutation Plans. Skill-Pack Permission Boundary v1 establishes a hard permission
+boundary for installed skill packs. Skill-pack identity, declared permissions,
+granted permissions, capability bindings, and runtime authorization are
+enforced before privileged platform API actions.
 
 ## Completed Checkpoint: Communications Mutation Migration v1
 

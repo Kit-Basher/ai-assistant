@@ -47,6 +47,12 @@ fresh Debian VM install proof passes.
   metadata for the same migrated set. The package-install shell primitive
   rejects direct mutation without a trusted invocation context from a confirmed
   Executor Registry dispatch.
+- Generic mutation bypass hardening: trusted invocation context now binds
+  caller provenance, operation id, Plan fingerprint, target fingerprint, expiry,
+  single-use/consumed state, and skill grant metadata where applicable.
+  Executor Registry registration is frozen after trusted startup registration.
+  Generic shell, generic HTTP mutation, raw domain DB mutation, raw secret read,
+  and direct low-level helper calls are denied through platform APIs.
 - Telegram: optional by default. Inactive optional Telegram must not fail core
   readiness. Raw tokens must not appear in status/chat/doctor output.
 - Backup/restore/support: backup paths include sensitive local state. Support
@@ -104,6 +110,12 @@ fresh Debian VM install proof passes.
   Universal Plan dispatch, direct helper blocking, arbitrary shell/HTTP/secret
   platform API denial, grant revocation, update permission diffs, receipt
   metadata, and the documented in-process Python isolation limitation.
+- `python scripts/generic_mutation_bypass_audit.py` and
+  `python scripts/generic_mutation_bypass_smoke.py` cover repository-wide
+  reviewed mutation-surface inventory plus dynamic denial of direct
+  file/Git/service/provider/shell helpers, raw DB/secret/HTTP/shell primitives,
+  expired/consumed/copied contexts, registry mutation after freeze, and API
+  authorization override attempts.
 
 ## Release Blockers
 

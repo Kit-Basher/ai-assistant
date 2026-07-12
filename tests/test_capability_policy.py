@@ -147,12 +147,15 @@ class CapabilityPolicyTests(unittest.TestCase):
             authorization_decision_id="authz-abc123",
             plan_fingerprint="plan",
             operation_id="op",
+            target_fingerprint="target",
         ).to_dict()
         ok, reason, _parsed = validate_trusted_invocation_context(
             ctx,
             capability_id="system.package.install",
             executor_id="shell.install_package.v1",
             plan_fingerprint="plan",
+            operation_id="op",
+            target_fingerprint="target",
         )
         self.assertTrue(ok)
         self.assertEqual("allowed", reason)
@@ -164,6 +167,51 @@ class CapabilityPolicyTests(unittest.TestCase):
         )
         self.assertFalse(ok)
         self.assertEqual("executor_mismatch", reason)
+
+        ok, reason, _parsed = validate_trusted_invocation_context(
+            {**ctx, "consumed": True},
+            capability_id="system.package.install",
+            executor_id="shell.install_package.v1",
+            plan_fingerprint="plan",
+            operation_id="op",
+            target_fingerprint="target",
+        )
+        self.assertFalse(ok)
+        self.assertEqual("trusted_context_consumed", reason)
+
+        ok, reason, _parsed = validate_trusted_invocation_context(
+            {**ctx, "expires_at": "2000-01-01T00:00:00+00:00"},
+            capability_id="system.package.install",
+            executor_id="shell.install_package.v1",
+            plan_fingerprint="plan",
+            operation_id="op",
+            target_fingerprint="target",
+        )
+        self.assertFalse(ok)
+        self.assertEqual("trusted_context_expired", reason)
+
+        ok, reason, _parsed = validate_trusted_invocation_context(
+            {**ctx, "caller_type": "fixture"},
+            capability_id="system.package.install",
+            executor_id="shell.install_package.v1",
+            plan_fingerprint="plan",
+            operation_id="op",
+            target_fingerprint="target",
+            runtime_mode="production",
+        )
+        self.assertFalse(ok)
+        self.assertEqual("fixture_context_denied_in_production", reason)
+
+        ok, reason, _parsed = validate_trusted_invocation_context(
+            ctx,
+            capability_id="system.package.install",
+            executor_id="shell.install_package.v1",
+            plan_fingerprint="plan",
+            operation_id="op",
+            target_fingerprint="other-target",
+        )
+        self.assertFalse(ok)
+        self.assertEqual("target_changed", reason)
 
 
 if __name__ == "__main__":

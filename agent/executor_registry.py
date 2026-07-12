@@ -22,13 +22,13 @@ from .capability_policy import (
     build_default_capability_registry,
     capability_for_action_type,
     stable_fingerprint,
-    validate_trusted_invocation_context,
 )
 from .host_lifecycle import (
     HOST_LIFECYCLE_OPERATION_SCHEMA_VERSION,
     HOST_LIFECYCLE_RUNNER_VERSION,
     attach_approved_hash,
 )
+from .mutation_boundary import assert_authorized_mutation
 from .llm.notifications import NotificationStore, sanitize_notification_text
 from .llm.notify_delivery import LocalTarget, TelegramTarget
 from .mutation_plan import (
@@ -97,11 +97,14 @@ def _trusted_context_failure(
     executor_id: str,
 ) -> dict[str, Any] | None:
     """Return a structured no-mutation failure when a migrated executor is called directly."""
-    valid, reason, _context = validate_trusted_invocation_context(
+    valid, reason, _context = assert_authorized_mutation(
         action.get("trusted_invocation_context") if isinstance(action.get("trusted_invocation_context"), dict) else None,
-        capability_id=capability_id,
-        executor_id=executor_id,
-        plan_fingerprint=str(plan.get("plan_fingerprint") or ""),
+        expected_capability=capability_id,
+        expected_executor=executor_id,
+        expected_operation=str(plan.get("plan_id") or action.get("pending_id") or ""),
+        expected_plan_fingerprint=str(plan.get("plan_fingerprint") or ""),
+        expected_target_fingerprint=str(plan.get("target_fingerprint") or ""),
+        runtime_mode=str(action.get("runtime_mode") or "production"),
     )
     if valid:
         return None
@@ -322,12 +325,26 @@ class ExecutorRegistry:
     def __init__(self, journal_path: str | Path) -> None:
         self.journal = MutationJournal(journal_path)
         self._executors: dict[str, ExecutorSpec] = {}
+        self._frozen = False
 
     def register(self, spec: ExecutorSpec) -> None:
+        if self._frozen:
+            raise ValueError("executor_registry_frozen")
         action_type = str(spec.action_type or "").strip().lower()
         if not action_type:
             raise ValueError("executor action_type is required")
+        if action_type in self._executors:
+            raise ValueError(f"duplicate_executor_action_type:{action_type}")
+        if any(existing.executor_id == spec.executor_id for existing in self._executors.values()):
+            raise ValueError(f"duplicate_executor_id:{spec.executor_id}")
         self._executors[action_type] = spec
+
+    def freeze(self) -> None:
+        self._frozen = True
+
+    @property
+    def frozen(self) -> bool:
+        return self._frozen
 
     def lookup(self, action_type: str) -> ExecutorSpec | None:
         return self._executors.get(str(action_type or "").strip().lower())
@@ -541,6 +558,13 @@ class ExecutorRegistry:
                 skill_pack_fingerprint=str(skill_context.get("skill_pack_fingerprint") or ""),
                 permission_id=str(skill_context.get("permission_id") or ""),
                 grant_id=str(skill_context.get("grant_id") or ""),
+                caller_id=str(skill_context.get("skill_pack_id") or "core"),
+                source_module="agent.executor_registry",
+                source_surface=str(action.get("origin") or "executor_registry"),
+                expires_at=str(mutation_plan.get("expires_at") or plan.get("expires_at") or ""),
+                single_use=True,
+                parent_operation_id=str(plan.get("parent_operation_id") or ""),
+                target_fingerprint=target_fingerprint,
             ).to_dict()
             if not decision.allowed:
                 return _result(

@@ -23,8 +23,9 @@ Summary:
 - The next phase is Tool Authorization and Plan Mode Maturity. Capability
   Policy Schema and Central Authorization Gate v1, Universal Plan Mode
   Enforcement v1, Executor Authorization Migration v1, Files/Git/Service
-  Migration v1, and Communications Migration v1 are complete. Skill-Pack
-  Permission Boundary v1 is the active checkpoint.
+  Migration v1, Communications Migration v1, and Skill-Pack Permission
+  Boundary v1 are complete. Generic Mutation Bypass Hardening v1 is the active
+  checkpoint.
 
 ## Recent Release Tags
 
@@ -36,7 +37,8 @@ Summary:
 | `v0.2.2-executor-authorization-migration-v1` | 2026-07-10 | `e5e097b` | Backup v1, Restore v1, support-bundle, and memory lifecycle authorization migration. |
 | `v0.2.2-files-git-service-migration-v1` | 2026-07-11 | `240bcd1` | Bounded file, Git, and service-control authorization migration. |
 | `v0.2.2-communications-migration-v1` | 2026-07-11 | `24bfca5` | Implemented notification communications migration. |
-| `v0.2.2-skill-pack-permission-boundary-v1` | not cut | pending | Recommended checkpoint for skill-pack platform API permission boundary. |
+| `v0.2.2-skill-pack-permission-boundary-v1` | 2026-07-12 | `71e25f3` | Skill-pack platform API permission boundary. |
+| `v0.2.2-generic-mutation-bypass-hardening-v1` | not cut | pending | Recommended checkpoint for repository-wide generic mutation bypass hardening. |
 | `v0.2.0-managed-searxng` | 2026-06-14 | `f26ba6f` | Managed local SearXNG safe web search. |
 | `v0.2.0-plan-mode-policy` | 2026-06-14 | `e88281b` | Central Plan Mode policy layer. |
 | `v0.2.0-plan-mode-pack-lifecycle` | 2026-06-14 | `7096852` | Plan Mode enforcement for external pack lifecycle writes. |

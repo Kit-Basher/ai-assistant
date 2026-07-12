@@ -884,6 +884,7 @@ class Orchestrator:
                 capability_id="system.uninstall",
             )
         )
+        self._executor_registry.freeze()
         self._pack_store = PackStore(db.db_path, journal_store=self._managed_action_journal_store)
         for skill in self.skills.values():
             if str(skill.pack_trust).strip().lower() != "native":
