@@ -29,6 +29,7 @@ future work where to look first.
 | Full adversarial authorization proof | `docs/operator/FULL_ADVERSARIAL_AUTHORIZATION_PROOF_V1.md` |
 | Runtime latency closure | `docs/operator/RUNTIME_LATENCY_CLOSURE_V1.md` |
 | v0.2.2 final release audit | `docs/operator/V0_2_2_FINAL_RELEASE_AUDIT.md` |
+| v0.2.2 full pytest closure | `docs/operator/FULL_PYTEST_FAILURE_TRIAGE_V1.md` |
 | v0.2.2 release notes | `docs/releases/v0.2.2.md` |
 | Managed local services and sandboxed tools | `docs/design/MANAGED_LOCAL_SERVICES_AND_SANDBOXED_TOOLS.md` |
 | Managed SearXNG operator details | `docs/operator/SAFE_WEB_SEARCH.md` |
@@ -106,11 +107,11 @@ because they overlap current docs.
 
 ## Current Next Work
 
-1. v0.2.2 Final Release Audit and Version Decision is the active release
-   track. Authorization proof, bypass hardening, and latency closure are
-   complete; this batch verifies version truth, compatibility, artifacts,
-   installation behavior, rollback guidance, and final release readiness before
-   any final tag is created.
+1. Full Pytest Failure Triage and Closure v1 is the active release track. The
+   final audit tooling exists and curated gates pass, but the default full
+   pytest suite reported 93 failures. This batch classifies every original
+   failure, excludes only exact inventoried node ids with replacement proofs,
+   and makes default pytest closure mandatory before any final tag is created.
 2. Keep managed SearXNG live verification separate from isolated proof:
    `prove_core_workflows.py` can honestly report search `BLOCKED` when no
    backend is configured, while live `/search/status` proves the configured

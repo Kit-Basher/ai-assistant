@@ -2,10 +2,31 @@
 
 Checkpoint under audit:
 
-- Tag: `v0.2.2-runtime-latency-closure-v1`
-- Commit: `34632188bcd90ad41e74ba7e188db905dfa710dc`
+- Tag: `v0.2.2-final-release-audit-v1`
+- Commit: `523859767278f37f54ea1784802ae43aa5538b92`
 
 Final release tag has not been created.
+
+## Full Pytest Closure Addendum
+
+The final audit initially found that curated release gates were green while
+default `python -m pytest -q` still failed:
+
+- original reproduced result: `93 failed, 2406 passed`;
+- baseline output: `/tmp/v022-full-pytest-baseline.txt` during the closure
+  run;
+- inventory: `docs/operator/V0_2_2_PYTEST_FAILURE_INVENTORY.json`;
+- closure doc: `docs/operator/FULL_PYTEST_FAILURE_TRIAGE_V1.md`.
+
+The final release decision now requires:
+
+- `python -m pytest -q` exits zero;
+- all original failures are classified;
+- excluded tests are exact inventoried node ids with replacement proofs,
+  including the separately recorded second-wave closure set;
+- no broad ignore pattern hides failures;
+- `scripts/full_pytest_closure_smoke.py` and
+  `scripts/full_pytest_failure_triage.py` pass.
 
 ## Version Decision
 

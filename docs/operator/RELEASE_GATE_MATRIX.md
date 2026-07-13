@@ -28,6 +28,8 @@ local service:
 - `python scripts/version_consistency_smoke.py`
 - `python scripts/upgrade_compatibility_smoke.py`
 - `python scripts/release_artifact_smoke.py`
+- `python scripts/full_pytest_closure_smoke.py`
+- `python scripts/full_pytest_failure_triage.py`
 - `python scripts/final_release_audit.py`
 - `python -m pytest -q tests/test_release_gate.py tests/test_release_smoke.py`
 - `python -m pytest -q tests/test_backup_restore_proof.py tests/test_pre_vm_complete_gate.py`
@@ -153,11 +155,20 @@ store, skill permission diffs, and rollback guidance remain compatible.
 sdist in `/tmp`, then verifies version metadata and rejects databases, caches,
 bytecode, `.env`, `/tmp` evidence, and personal source paths.
 
+`full_pytest_closure_smoke.py` is the default source-tree pytest closure gate.
+It runs `python -m pytest -q -rs`, requires zero current failures, and verifies
+that any skips match the exact node ids inventoried in
+`docs/operator/V0_2_2_PYTEST_FAILURE_INVENTORY.json`.
+
+`full_pytest_failure_triage.py` verifies that the original 93 full-pytest
+failures are classified, non-duplicated, and mapped to replacement proofs. It
+reuses the closure-smoke evidence when available.
+
 `final_release_audit.py` is the aggregate final-release truth gate. It checks
-version decision docs, release notes, accepted warnings, authorization audits,
-adversarial proof, latency closure, primary uninstall disabled, purge
-unsupported, docs truth, artifact audit, and tag-name availability. It does not
-create or push a tag.
+version decision docs, release notes, accepted warnings, pytest closure,
+authorization audits, adversarial proof, latency closure, primary uninstall
+disabled, purge unsupported, docs truth, artifact audit, and tag-name
+availability. It does not create or push a tag.
 
 `operator_lifecycle_smoke.py` is the installed operator-lifecycle gate. It
 proves health, broken-status, storage, repair, backup, restore, update,

@@ -5,19 +5,32 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.2-runtime-latency-closure-v1`
-- Commit: `34632188bcd90ad41e74ba7e188db905dfa710dc`
+- Tag: `v0.2.2-final-release-audit-v1`
+- Commit: `523859767278f37f54ea1784802ae43aa5538b92`
 - Fresh Debian VM proof: not run
-- Release status: final release audit is active; final tag has not been created
+- Release status: full pytest closure is active; final tag has not been created
 
-## Active Phase: v0.2.2 Final Release Audit and Version Decision
+## Active Phase: Full Pytest Failure Triage and Closure v1
 
-Authorization, bypass hardening, adversarial proof, and latency closure are
-complete.
+The curated release gates pass, but the default full pytest suite reported
+93 failures at the final-audit checkpoint.
 
-This phase verifies release truth, compatibility, installation behavior,
-documentation, reproducibility, rollback guidance, and semantic-versioning
-classification before creating the final release tag.
+This phase classifies every failure, fixes genuine regressions, updates stale
+expectations, isolates legitimate environment-dependent tests, and establishes
+one authoritative default test result before the final `v0.2.2` tag.
+
+Default pytest closure policy:
+
+- `python -m pytest -q` must exit zero.
+- The original 93 failures are inventoried in
+  `docs/operator/V0_2_2_PYTEST_FAILURE_INVENTORY.json`.
+- A second-wave closure set of 18 additional order/fixture-dependent failures
+  is recorded separately in the same inventory.
+- Exclusions are exact node ids, not broad directory ignores.
+- Every excluded case has a classification and named replacement proof.
+- `scripts/full_pytest_closure_smoke.py`,
+  `scripts/full_pytest_failure_triage.py`, `scripts/final_release_audit.py`,
+  and `scripts/prove_ready.py` enforce this closure before release.
 
 Current version decision:
 
@@ -465,10 +478,9 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
   operator safety check, full local release proof, and historical/manual proof
   groups so future work does not create another overlapping proof lane by
   default.
-- `docs/operator/PYTEST_FAILURE_TRIAGE.md`: full-pytest failure map. It explains
-  why full pytest is currently an inventory/triage run rather than the canonical
-  release blocker, and identifies the focused real-regression tests to inspect
-  first.
+- `docs/operator/FULL_PYTEST_FAILURE_TRIAGE_V1.md`: full-pytest closure map.
+  It records the original `93 failed, 2406 passed` result, the exact
+  inventoried exclusions, replacement proofs, and default-suite closure policy.
 
 ## Proven Now
 
