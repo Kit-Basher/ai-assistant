@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "checkpoint": {
+    "commit": "5f8f34c7ccb9fd25406e15725d0c5582ee7799d2",
+    "tag": "v0.2.2-full-adversarial-authorization-proof-v1"
+  },
+  "release_decision": "accepted_for_v0.2.2_if_release_blockers_zero",
+  "accepted_warnings": [
+    {
+      "warning_id": "cold_ready_observability",
+      "gate_names": [
+        "rc1_latency_closure_smoke latency distributions",
+        "perf_smoke read-only latency smoke"
+      ],
+      "operation": "first /ready request after restart or cold observability refresh",
+      "environment": "local Debian installed stable runtime on the release reference host",
+      "sample_count": "measured by scripts/runtime_latency_investigation.py and rc1_latency_closure_smoke.py",
+      "threshold_ms": {
+        "warm_ready_p95": 250,
+        "cold_ready_user_accepted_ceiling": 2500
+      },
+      "dominant_span": "observability_ms on the first request",
+      "user_impact": "The first readiness check after restart can be visibly slower, but steady-state /ready is sub-10 ms in repeated warm samples.",
+      "reason_not_fixed": "The cold path builds bounded runtime observability once. Removing it would make startup truth less useful, and it does not affect steady-state readiness polling.",
+      "mitigations": [
+        "Warm readiness is measured separately.",
+        "Detailed observability remains outside the readiness success decision.",
+        "prove_ready.py reports accepted latency warnings separately from unresolved warnings."
+      ],
+      "revisit_trigger": "warm /ready p95 exceeds 250 ms or cold /ready repeatedly exceeds 2500 ms on the reference host"
+    },
+    {
+      "warning_id": "search_status_miss",
+      "gate_names": [
+        "perf_smoke read-only latency smoke"
+      ],
+      "operation": "uncached /search/status or search-status chat when managed SearXNG must be probed",
+      "environment": "local Debian installed stable runtime on the release reference host",
+      "sample_count": "measured by scripts/runtime_latency_investigation.py and perf_smoke.py",
+      "threshold_ms": {
+        "cache_hit_p95": 150,
+        "uncached_probe_user_accepted_ceiling": 2500
+      },
+      "dominant_span": "search_health_ms",
+      "user_impact": "The first search-health miss can take roughly one loopback probe timeout. Cache hits are effectively immediate.",
+      "reason_not_fixed": "The probe is bounded and truthful; declaring search healthy without the probe would be incorrect.",
+      "mitigations": [
+        "A short bounded cache is used for repeated status checks.",
+        "Search unavailability is reported as degraded/unavailable, not healthy."
+      ],
+      "revisit_trigger": "cache-hit p95 exceeds 150 ms or uncached probe repeatedly exceeds 2500 ms"
+    },
+    {
+      "warning_id": "package_plan_chat_roundtrip_noise",
+      "gate_names": [
+        "rc1_latency_closure_smoke latency distributions",
+        "perf_smoke read-only latency smoke"
+      ],
+      "operation": "package install preview and pending confirmation lookup for htop",
+      "environment": "local Debian installed stable runtime on the release reference host",
+      "sample_count": "measured by scripts/runtime_latency_investigation.py, rc1_latency_closure_smoke.py, and perf_smoke.py",
+      "threshold_ms": {
+        "direct_package_state_p95": 250,
+        "package_plan_preview_p95": 3500,
+        "confirmation_lookup_p95": 4500
+      },
+      "dominant_span": "full /chat round trip under local runtime noise; direct dpkg-query lookup remains below budget",
+      "user_impact": "The Plan preview may take a few seconds in noisy installed-product runs, but it does not mutate and remains authorization-correct.",
+      "reason_not_fixed": "The direct package-state check is cheap; remaining cost is the full chat route and local runtime contention. Correctness requires preserving Plan creation, target binding, and confirmation state.",
+      "mitigations": [
+        "Redundant pending-item read during follow-up resolution was removed.",
+        "perf_smoke now uses robust distributions instead of one noisy sample.",
+        "Package preview performs no apt update, no network package-manager call, and no install."
+      ],
+      "revisit_trigger": "direct package-state p95 exceeds 250 ms, package preview p95 exceeds 3500 ms, or confirmation lookup p95 exceeds 4500 ms"
+    },
+    {
+      "warning_id": "status_chat_roundtrip_noise",
+      "gate_names": [
+        "perf_smoke read-only latency smoke"
+      ],
+      "operation": "read-only runtime, Telegram, and search status prompts through /chat",
+      "environment": "local Debian installed stable runtime on the release reference host",
+      "sample_count": "measured by scripts/runtime_latency_investigation.py and perf_smoke.py",
+      "threshold_ms": {
+        "status_chat_p95": 4500,
+        "server_orchestrator_span_target": 1500
+      },
+      "dominant_span": "full local /chat round trip; server-side route spans are usually lower than the client-observed wall time",
+      "user_impact": "Some read-only status prompts can take a few seconds on the local installed service under load, but they do not mutate and still return truthful status.",
+      "reason_not_fixed": "Latest evidence points to installed runtime round-trip noise and bounded status probes rather than an authorization or store-scan defect. Removing status truth checks would make answers less accurate.",
+      "mitigations": [
+        "perf_smoke now reports distributions and server timing metadata.",
+        "runtime_latency_investigation.py measures these status chats explicitly.",
+        "Read-only status prompts remain no-mutation."
+      ],
+      "revisit_trigger": "runtime, Telegram, or search status chat p95 exceeds 4500 ms on the reference host, or server-side orchestrator spans repeatedly exceed 1500 ms"
+    }
+  ]
+}

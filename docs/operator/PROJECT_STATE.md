@@ -5,12 +5,29 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.2-generic-mutation-bypass-hardening-v1`
-- Commit: `b56a449ae157a3e96e160d01b436e4f887d5252b`
+- Tag: `v0.2.2-full-adversarial-authorization-proof-v1`
+- Commit: `5f8f34c7ccb9fd25406e15725d0c5582ee7799d2`
 - Fresh Debian VM proof: not run
-- Release status: v0.2.1 lifecycle and release-hardening phase closed; current work is Full Adversarial Authorization Proof v1 on top of Generic Mutation Bypass Hardening v1
+- Release status: authorization proof is complete with zero release blockers; current work is Runtime Latency Warning Investigation and Closure v1
 
-## Active Phase: Full Adversarial Authorization Proof v1
+## Active Phase: Runtime Latency Warning Investigation and Closure v1
+
+Authorization proof is complete with zero release blockers.
+
+This phase investigates the remaining runtime latency warnings, separates real
+product latency from cold-start and test-environment noise, fixes avoidable
+delays, and records an evidence-based release decision.
+
+Current latency closure evidence:
+
+- `python scripts/runtime_latency_investigation.py`: `PASS=11 WARN=0 FAIL=0`,
+  warm `/ready` p95 1 ms, direct `htop` package-state p95 0 ms, package Plan
+  preview p95 1193 ms, pending confirmation lookup p95 2932 ms.
+- `python scripts/runtime_latency_closure_smoke.py`: `PASS=18 WARN=0 FAIL=0`.
+- Remaining latency risks are accepted runtime-state warnings with checked-in
+  records and revisit triggers in `docs/operator/RUNTIME_LATENCY_ACCEPTANCE_V1.json`.
+
+## Completed Checkpoint: Full Adversarial Authorization Proof v1
 
 The central authorization architecture and generic mutation boundary are
 implemented.
@@ -23,6 +40,11 @@ The goal is proof, not new capability expansion.
 
 The current guarantee remains a platform API permission boundary. It does not
 claim process isolation for arbitrary malicious in-process Python code.
+
+Confirmed proof:
+
+- `python scripts/full_adversarial_authorization_proof.py`: 55 cases,
+  10/10 properties proven, `FAIL=0`, `SKIP=0`, `RELEASE_BLOCKERS=0`.
 
 ## Completed Checkpoint: Generic Mutation Bypass Hardening v1
 

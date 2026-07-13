@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import re
+import json
 import subprocess
 import sys
 import time
@@ -52,6 +53,8 @@ CORE_PY_COMPILE: tuple[str, ...] = (
     "scripts/llm_behavior_eval.py",
     "scripts/perf_smoke.py",
     "scripts/rc1_latency_closure_smoke.py",
+    "scripts/runtime_latency_investigation.py",
+    "scripts/runtime_latency_closure_smoke.py",
     "scripts/capability_policy_smoke.py",
     "scripts/capability_policy_audit.py",
     "scripts/universal_plan_mode_smoke.py",
@@ -99,6 +102,8 @@ def _gates() -> list[Gate]:
         Gate("generic_mutation_bypass_audit static mutation-surface audit", (sys.executable, "scripts/generic_mutation_bypass_audit.py"), 120),
         Gate("generic_mutation_bypass_smoke dynamic bypass denial proof", (sys.executable, "scripts/generic_mutation_bypass_smoke.py"), 120),
         Gate("full_adversarial_authorization_proof end-to-end authorization attack matrix", (sys.executable, "scripts/full_adversarial_authorization_proof.py"), 120),
+        Gate("runtime_latency_investigation measured latency evidence", (sys.executable, "scripts/runtime_latency_investigation.py"), 180),
+        Gate("runtime_latency_closure_smoke accepted latency record", (sys.executable, "scripts/runtime_latency_closure_smoke.py"), 120),
         Gate("rc1_latency_closure_smoke latency distributions", (sys.executable, "scripts/rc1_latency_closure_smoke.py"), 180),
         Gate("perf_smoke read-only latency smoke", (sys.executable, "scripts/perf_smoke.py"), 180),
         Gate("release_smoke canonical smoke suite", (sys.executable, "scripts/release_smoke.py"), 420),
@@ -147,6 +152,28 @@ def _extract_count(label: str, output: str) -> int:
     return 0
 
 
+def _latency_acceptance_covers(gate_name: str) -> bool:
+    path = ROOT / "docs" / "operator" / "RUNTIME_LATENCY_ACCEPTANCE_V1.json"
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(parsed, dict):
+        return False
+    if not str(parsed.get("release_decision") or "").startswith("accepted_for_v0.2.2"):
+        return False
+    accepted = parsed.get("accepted_warnings")
+    if not isinstance(accepted, list):
+        return False
+    for row in accepted:
+        if not isinstance(row, dict):
+            continue
+        gates = row.get("gate_names")
+        if isinstance(gates, list) and gate_name in {str(item) for item in gates}:
+            return True
+    return False
+
+
 def _classify(gate: Gate, returncode: int, output: str) -> tuple[str, str, str]:
     if returncode != 0:
         return "FAIL", "release-blocking", "Fix the failed command above, then rerun python scripts/prove_ready.py."
@@ -175,6 +202,8 @@ def _classify(gate: Gate, returncode: int, output: str) -> tuple[str, str, str]:
         if failed:
             return "FAIL", "release-blocking", "Fix the failing RC1 latency closure probe before final release."
         if warned:
+            if _latency_acceptance_covers(gate.name):
+                return "WARN_ACCEPTED", "runtime-latency-accepted", "Latency warning is covered by docs/operator/RUNTIME_LATENCY_ACCEPTANCE_V1.json; revisit if trigger thresholds are exceeded."
             return "WARN", "runtime-state", "One or more RC1 latency closure distributions exceeded the measured budget."
     if gate.name.startswith("perf_smoke"):
         failed = _extract_count("FAIL", output)
@@ -182,6 +211,8 @@ def _classify(gate: Gate, returncode: int, output: str) -> tuple[str, str, str]:
         if failed:
             return "FAIL", "release-blocking", "Fix the failing read-only performance/status probe before VM proof."
         if warned:
+            if _latency_acceptance_covers(gate.name):
+                return "WARN_ACCEPTED", "runtime-latency-accepted", "Latency warning is covered by docs/operator/RUNTIME_LATENCY_ACCEPTANCE_V1.json; revisit if trigger thresholds are exceeded."
             return "WARN", "runtime-state", "One or more read-only latency probes exceeded the generous warning budget; inspect perf_smoke output."
     return "PASS", "none", "No action."
 
@@ -231,18 +262,23 @@ def main() -> int:
 
     blocking_failures = [row for row in results if row.status == "FAIL" and row.gate.release_blocking]
     warnings = [row for row in results if row.status == "WARN"]
+    accepted_warnings = [row for row in results if row.status == "WARN_ACCEPTED"]
     notes = [row for row in results if row.status == "NOTE"]
     passed = [row for row in results if row.status == "PASS"]
     print("## Summary")
-    print(f"PASS={len(passed)} WARN={len(warnings)} FAIL={len(blocking_failures)} NOTES={len(notes)}")
+    print(f"PASS={len(passed)} WARN={len(warnings)} WARN_ACCEPTED={len(accepted_warnings)} FAIL={len(blocking_failures)} NOTES={len(notes)}")
     print(f"READY_FOR_VM_PROOF: {'yes' if not blocking_failures else 'no'}")
     print(f"RELEASE_BLOCKERS: {len(blocking_failures)}")
-    print(f"WARNINGS: {len(warnings)}")
+    print(f"WARNINGS_UNRESOLVED: {len(warnings)}")
+    print(f"WARNINGS_ACCEPTED: {len(accepted_warnings)}")
     print(f"NOTES: {len(notes)}")
     print("NEXT_ACTIONS:")
     if warnings:
         for row in warnings:
             print(f"- [{row.category}] {row.gate.name}: {row.next_action}")
+    if accepted_warnings:
+        for row in accepted_warnings:
+            print(f"- accepted [{row.category}] {row.gate.name}: {row.next_action}")
     if notes:
         for row in notes:
             print(f"- note [{row.category}] {row.gate.name}: {row.next_action}")

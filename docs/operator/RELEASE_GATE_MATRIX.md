@@ -72,6 +72,8 @@ Commands:
 - `python scripts/daily_driver_maturity_audit.py`
 - `python scripts/restart_survival_smoke.py`
 - `python scripts/browser_ui_survival_smoke.py`
+- `python scripts/runtime_latency_investigation.py`
+- `python scripts/runtime_latency_closure_smoke.py`
 - `python scripts/perf_smoke.py`
 - `python scripts/rc1_latency_closure_smoke.py`
 - `python scripts/daily_driver_smoke.py --timeout 90`
@@ -118,6 +120,17 @@ It samples `/ready`, `/state`, `/search/status`, direct `htop` package-state
 lookup, `htop` Plan Mode preview, and pending-action lookup sequentially. It
 does not enable uninstall, confirm package installation, refresh apt metadata,
 or perform network package-manager work.
+
+`runtime_latency_investigation.py` is the evidence-producing latency gate. It
+separates cold and warm measurements, records the reference environment, checks
+Plan-store scale fixtures, and writes machine-readable evidence to
+`/tmp/runtime_latency_investigation_evidence.json`.
+
+`runtime_latency_closure_smoke.py` verifies that latency evidence exists,
+accepted warnings have checked-in records in
+`docs/operator/RUNTIME_LATENCY_ACCEPTANCE_V1.json`, warm readiness and direct
+package-state checks remain within budget, and accepted warnings stay within
+their documented ceilings.
 
 `operator_lifecycle_smoke.py` is the installed operator-lifecycle gate. It
 proves health, broken-status, storage, repair, backup, restore, update,

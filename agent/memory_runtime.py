@@ -698,22 +698,19 @@ class MemoryRuntime:
         if kind is None:
             return {"type": "none", "reason": "not_followup"}
 
+        pending_rows = self.list_pending_items(
+            user_id,
+            thread_id=current_thread_id,
+            include_expired=True,
+        )
         rows = [
             row
-            for row in self.list_pending_items(
-                user_id,
-                thread_id=current_thread_id,
-                include_expired=True,
-            )
+            for row in pending_rows
             if row["status"] in {PENDING_STATUS_WAITING_FOR_USER, PENDING_STATUS_READY_TO_RESUME}
         ]
         expired_rows = [
             row
-            for row in self.list_pending_items(
-                user_id,
-                thread_id=current_thread_id,
-                include_expired=True,
-            )
+            for row in pending_rows
             if row["status"] == PENDING_STATUS_EXPIRED
         ]
         if not rows:

@@ -164,6 +164,27 @@ class TestMemoryRuntime(unittest.TestCase):
             self.assertEqual("match", result["type"], text)
             self.assertEqual("accept", result["intent"], text)
 
+    def test_followup_uses_single_pending_scan(self) -> None:
+        self.runtime.set_thread_state("u1", thread_id="thread-a")
+        self.runtime.add_pending_item(
+            "u1",
+            {
+                "pending_id": "p1",
+                "kind": "confirmation",
+                "origin_tool": "package_install",
+                "question": "Install package?",
+                "options": ["yes", "no"],
+                "created_at": 1,
+                "expires_at": 9999999999,
+                "thread_id": "thread-a",
+                "status": "WAITING_FOR_USER",
+            },
+        )
+        with patch.object(self.runtime, "list_pending_items", wraps=self.runtime.list_pending_items) as wrapped:
+            result = self.runtime.resolve_followup("u1", "yes", "thread-a")
+        self.assertEqual("match", result["type"])
+        self.assertEqual(1, wrapped.call_count)
+
     def test_memory_summary_reports_resumable(self) -> None:
         self.runtime.set_thread_state("u1", thread_id="thread-a", current_topic="model setup")
         self.runtime.record_user_request("u1", "setup ollama")
