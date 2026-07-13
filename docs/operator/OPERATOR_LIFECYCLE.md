@@ -123,6 +123,12 @@ service-control authorization changes. It uses isolated temporary files, a
 temporary Git repository, and fixture service state; it does not mutate real
 repository history or primary services.
 
+Run `python scripts/full_adversarial_authorization_proof.py` when authorization
+chain behavior changes. It attacks forged capabilities, forged executors,
+forged trusted contexts, replayed confirmations, target drift, cross-scope
+reuse, direct primitive access, partial/uncertain outcomes, and receipt/status
+truth using isolated fixtures.
+
 Run `python scripts/v0_2_1_release_closure.py --expected-commit f900954` for
 the v0.2.1 sequential installed-product closure proof. It intentionally avoids
 parallel HTTP-heavy proof suites and never enables primary uninstall.

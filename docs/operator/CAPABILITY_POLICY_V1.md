@@ -240,6 +240,7 @@ python scripts/capability_policy_smoke.py
 python scripts/capability_policy_audit.py
 python scripts/universal_plan_mode_smoke.py
 python scripts/universal_plan_mode_audit.py
+python scripts/full_adversarial_authorization_proof.py
 ```
 
 The smoke proves registry load, schema validation, read-only allow, Plan and
@@ -270,7 +271,12 @@ unsupported mutation warnings.
   reviewed-inventory scanning and dynamic denial checks for direct helpers,
   raw DB/secret/HTTP/shell primitives, copied/expired/consumed contexts, and
   registry mutation after freeze.
+- Full Adversarial Authorization Proof v1 attacks the entire supported
+  authorization chain with forged capability/executor fields, forged trusted
+  contexts, Plan/confirmation replay, target drift, scope crossing,
+  skill-pack grant drift, direct primitive access, partial/uncertain outcomes,
+  and receipt/status truth checks.
 
 Recommended next checkpoint:
 
-`v0.2.2-generic-mutation-bypass-hardening-v1`
+`v0.2.2-full-adversarial-authorization-proof-v1`

@@ -5,12 +5,26 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.2-skill-pack-permission-boundary-v1`
-- Commit: `71e25f3199b542acacabf529ce6c1ad7ccca9382`
+- Tag: `v0.2.2-generic-mutation-bypass-hardening-v1`
+- Commit: `b56a449ae157a3e96e160d01b436e4f887d5252b`
 - Fresh Debian VM proof: not run
-- Release status: v0.2.1 lifecycle and release-hardening phase closed; current work is Generic Mutation Bypass Hardening v1 on top of Skill-Pack Permission Boundary v1
+- Release status: v0.2.1 lifecycle and release-hardening phase closed; current work is Full Adversarial Authorization Proof v1 on top of Generic Mutation Bypass Hardening v1
 
-## Active Phase: Generic Mutation Bypass Hardening v1
+## Active Phase: Full Adversarial Authorization Proof v1
+
+The central authorization architecture and generic mutation boundary are
+implemented.
+
+This phase attacks the full authorization chain end-to-end using forged
+identities, replay attempts, target drift, cross-scope reuse, direct primitive
+access, callback forgery, and partial or uncertain execution outcomes.
+
+The goal is proof, not new capability expansion.
+
+The current guarantee remains a platform API permission boundary. It does not
+claim process isolation for arbitrary malicious in-process Python code.
+
+## Completed Checkpoint: Generic Mutation Bypass Hardening v1
 
 First-party and skill-pack mutation paths now use central capability policy,
 Universal Mutation Plans, trusted invocation context, and Executor Registry
@@ -22,9 +36,6 @@ paths.
 
 The goal is to prove that supported mutation cannot occur outside the central
 authorization architecture.
-
-The current guarantee remains a platform API permission boundary. It does not
-claim process isolation for arbitrary malicious in-process Python code.
 
 ## Completed Checkpoint: Skill-Pack Permission Boundary v1
 
@@ -213,6 +224,21 @@ activation marker remains absent.
   revocation, update permission diffs, receipt metadata, and honest
   in-process Python isolation limitation reporting. It uses fixture skill packs
   only and does not load untrusted external code into the primary runtime.
+- `python scripts/generic_mutation_bypass_audit.py`: static reviewed-inventory
+  audit for supported mutation surfaces across subprocess, filesystem, SQL,
+  HTTP/provider, Git, systemctl, secret, registry, and trusted-context sites.
+- `python scripts/generic_mutation_bypass_smoke.py`: dynamic denial proof for
+  direct primitive access, copied/stale/expired/consumed contexts, registry
+  freeze, API override rejection, and the documented process-isolation
+  limitation.
+- `python scripts/full_adversarial_authorization_proof.py`: comprehensive
+  fixture-based attack matrix for fixed authority, exact target binding,
+  single-use authorization, scope isolation, runtime truth, primitive
+  enforcement, durable mutation truth, failure truth, fail-closed behavior, and
+  fixture isolation. It writes machine-readable evidence to
+  `/tmp/full_adversarial_authorization_proof_evidence.json` and reports the
+  in-process Python process-isolation limitation as an explicit non-blocking
+  warning.
 - `python scripts/cleanup_preview_smoke.py`: installed cleanup preview proof
   for old/oversized backup, support bundle, and runtime-release candidates;
   the installed daily-driver plan is cancelled during this smoke.

@@ -154,6 +154,7 @@ Run:
 
 ```bash
 python scripts/generic_mutation_bypass_smoke.py
+python scripts/full_adversarial_authorization_proof.py
 ```
 
 The smoke uses isolated fixtures and proves:
@@ -169,6 +170,12 @@ The smoke uses isolated fixtures and proves:
 - denials return `mutated=false`;
 - process-isolation limitation is reported honestly.
 
+Full Adversarial Authorization Proof v1 builds on this smoke by attacking the
+complete request-to-receipt chain: forged capabilities/executors, forged
+trusted contexts, Plan and confirmation replay, target drift, cross-scope
+reuse, direct primitive access, partial/uncertain results, and receipt/status
+truth.
+
 ## Remaining Risks
 
 - Arbitrary malicious in-process Python is not isolated.
@@ -181,4 +188,4 @@ The smoke uses isolated fixtures and proves:
 
 Recommended checkpoint tag:
 
-`v0.2.2-generic-mutation-bypass-hardening-v1`
+`v0.2.2-full-adversarial-authorization-proof-v1`

@@ -55,6 +55,7 @@ Commands:
 - `python scripts/skill_pack_permission_boundary_smoke.py`
 - `python scripts/generic_mutation_bypass_audit.py`
 - `python scripts/generic_mutation_bypass_smoke.py`
+- `python scripts/full_adversarial_authorization_proof.py`
 - `python scripts/files_git_service_migration_smoke.py`
 - `python scripts/executor_registry_smoke.py`
 - `python scripts/support_bundle_v2_smoke.py`
@@ -196,6 +197,14 @@ deny mutation, raw DB/secret/HTTP/shell primitives deny, stale/copied/expired/
 consumed contexts deny, registry freeze holds, API override fields do not
 select capability/executor/context, and process-isolation limits remain
 reported honestly.
+
+`full_adversarial_authorization_proof.py` is the end-to-end authorization
+attack matrix. It proves fixed authority, exact target binding, single-use
+authorization, scope isolation, runtime truth, primitive enforcement, durable
+mutation truth, failure truth, fail-closed behavior, and fixture isolation
+across supported platform APIs. It writes machine-readable evidence under
+`/tmp` and reports the in-process Python isolation limitation as a documented
+non-blocking warning.
 
 `executor_authorization_migration_smoke.py` is the focused Executor
 Authorization Migration v1 proof. It verifies Backup v1 creation, Restore v1

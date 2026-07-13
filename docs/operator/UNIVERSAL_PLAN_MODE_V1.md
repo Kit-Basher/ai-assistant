@@ -220,6 +220,7 @@ python scripts/universal_plan_mode_audit.py
 python scripts/skill_pack_permission_boundary_smoke.py
 python scripts/generic_mutation_bypass_audit.py
 python scripts/generic_mutation_bypass_smoke.py
+python scripts/full_adversarial_authorization_proof.py
 python scripts/executor_authorization_migration_smoke.py
 python scripts/capability_policy_smoke.py
 python scripts/capability_policy_audit.py
@@ -229,6 +230,11 @@ python scripts/plan_mode_v2_smoke.py
 The Universal Plan smoke is non-destructive. It does not enable primary
 uninstall, does not uninstall the primary installation, and does not install a
 new package.
+
+Full Adversarial Authorization Proof v1 adds end-to-end attack coverage for
+Plan tampering, confirmation replay, target drift, cross-scope reuse,
+trusted-context forgery, direct primitive access, duplicate execution,
+partial/uncertain outcomes, and receipt/status truth.
 
 Recommended checkpoint tag:
 

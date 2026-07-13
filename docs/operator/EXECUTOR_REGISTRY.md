@@ -222,6 +222,7 @@ python scripts/universal_plan_mode_smoke.py
 python scripts/universal_plan_mode_audit.py
 python scripts/executor_authorization_migration_smoke.py
 python scripts/files_git_service_migration_smoke.py
+python scripts/full_adversarial_authorization_proof.py
 python scripts/executor_registry_smoke.py
 python scripts/support_bundle_v2_smoke.py
 python scripts/backup_v1_smoke.py
@@ -275,3 +276,8 @@ The smoke talks to the installed `/chat` API and proves:
 - stale confirmation after API restart does not execute
 - unrelated thread/session cannot execute the pending plan
 - obvious secret markers are not present in executor results
+
+Full Adversarial Authorization Proof v1 adds fixture-based attack coverage for
+forged executor/capability fields, Plan tampering, context replay, target
+drift, duplicate execution, partial/uncertain result truth, receipt/status
+truth, and registry immutability.

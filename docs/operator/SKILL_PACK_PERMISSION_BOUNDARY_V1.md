@@ -226,6 +226,7 @@ python scripts/capability_policy_audit.py
 python scripts/universal_plan_mode_audit.py
 python scripts/capability_policy_smoke.py
 python scripts/universal_plan_mode_smoke.py
+python scripts/full_adversarial_authorization_proof.py
 ```
 
 The smoke uses fixture skill packs only. It does not load untrusted external
@@ -237,6 +238,11 @@ Expected smoke classification:
 - `FAIL=0`
 - `WARN=1` for the documented in-process Python isolation limitation
 
+Full Adversarial Authorization Proof v1 adds cross-skill and cross-grant
+attacks: undeclared permissions, ungranted permissions, revoked grants, scope
+expansion, update-requested permissions, copied authority fields, and direct
+primitive access all fail closed through supported platform APIs.
+
 ## Remaining Limitations
 
 - This phase closes Personal Agent platform API permission bypasses for
@@ -244,8 +250,7 @@ Expected smoke classification:
 - It does not provide OS/process sandboxing for arbitrary malicious in-process
   Python.
 - External untrusted skill-pack code execution remains unsupported.
-- Future work should add process isolation and full adversarial authorization
-  proof.
+- Future work should add process isolation.
 
 Recommended checkpoint tag:
 

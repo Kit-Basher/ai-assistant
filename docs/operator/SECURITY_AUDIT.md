@@ -116,6 +116,14 @@ fresh Debian VM install proof passes.
   file/Git/service/provider/shell helpers, raw DB/secret/HTTP/shell primitives,
   expired/consumed/copied contexts, registry mutation after freeze, and API
   authorization override attempts.
+- `python scripts/full_adversarial_authorization_proof.py` covers the
+  end-to-end request-to-receipt authorization chain with forged
+  capability/executor attempts, trusted-context replay, Plan tampering,
+  confirmation replay, target drift, cross-scope skill/grant reuse, direct
+  primitive access, partial and uncertain result truth, receipt/status truth,
+  and fixture isolation. It writes machine-readable evidence to `/tmp` and
+  reports the in-process Python isolation limitation as a documented
+  non-blocking warning.
 
 ## Release Blockers
 

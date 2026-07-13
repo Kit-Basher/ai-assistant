@@ -508,6 +508,20 @@ Release-closure proof is sequential to avoid artificial HTTP load:
 python scripts/v0_2_1_release_closure.py --expected-commit f900954
 ```
 
+## Authorization Proof
+
+After changing capability policy, Universal Plan handling, Executor Registry
+dispatch, trusted invocation context, skill-pack permissioning, low-level
+mutation helpers, receipts, or status truth, run:
+
+```bash
+python scripts/full_adversarial_authorization_proof.py
+```
+
+It uses isolated fixtures and writes machine-readable evidence to `/tmp`. It
+does not enable primary uninstall, mutate real repositories, send real
+notifications, or touch live provider accounts.
+
 ## Lightweight Monitoring Mindset
 
 Do not depend on a new dashboard before you can diagnose normal issues.
