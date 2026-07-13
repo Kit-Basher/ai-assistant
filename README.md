@@ -13,12 +13,12 @@ It is exposed through the HTTP API, the browser/web UI served by the API
 server, the CLI, and the optional Telegram adapter.
 
 ## Current Product Truth
-Current checkpoint language: v0.2.1 is closed as the trusted lifecycle and
-release-hardening baseline. The active track is v0.2.2 authorization maturity:
-Capability Policy Schema v1 is complete, and Universal Plan Mode v1 is
-standardizing package install, cleanup, update, and uninstall on one mutation
-Plan contract. Legacy mutating paths remain audit-visible until later migration
-batches.
+Current release line: v0.2.2 final audit. The v0.2.1 lifecycle and release
+hardening baseline is closed, and the v0.2.2 authorization foundation is
+implemented: central capability policy, Universal Mutation Plans, Executor
+Registry bindings, skill-pack permissions, generic bypass hardening,
+adversarial authorization proof, and runtime latency closure. The final release
+tag is not created automatically by the audit.
 
 The user interacts with the assistant layer. The assistant interprets intent,
 asks the agent layer for grounded runtime/tool facts or bounded action results
@@ -41,6 +41,11 @@ explicit controller actions such as testing or switching models.
 It is not a guessy autonomous agent. It does not invent state, does not expose
 arbitrary shell execution, and does not mutate local or system state without an
 explicit confirmation step.
+
+Current limitations are explicit: arbitrary malicious in-process Python is not
+process-isolated; Git push execution is classified but disabled; destructive
+Git variants and broad service control are denied; primary uninstall requires a
+local activation marker; purge uninstall remains unsupported.
 
 ## What It Does
 - Local-first assistant: local models and local state are preferred by default.

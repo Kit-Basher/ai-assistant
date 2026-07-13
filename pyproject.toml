@@ -30,6 +30,7 @@ sdist_include = [
   "tests",
   "systemd",
   "scripts/build_dist.py",
+  "docs/releases",
   "README.md",
   "VERSION",
   "requirements.txt",

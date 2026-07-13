@@ -168,6 +168,8 @@ def _iter_sdist_files() -> list[Path]:
             rel = path.relative_to(ROOT)
             if "__pycache__" in rel.parts or path.suffix in {".pyc", ".pyo"}:
                 continue
+            if rel.name in {"agent.db", "llm_usage_stats.json"}:
+                continue
             rows.append(rel)
     deduped: dict[str, Path] = {}
     for row in rows:

@@ -98,6 +98,7 @@ required = [
     repo_root / "personal_agent_bootstrap.pth",
     repo_root / "sitecustomize.py",
     repo_root / "agent" / "webui" / "dist" / "index.html",
+    repo_root / "docs" / "releases",
     repo_root / "assets" / "icons" / "personal-agent.svg",
     repo_root / "scripts" / "launch_webui.sh",
 ]
@@ -112,7 +113,16 @@ def copy_tree(src: Path, dst: Path) -> None:
     shutil.copytree(
         src,
         dst,
-        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo", ".pytest_cache", "node_modules", "tests"),
+        ignore=shutil.ignore_patterns(
+            "__pycache__",
+            "*.pyc",
+            "*.pyo",
+            ".pytest_cache",
+            "node_modules",
+            "tests",
+            "agent.db",
+            "llm_usage_stats.json",
+        ),
     )
 
 
@@ -121,6 +131,7 @@ copy_tree(repo_root / "memory", payload_dir / "memory")
 copy_tree(repo_root / "skills", payload_dir / "skills")
 copy_tree(repo_root / "telegram_adapter", payload_dir / "telegram_adapter")
 copy_tree(repo_root / "systemd", payload_dir / "systemd")
+copy_tree(repo_root / "docs" / "releases", payload_dir / "docs" / "releases")
 
 (payload_dir / "bin").mkdir(parents=True, exist_ok=True)
 (payload_dir / "assets" / "icons").mkdir(parents=True, exist_ok=True)
@@ -150,7 +161,6 @@ manifest = {
     "bundle_version": version,
     "git_commit": git_commit or None,
     "build_time": build_time or None,
-    "source_repo": str(repo_root),
     "payload": [
         "agent",
         "agent/BUILD_INFO.json",
@@ -158,6 +168,7 @@ manifest = {
         "skills",
         "telegram_adapter",
         "systemd",
+        "docs/releases",
         "assets/icons/personal-agent.svg",
         "bin/personal-agent-webui",
         "build_backend.py",

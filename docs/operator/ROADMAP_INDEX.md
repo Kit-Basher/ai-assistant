@@ -28,6 +28,8 @@ future work where to look first.
 | Generic mutation bypass hardening | `docs/operator/GENERIC_MUTATION_BYPASS_HARDENING_V1.md` |
 | Full adversarial authorization proof | `docs/operator/FULL_ADVERSARIAL_AUTHORIZATION_PROOF_V1.md` |
 | Runtime latency closure | `docs/operator/RUNTIME_LATENCY_CLOSURE_V1.md` |
+| v0.2.2 final release audit | `docs/operator/V0_2_2_FINAL_RELEASE_AUDIT.md` |
+| v0.2.2 release notes | `docs/releases/v0.2.2.md` |
 | Managed local services and sandboxed tools | `docs/design/MANAGED_LOCAL_SERVICES_AND_SANDBOXED_TOOLS.md` |
 | Managed SearXNG operator details | `docs/operator/SAFE_WEB_SEARCH.md` |
 | Managed-action reliability | `docs/design/MANAGED_ACTION_RELIABILITY_STANDARD.md` and `docs/operator/MANAGED_ACTION_RELIABILITY_AUDIT.md` |
@@ -104,12 +106,11 @@ because they overlap current docs.
 
 ## Current Next Work
 
-1. Runtime Latency Warning Investigation and Closure v1 is the active release
-   track. Authorization proof is complete with zero release blockers; this
-   batch separates cold-start and test-environment noise from user-facing
-   latency, fixes avoidable delays, records accepted warnings with revisit
-   triggers, and keeps latency classification separate from authorization
-   readiness.
+1. v0.2.2 Final Release Audit and Version Decision is the active release
+   track. Authorization proof, bypass hardening, and latency closure are
+   complete; this batch verifies version truth, compatibility, artifacts,
+   installation behavior, rollback guidance, and final release readiness before
+   any final tag is created.
 2. Keep managed SearXNG live verification separate from isolated proof:
    `prove_core_workflows.py` can honestly report search `BLOCKED` when no
    backend is configured, while live `/search/status` proves the configured

@@ -5,18 +5,29 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.2-full-adversarial-authorization-proof-v1`
-- Commit: `5f8f34c7ccb9fd25406e15725d0c5582ee7799d2`
+- Tag: `v0.2.2-runtime-latency-closure-v1`
+- Commit: `34632188bcd90ad41e74ba7e188db905dfa710dc`
 - Fresh Debian VM proof: not run
-- Release status: authorization proof is complete with zero release blockers; current work is Runtime Latency Warning Investigation and Closure v1
+- Release status: final release audit is active; final tag has not been created
 
-## Active Phase: Runtime Latency Warning Investigation and Closure v1
+## Active Phase: v0.2.2 Final Release Audit and Version Decision
 
-Authorization proof is complete with zero release blockers.
+Authorization, bypass hardening, adversarial proof, and latency closure are
+complete.
 
-This phase investigates the remaining runtime latency warnings, separates real
-product latency from cold-start and test-environment noise, fixes avoidable
-delays, and records an evidence-based release decision.
+This phase verifies release truth, compatibility, installation behavior,
+documentation, reproducibility, rollback guidance, and semantic-versioning
+classification before creating the final release tag.
+
+Current version decision:
+
+- Recommended final product version: `v0.2.2`.
+- Rationale: the work completes the intended v0.2 authorization and release
+  foundation while preserving normal user/API/state compatibility. It hardens
+  mutation behavior and skill-pack permissions, but unsupported or unsafe
+  paths are denied rather than removed supported workflows.
+- Rejected option: `v0.3.0`; it would imply a new schema/minor line in current
+  doctor/version checks and would overstate migration burden for this release.
 
 Current latency closure evidence:
 

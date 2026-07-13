@@ -55,6 +55,10 @@ CORE_PY_COMPILE: tuple[str, ...] = (
     "scripts/rc1_latency_closure_smoke.py",
     "scripts/runtime_latency_investigation.py",
     "scripts/runtime_latency_closure_smoke.py",
+    "scripts/version_consistency_smoke.py",
+    "scripts/upgrade_compatibility_smoke.py",
+    "scripts/release_artifact_smoke.py",
+    "scripts/final_release_audit.py",
     "scripts/capability_policy_smoke.py",
     "scripts/capability_policy_audit.py",
     "scripts/universal_plan_mode_smoke.py",
@@ -104,6 +108,10 @@ def _gates() -> list[Gate]:
         Gate("full_adversarial_authorization_proof end-to-end authorization attack matrix", (sys.executable, "scripts/full_adversarial_authorization_proof.py"), 120),
         Gate("runtime_latency_investigation measured latency evidence", (sys.executable, "scripts/runtime_latency_investigation.py"), 180),
         Gate("runtime_latency_closure_smoke accepted latency record", (sys.executable, "scripts/runtime_latency_closure_smoke.py"), 120),
+        Gate("version_consistency_smoke product version truth", (sys.executable, "scripts/version_consistency_smoke.py"), 120),
+        Gate("upgrade_compatibility_smoke isolated state compatibility", (sys.executable, "scripts/upgrade_compatibility_smoke.py"), 120),
+        Gate("release_artifact_smoke source and bundle artifact audit", (sys.executable, "scripts/release_artifact_smoke.py"), 180),
+        Gate("final_release_audit version decision and release truth", (sys.executable, "scripts/final_release_audit.py"), 300),
         Gate("rc1_latency_closure_smoke latency distributions", (sys.executable, "scripts/rc1_latency_closure_smoke.py"), 180),
         Gate("perf_smoke read-only latency smoke", (sys.executable, "scripts/perf_smoke.py"), 180),
         Gate("release_smoke canonical smoke suite", (sys.executable, "scripts/release_smoke.py"), 420),
@@ -272,6 +280,7 @@ def main() -> int:
     print(f"WARNINGS_UNRESOLVED: {len(warnings)}")
     print(f"WARNINGS_ACCEPTED: {len(accepted_warnings)}")
     print(f"NOTES: {len(notes)}")
+    print(f"READY_TO_RELEASE: {'true' if not blocking_failures and not warnings else 'false'}")
     print("NEXT_ACTIONS:")
     if warnings:
         for row in warnings:
@@ -282,8 +291,8 @@ def main() -> int:
     if notes:
         for row in notes:
             print(f"- note [{row.category}] {row.gate.name}: {row.next_action}")
-    if not warnings and not notes and not blocking_failures:
-        print("- Run the fresh Debian VM install proof when ready.")
+    if not warnings and not blocking_failures:
+        print("- Ready for manual release commit/tag review; notes and accepted warnings are listed above when present.")
     if blocking_failures:
         first = blocking_failures[0]
         print("Release-blocking failure:")

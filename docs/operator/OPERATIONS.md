@@ -527,6 +527,23 @@ It uses isolated fixtures and writes machine-readable evidence to `/tmp`. It
 does not enable primary uninstall, mutate real repositories, send real
 notifications, or touch live provider accounts.
 
+## Final Release Audit
+
+Before creating a final release tag, run the final release gates:
+
+```bash
+python scripts/version_consistency_smoke.py
+python scripts/upgrade_compatibility_smoke.py
+python scripts/release_artifact_smoke.py
+python scripts/final_release_audit.py
+python scripts/prove_ready.py
+```
+
+These gates verify product-version truth, isolated state compatibility,
+release artifacts, accepted warning records, authorization proof status,
+latency closure, primary uninstall disabled, purge unsupported, and final tag
+availability. They do not create, push, or publish a tag.
+
 ## Lightweight Monitoring Mindset
 
 Do not depend on a new dashboard before you can diagnose normal issues.

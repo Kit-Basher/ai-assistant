@@ -127,16 +127,19 @@ fresh Debian VM install proof passes.
 
 ## Release Blockers
 
-- Fresh Debian VM install, first launch, setup completion, managed search
-  setup, external pack usefulness proof, rollback/uninstall, and doctor proof
-  have not been completed in a clean machine environment.
 - Public network hardening is not claimed. Do not expose the API/web UI or
   SearXNG beyond loopback for this release track.
-- Real local-LLM behavior fuzzing is not part of the release gate yet; the new
-  second-tier eval is deterministic/mocked by default.
+- A release is blocked if capability, Universal Plan, generic bypass,
+  adversarial authorization, latency closure, version consistency, artifact,
+  docs truth, or final release audit gates report unresolved failures.
 
 ## Non-Blocking Gaps To Track
 
+- Fresh Debian VM install proof remains a high-cost environmental proof. The
+  final v0.2.2 audit uses clean-checkout and installed-product local proofs;
+  do not describe that as proof of every fresh machine.
+- Real local-LLM behavior fuzzing is not part of the release gate yet; the
+  second-tier eval is deterministic/mocked by default.
 - Broader managed-action journal rollout is intentionally paused.
 - Universal capability migration covers the implemented first-party mutation
   lanes and skill-pack platform API boundary. Email/calendar providers remain

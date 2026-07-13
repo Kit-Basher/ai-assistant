@@ -7,26 +7,20 @@ line. It does not replace detailed design, operator, or checkpoint documents.
 
 ## Current Stable Checkpoint
 
-Current stable checkpoint: `v0.2.1`
+Current stable checkpoint: `v0.2.2-runtime-latency-closure-v1`
 
-Commit: `f900954` Close v0.2.1 lifecycle and release hardening
+Commit: `3463218` Runtime Latency Warning Investigation and Closure v1
 
 Summary:
 
-- Host Lifecycle Runner v1, primary update, verified rollback, preserve-data
-  uninstall wiring, strict local uninstall activation, backup/restore/cleanup,
-  runtime truth, receipts, and full sequential installed-product proof are
-  complete.
+- v0.2.2 final release audit is active. Authorization, bypass hardening,
+  adversarial proof, and latency closure are complete.
 - Primary uninstall remains disabled unless a local operator creates a valid
   activation marker. Purge remains unsupported.
-- Release warnings are zero at the v0.2.1 checkpoint.
-- The next phase is Tool Authorization and Plan Mode Maturity. Capability
-  Policy Schema and Central Authorization Gate v1, Universal Plan Mode
-  Enforcement v1, Executor Authorization Migration v1, Files/Git/Service
-  Migration v1, Communications Migration v1, Skill-Pack Permission Boundary
-  v1, Generic Mutation Bypass Hardening v1, and Full Adversarial Authorization
-  Proof v1 are complete. Runtime Latency Warning Investigation and Closure v1
-  is the active checkpoint.
+- Accepted latency variance is documented in
+  `docs/operator/RUNTIME_LATENCY_ACCEPTANCE_V1.json`.
+- The final version decision recommends `v0.2.2`; no final tag has been
+  created automatically.
 
 ## Recent Release Tags
 
@@ -41,7 +35,8 @@ Summary:
 | `v0.2.2-skill-pack-permission-boundary-v1` | 2026-07-12 | `71e25f3` | Skill-pack platform API permission boundary. |
 | `v0.2.2-generic-mutation-bypass-hardening-v1` | 2026-07-12 | `b56a449` | Repository-wide generic mutation bypass hardening. |
 | `v0.2.2-full-adversarial-authorization-proof-v1` | 2026-07-12 | `5f8f34c` | End-to-end adversarial authorization proof. |
-| `v0.2.2-runtime-latency-closure-v1` | not cut | pending | Recommended checkpoint for runtime latency warning closure. |
+| `v0.2.2-runtime-latency-closure-v1` | 2026-07-12 | `3463218` | Runtime latency warning closure with accepted evidence record. |
+| `v0.2.2` | not cut | pending | Recommended final release tag after final release audit commit. |
 | `v0.2.0-managed-searxng` | 2026-06-14 | `f26ba6f` | Managed local SearXNG safe web search. |
 | `v0.2.0-plan-mode-policy` | 2026-06-14 | `e88281b` | Central Plan Mode policy layer. |
 | `v0.2.0-plan-mode-pack-lifecycle` | 2026-06-14 | `7096852` | Plan Mode enforcement for external pack lifecycle writes. |
