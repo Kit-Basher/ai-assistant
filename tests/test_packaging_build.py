@@ -100,6 +100,12 @@ class TestPackagingBuild(unittest.TestCase):
                 self.assertIn(f"Version: {version}", metadata_text)
                 self.assertIn("Requires-Dist: openai>=1.0.0", metadata_text)
                 self.assertIn("Requires-Dist: python-telegram-bot>=22.6", metadata_text)
+                self.assertIn("Provides-Extra: test", metadata_text)
+                self.assertIn("Requires-Dist: pytest", metadata_text)
+                self.assertIn('extra == "test"', metadata_text)
+                self.assertIn("Provides-Extra: release", metadata_text)
+                self.assertIn("Requires-Dist: build", metadata_text)
+                self.assertIn('extra == "release"', metadata_text)
                 entry_points = zf.read(f"personal_agent-{version}.dist-info/entry_points.txt").decode("utf-8")
                 self.assertIn("personal-agent = agent.cli:main", entry_points)
                 self.assertIn("personal-agent-api = agent.api_server:main", entry_points)
@@ -113,6 +119,7 @@ class TestPackagingBuild(unittest.TestCase):
             with tarfile.open(sdist_path, "r:gz") as tf:
                 names = set(tf.getnames())
                 prefix = f"personal_agent-{version}"
+                self.assertIn(f"{prefix}/PKG-INFO", names)
                 self.assertIn(f"{prefix}/pyproject.toml", names)
                 self.assertIn(f"{prefix}/build_backend.py", names)
                 self.assertIn(f"{prefix}/systemd/personal-agent-api.service", names)
