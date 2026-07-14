@@ -90,7 +90,6 @@ required_inputs=(
     "$repo_root/packaging/debian/personal-agent-uninstall.sh"
     "$repo_root/packaging/debian/personal-agent-api.service.in"
     "$repo_root/packaging/personal-agent.desktop"
-    "$repo_root/llm_registry.json"
 )
 for path in "${required_inputs[@]}"; do
     [ -e "$path" ] || die "required packaging input missing: $path"
@@ -132,7 +131,6 @@ required = [
     repo_root / "packaging" / "debian" / "personal-agent-uninstall.sh",
     repo_root / "packaging" / "debian" / "personal-agent-api.service.in",
     repo_root / "packaging" / "personal-agent.desktop",
-    repo_root / "llm_registry.json",
 ]
 for path in required:
     if not path.exists():
@@ -160,7 +158,6 @@ copy_tree(repo_root / "telegram_adapter", release_root / "telegram_adapter")
 shutil.copy2(repo_root / "assets" / "icons" / "personal-agent.svg", release_root / "assets" / "icons" / "personal-agent.svg")
 shutil.copy2(repo_root / "scripts" / "launch_webui.sh", release_root / "bin" / "personal-agent-webui")
 shutil.copy2(repo_root / "packaging" / "debian" / "personal-agent-uninstall.sh", release_root / "bin" / "personal-agent-uninstall")
-shutil.copy2(repo_root / "llm_registry.json", release_root / "llm_registry.json")
 
 service_template = (repo_root / "packaging" / "debian" / "personal-agent-api.service.in").read_text(encoding="utf-8")
 service_rendered = service_template.replace("__PERSONAL_AGENT_RUNTIME_ROOT__", installed_runtime_root)

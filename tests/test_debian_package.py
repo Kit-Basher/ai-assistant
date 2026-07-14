@@ -71,6 +71,7 @@ class TestDebianPackage(unittest.TestCase):
         self.assertIn("/usr/lib/systemd/user/personal-agent-api.service", listing.stdout)
         self.assertIn("/usr/share/applications/personal-agent.desktop", listing.stdout)
         self.assertIn("/usr/share/icons/hicolor/scalable/apps/personal-agent.svg", listing.stdout)
+        self.assertNotIn("/usr/lib/personal-agent/runtime/releases/" + version + "/llm_registry.json", listing.stdout)
 
         self.assertTrue((stage_root / "usr" / "share" / "doc" / "personal-agent" / "README.Debian").is_file())
         self.assertTrue(checksum_path.read_text(encoding="utf-8").strip().endswith(deb_path.name))
@@ -210,8 +211,6 @@ class TestDebianPackage(unittest.TestCase):
             (repo_root / "packaging" / "debian" / "personal-agent-uninstall.sh").write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
             (repo_root / "packaging" / "debian" / "personal-agent-api.service.in").write_text("[Unit]\nDescription=x\n", encoding="utf-8")
             (repo_root / "packaging" / "personal-agent.desktop").write_text("[Desktop Entry]\nName=x\nExec=__PERSONAL_AGENT_LAUNCHER__\nIcon=personal-agent\nType=Application\n", encoding="utf-8")
-            (repo_root / "llm_registry.json").write_text("{}\n", encoding="utf-8")
-
             proc = _run_script(
                 REPO_ROOT / "scripts" / "build_deb.sh",
                 env=os.environ.copy(),

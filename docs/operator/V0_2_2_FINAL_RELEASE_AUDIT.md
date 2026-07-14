@@ -7,6 +7,31 @@ Checkpoint under audit:
 
 Final release tag has not been created.
 
+## Clean Checkout Reproducibility Addendum
+
+Final clean release verification at checkpoint
+`9f74f7af3ee0b823de520da71e644bbab93a34ec` was intentionally stopped after a
+detached clean worktree failed default pytest. The failures were not accepted as
+environmental skips.
+
+Root causes:
+
+- one config test hard-coded `/home/c/personal-agent/control`;
+- Debian package build required ignored local `llm_registry.json` state;
+- verification tools were not declared through package extras;
+- Web UI assets needed an explicit clean build from `desktop/`.
+
+Closure requirements added after that finding:
+
+- source and tests must work outside `/home/c/personal-agent`;
+- `llm_registry.json` is mutable runtime state and is not packaged;
+- `python -m pip install -e '.[test,release]'` is the supported clean
+  verification install command;
+- `scripts/clean_checkout_reproducibility_smoke.py` and
+  `scripts/clean_checkout_debian_package_smoke.py` are release-blocking gates;
+- production frontend npm audit must be clean, with dev/build advisories
+  documented separately.
+
 ## Full Pytest Closure Addendum
 
 The final audit initially found that curated release gates were green while

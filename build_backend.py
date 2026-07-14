@@ -197,6 +197,19 @@ def _metadata_text() -> str:
         dep = str(dependency).strip()
         if dep:
             lines.append(f"Requires-Dist: {dep}")
+    optional_dependencies = project.get("optional-dependencies")
+    if isinstance(optional_dependencies, dict):
+        for extra in sorted(optional_dependencies):
+            normalized_extra = str(extra).strip()
+            dependencies = optional_dependencies.get(extra)
+            if not normalized_extra or not isinstance(dependencies, list):
+                continue
+            lines.append(f"Provides-Extra: {normalized_extra}")
+            marker_extra = normalized_extra.replace('"', '\\"')
+            for dependency in dependencies:
+                dep = str(dependency).strip()
+                if dep:
+                    lines.append(f'Requires-Dist: {dep}; extra == "{marker_extra}"')
     urls = project.get("urls")
     if isinstance(urls, dict):
         for key in sorted(urls):
@@ -384,6 +397,9 @@ def build_sdist(sdist_directory: str, config_settings: dict[str, object] | None 
     with sdist_path.open("wb") as raw_handle:
         with gzip.GzipFile(filename="", mode="wb", fileobj=raw_handle, mtime=_DEFAULT_TIMESTAMP) as gz_handle:
             with tarfile.open(fileobj=gz_handle, mode="w:") as tf:
+                metadata_payload = _metadata_text().encode("utf-8")
+                metadata_info = _tar_info(f"{root_prefix}/PKG-INFO", len(metadata_payload))
+                tf.addfile(metadata_info, io.BytesIO(metadata_payload))
                 for rel in _iter_sdist_files():
                     payload = (ROOT / rel).read_bytes()
                     archive_path = f"{root_prefix}/{rel.as_posix()}"

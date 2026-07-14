@@ -316,3 +316,21 @@ For the live workstation, `/search/status` is the authoritative runtime check
 for managed SearXNG. A live PASS requires `enabled=true`, `provider=searxng`,
 `endpoint_configured=true`, `available=true`, a loopback redacted base URL, and
 successful metadata-only `/search/query` behavior.
+
+## v0.2.2 Clean Checkout Reproducibility Closure
+
+Checkpoint under repair:
+
+- Tag: `v0.2.2-skipped-test-debt-closure-v1`
+- Commit: `9f74f7af3ee0b823de520da71e644bbab93a34ec`
+
+The final release verification found that the primary checkout was green while
+a detached clean worktree was not. The release ledger now treats clean-checkout
+proof as mandatory:
+
+- no release test may depend on `/home/c/personal-agent`;
+- `llm_registry.json` is ignored local runtime state and is not a package input;
+- verification tools are installed through `.[test,release]`;
+- Web UI assets are built from `desktop/` sources during clean verification;
+- `scripts/clean_checkout_reproducibility_smoke.py` and
+  `scripts/clean_checkout_debian_package_smoke.py` are release-blocking gates.

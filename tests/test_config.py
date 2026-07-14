@@ -371,13 +371,14 @@ class TestConfig(unittest.TestCase):
             os.environ.pop("AGENT_CONTROL_TASKS_PATH", None)
             os.environ.pop("AGENT_CONTROL_EVENTS_PATH", None)
             config = load_config()
-        self.assertEqual(str(Path("/home/c/personal-agent/control")), config.control_dir)
-        self.assertEqual(str(Path("/home/c/personal-agent/control/master_plan.md")), config.control_master_plan_path)
+        expected_control_dir = Path(__file__).resolve().parents[1] / "control"
+        self.assertEqual(str(expected_control_dir), config.control_dir)
+        self.assertEqual(str(expected_control_dir / "master_plan.md"), config.control_master_plan_path)
         self.assertEqual(
-            str(Path("/home/c/personal-agent/control/DEVELOPMENT_TASKS.md")),
+            str(expected_control_dir / "DEVELOPMENT_TASKS.md"),
             config.control_tasks_path,
         )
-        self.assertEqual(str(Path("/home/c/personal-agent/control/agent_events.jsonl")), config.control_events_path)
+        self.assertEqual(str(expected_control_dir / "agent_events.jsonl"), config.control_events_path)
 
         with patch.dict(
             os.environ,

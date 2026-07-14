@@ -418,6 +418,25 @@ covering:
 A passing run means the core supported product path is still coherent and the
 main safety/recovery gates are intact.
 
+For the v0.2.2 release line, final verification must also work from a clean
+checkout rather than only the operator's primary working tree:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e '.[test,release]'
+cd desktop && npm ci && npm run build && cd ..
+python -m pytest -q
+python scripts/clean_checkout_reproducibility_smoke.py
+python scripts/clean_checkout_debian_package_smoke.py
+python scripts/final_release_audit.py
+python scripts/prove_ready.py
+```
+
+`llm_registry.json` is local runtime state. Release bundles and Debian packages
+must build without copying a developer's ignored local registry file.
+
 If you want the heavier follow-up validation path, run:
 - `python scripts/release_validation_extended.py`
 

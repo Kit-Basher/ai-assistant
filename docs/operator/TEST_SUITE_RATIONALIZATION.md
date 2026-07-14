@@ -261,6 +261,18 @@ node ids recorded in `docs/operator/V0_2_2_PYTEST_FAILURE_INVENTORY.json`;
 every skipped case must name a replacement proof. Do not add broad ignore
 patterns or unchecked xfails to make the suite green.
 
+Run clean-checkout reproducibility closure before tagging:
+
+```bash
+python scripts/clean_checkout_reproducibility_smoke.py
+python scripts/clean_checkout_debian_package_smoke.py
+```
+
+These gates protect against primary-checkout-only success. They verify declared
+test/release extras, repository-relative path assumptions, reproducible Debian
+package inputs, absence of mutable `llm_registry.json` from packages, and
+documented frontend dependency audit status.
+
 ### 6. Historical/Manual Proofs
 
 Run only when the relevant subsystem is being worked or before a major release:

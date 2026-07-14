@@ -57,7 +57,7 @@ def main() -> int:
     checks.append(_check("product version selected", version_text == VERSION, version_text))
 
     project_state = (ROOT / "docs/operator/PROJECT_STATE.md").read_text(encoding="utf-8")
-    checks.append(_check("active phase is skipped-test debt closure", "Active Phase: Skipped Test Debt Closure v1" in project_state, "PROJECT_STATE.md"))
+    checks.append(_check("active phase is clean-checkout reproducibility closure", "Active Phase: Clean Checkout Reproducibility Closure v1" in project_state, "PROJECT_STATE.md"))
 
     final_doc = ROOT / "docs/operator/V0_2_2_FINAL_RELEASE_AUDIT.md"
     final_text = final_doc.read_text(encoding="utf-8") if final_doc.exists() else ""
@@ -84,6 +84,8 @@ def main() -> int:
     checks.append(_script_check("version consistency smoke", "scripts/version_consistency_smoke.py"))
     checks.append(_script_check("upgrade compatibility smoke", "scripts/upgrade_compatibility_smoke.py"))
     checks.append(_script_check("release artifact smoke", "scripts/release_artifact_smoke.py", timeout=180))
+    checks.append(_script_check("clean checkout reproducibility smoke", "scripts/clean_checkout_reproducibility_smoke.py", timeout=360))
+    checks.append(_script_check("clean checkout Debian package smoke", "scripts/clean_checkout_debian_package_smoke.py", timeout=240))
     checks.append(_script_check("full pytest closure smoke", "scripts/full_pytest_closure_smoke.py", timeout=1800))
     checks.append(_script_check("full pytest failure triage", "scripts/full_pytest_failure_triage.py", timeout=1800))
     checks.append(_script_check("skipped test debt inventory", "scripts/skipped_test_debt_inventory.py"))

@@ -5,19 +5,39 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.2-full-pytest-closure-v1`
-- Commit: `144a240767937f035b77abf5854f15df19741e05`
+- Tag: `v0.2.2-skipped-test-debt-closure-v1`
+- Commit: `9f74f7af3ee0b823de520da71e644bbab93a34ec`
 - Fresh Debian VM proof: not run
-- Release status: skipped-test debt closure is active; final tag has not been created
+- Release status: clean-checkout reproducibility closure is active; final tag has not been created
 
-## Active Phase: Skipped Test Debt Closure v1
+## Active Phase: Clean Checkout Reproducibility Closure v1
 
-The complete failure set has been classified, but 89 non-environmental tests
-remained excluded from default pytest after the first closure pass.
+The release candidate passes in the primary checkout, but final isolated
+verification exposed checkout-path assumptions, an ignored local packaging
+dependency, and incomplete verification dependency declarations.
 
-This phase repairs or replaces stale expectations, fixture defects, isolation
-defects, and obsolete architecture coverage so only genuinely
-environment-dependent tests remain skipped before the final `v0.2.2` release.
+This phase removes those machine-local assumptions and proves that tests and
+release artifacts are reproducible from a clean checkout.
+
+Clean-checkout closure policy:
+
+- source checkout behavior must be repository-relative, not tied to
+  `/home/c/personal-agent`;
+- `llm_registry.json` is mutable local runtime state and is not a Debian package
+  build input;
+- `python -m pip install -e '.[test,release]'` installs verification tools;
+- desktop assets are built from tracked `desktop/` sources during clean
+  verification;
+- production frontend dependency audit must be clean, and any dev/build
+  advisories must be documented with release impact;
+- `scripts/clean_checkout_reproducibility_smoke.py` and
+  `scripts/clean_checkout_debian_package_smoke.py` are release-blocking gates.
+
+## Completed Checkpoint: Skipped Test Debt Closure v1
+
+The complete failure set has been classified, and 89 non-environmental tests
+that remained excluded from default pytest after the first closure pass have
+been repaired, replaced, or formally removed.
 
 Default pytest closure policy:
 

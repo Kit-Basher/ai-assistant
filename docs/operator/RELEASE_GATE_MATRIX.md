@@ -28,6 +28,8 @@ local service:
 - `python scripts/version_consistency_smoke.py`
 - `python scripts/upgrade_compatibility_smoke.py`
 - `python scripts/release_artifact_smoke.py`
+- `python scripts/clean_checkout_reproducibility_smoke.py`
+- `python scripts/clean_checkout_debian_package_smoke.py`
 - `python scripts/full_pytest_closure_smoke.py`
 - `python scripts/full_pytest_failure_triage.py`
 - `python scripts/skipped_test_debt_inventory.py`
@@ -85,6 +87,8 @@ Commands:
 - `python scripts/version_consistency_smoke.py`
 - `python scripts/upgrade_compatibility_smoke.py`
 - `python scripts/release_artifact_smoke.py`
+- `python scripts/clean_checkout_reproducibility_smoke.py`
+- `python scripts/clean_checkout_debian_package_smoke.py`
 - `python scripts/final_release_audit.py`
 - `python scripts/perf_smoke.py`
 - `python scripts/rc1_latency_closure_smoke.py`
@@ -156,6 +160,14 @@ store, skill permission diffs, and rollback guidance remain compatible.
 `release_artifact_smoke.py` builds the supported release bundle plus wheel and
 sdist in `/tmp`, then verifies version metadata and rejects databases, caches,
 bytecode, `.env`, `/tmp` evidence, and personal source paths.
+
+`clean_checkout_reproducibility_smoke.py` verifies that release readiness no
+longer depends on the primary checkout path, undeclared Python verification
+tools, ignored local LLM registry state, or undocumented frontend audit status.
+
+`clean_checkout_debian_package_smoke.py` builds the Debian package from tracked
+or generated inputs and verifies the artifact omits mutable local
+`llm_registry.json` state and personal paths.
 
 `full_pytest_closure_smoke.py` is the default source-tree pytest closure gate.
 It runs `python -m pytest -q -rs`, requires zero current failures, and verifies
