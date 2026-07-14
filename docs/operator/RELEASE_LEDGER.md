@@ -7,15 +7,17 @@ line. It does not replace detailed design, operator, or checkpoint documents.
 
 ## Current Stable Checkpoint
 
-Current stable checkpoint: `v0.2.2-final-release-audit-v1`
+Current stable checkpoint: `v0.2.2-full-pytest-closure-v1`
 
-Commit: `5238597` v0.2.2 Final Release Audit and Version Decision
+Commit: `144a240` Full Pytest Failure Triage and Closure v1
 
 Summary:
 
-- Full Pytest Failure Triage and Closure v1 is active. The final audit tooling
-  exists, curated release gates pass, and default pytest closure is now
-  enforced through an exact failure inventory.
+- Skipped Test Debt Closure v1 is active. The full pytest failure inventory
+  remains historical evidence, 89 non-environmental entries are resolved by
+  replacement tests, and only 22 environment-dependent exact node ids remain
+  skipped.
+- Current default pytest result: `2477 passed, 22 skipped, 0 failed`.
 - Primary uninstall remains disabled unless a local operator creates a valid
   activation marker. Purge remains unsupported.
 - Accepted latency variance is documented in
@@ -38,6 +40,7 @@ Summary:
 | `v0.2.2-full-adversarial-authorization-proof-v1` | 2026-07-12 | `5f8f34c` | End-to-end adversarial authorization proof. |
 | `v0.2.2-runtime-latency-closure-v1` | 2026-07-12 | `3463218` | Runtime latency warning closure with accepted evidence record. |
 | `v0.2.2-final-release-audit-v1` | 2026-07-13 | `5238597` | Final release audit tooling and v0.2.2 version decision. |
+| `v0.2.2-full-pytest-closure-v1` | 2026-07-13 | `144a240` | Full pytest failure inventory and initial exact-skip closure. |
 | `v0.2.2` | not cut | pending | Recommended final release tag after final release audit commit. |
 | `v0.2.0-managed-searxng` | 2026-06-14 | `f26ba6f` | Managed local SearXNG safe web search. |
 | `v0.2.0-plan-mode-policy` | 2026-06-14 | `e88281b` | Central Plan Mode policy layer. |

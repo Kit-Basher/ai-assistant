@@ -30,6 +30,8 @@ local service:
 - `python scripts/release_artifact_smoke.py`
 - `python scripts/full_pytest_closure_smoke.py`
 - `python scripts/full_pytest_failure_triage.py`
+- `python scripts/skipped_test_debt_inventory.py`
+- `python scripts/skipped_test_debt_closure_smoke.py`
 - `python scripts/final_release_audit.py`
 - `python -m pytest -q tests/test_release_gate.py tests/test_release_smoke.py`
 - `python -m pytest -q tests/test_backup_restore_proof.py tests/test_pre_vm_complete_gate.py`
@@ -157,12 +159,22 @@ bytecode, `.env`, `/tmp` evidence, and personal source paths.
 
 `full_pytest_closure_smoke.py` is the default source-tree pytest closure gate.
 It runs `python -m pytest -q -rs`, requires zero current failures, and verifies
-that any skips match the exact node ids inventoried in
+that any skips match the exact environment-dependent node ids inventoried in
 `docs/operator/V0_2_2_PYTEST_FAILURE_INVENTORY.json`.
 
 `full_pytest_failure_triage.py` verifies that the original 93 full-pytest
-failures are classified, non-duplicated, and mapped to replacement proofs. It
-reuses the closure-smoke evidence when available.
+failures plus the 18 second-wave entries are classified, non-duplicated, and
+mapped to replacement proofs. It verifies that the 89 non-environmental entries
+are resolved and that unexpected skips are zero.
+
+`skipped_test_debt_inventory.py` verifies historical skip-debt accounting:
+111 historical entries, 22 environment-dependent exclusions, and
+`NON_ENVIRONMENTAL_DEBT=0`.
+
+`skipped_test_debt_closure_smoke.py` runs default pytest and verifies that only
+the 22 environment-dependent exclusions remain skipped, no broad ignore pattern
+is present, no unexpected xfail/xpass exists, and final release audit includes
+the closure gate.
 
 `final_release_audit.py` is the aggregate final-release truth gate. It checks
 version decision docs, release notes, accepted warnings, pytest closure,

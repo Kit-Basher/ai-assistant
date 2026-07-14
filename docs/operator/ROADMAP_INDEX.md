@@ -30,6 +30,7 @@ future work where to look first.
 | Runtime latency closure | `docs/operator/RUNTIME_LATENCY_CLOSURE_V1.md` |
 | v0.2.2 final release audit | `docs/operator/V0_2_2_FINAL_RELEASE_AUDIT.md` |
 | v0.2.2 full pytest closure | `docs/operator/FULL_PYTEST_FAILURE_TRIAGE_V1.md` |
+| v0.2.2 skipped-test debt closure | `docs/operator/SKIPPED_TEST_DEBT_CLOSURE_V1.md` |
 | v0.2.2 release notes | `docs/releases/v0.2.2.md` |
 | Managed local services and sandboxed tools | `docs/design/MANAGED_LOCAL_SERVICES_AND_SANDBOXED_TOOLS.md` |
 | Managed SearXNG operator details | `docs/operator/SAFE_WEB_SEARCH.md` |
@@ -107,11 +108,11 @@ because they overlap current docs.
 
 ## Current Next Work
 
-1. Full Pytest Failure Triage and Closure v1 is the active release track. The
-   final audit tooling exists and curated gates pass, but the default full
-   pytest suite reported 93 failures. This batch classifies every original
-   failure, excludes only exact inventoried node ids with replacement proofs,
-   and makes default pytest closure mandatory before any final tag is created.
+1. Skipped Test Debt Closure v1 is the active release track. The full pytest
+   failure inventory is complete, and default pytest now runs with zero
+   failures. This batch closes the remaining 89 non-environmental historical
+   exclusions so only the 22 genuinely environment-dependent cases remain
+   skipped with replacement gates.
 2. Keep managed SearXNG live verification separate from isolated proof:
    `prove_core_workflows.py` can honestly report search `BLOCKED` when no
    backend is configured, while live `/search/status` proves the configured

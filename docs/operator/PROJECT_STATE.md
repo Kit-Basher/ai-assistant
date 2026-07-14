@@ -5,32 +5,46 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.2-final-release-audit-v1`
-- Commit: `523859767278f37f54ea1784802ae43aa5538b92`
+- Tag: `v0.2.2-full-pytest-closure-v1`
+- Commit: `144a240767937f035b77abf5854f15df19741e05`
 - Fresh Debian VM proof: not run
-- Release status: full pytest closure is active; final tag has not been created
+- Release status: skipped-test debt closure is active; final tag has not been created
 
-## Active Phase: Full Pytest Failure Triage and Closure v1
+## Active Phase: Skipped Test Debt Closure v1
 
-The curated release gates pass, but the default full pytest suite reported
-93 failures at the final-audit checkpoint.
+The complete failure set has been classified, but 89 non-environmental tests
+remained excluded from default pytest after the first closure pass.
 
-This phase classifies every failure, fixes genuine regressions, updates stale
-expectations, isolates legitimate environment-dependent tests, and establishes
-one authoritative default test result before the final `v0.2.2` tag.
+This phase repairs or replaces stale expectations, fixture defects, isolation
+defects, and obsolete architecture coverage so only genuinely
+environment-dependent tests remain skipped before the final `v0.2.2` release.
 
 Default pytest closure policy:
 
 - `python -m pytest -q` must exit zero.
-- The original 93 failures are inventoried in
+- The original 93 failures remain historically inventoried in
   `docs/operator/V0_2_2_PYTEST_FAILURE_INVENTORY.json`.
 - A second-wave closure set of 18 additional order/fixture-dependent failures
   is recorded separately in the same inventory.
+- The 89 non-environmental entries are resolved by current-contract
+  replacement proof tests and no longer count as skips.
+- The remaining 22 skips are environment-dependent exclusions with named
+  replacement gates.
 - Exclusions are exact node ids, not broad directory ignores.
-- Every excluded case has a classification and named replacement proof.
 - `scripts/full_pytest_closure_smoke.py`,
-  `scripts/full_pytest_failure_triage.py`, `scripts/final_release_audit.py`,
-  and `scripts/prove_ready.py` enforce this closure before release.
+  `scripts/full_pytest_failure_triage.py`,
+  `scripts/skipped_test_debt_inventory.py`,
+  `scripts/skipped_test_debt_closure_smoke.py`,
+  `scripts/final_release_audit.py`, and `scripts/prove_ready.py` enforce this
+  closure before release.
+
+Current default pytest proof:
+
+- `python -m pytest -q`: `2477 passed, 22 skipped, 0 failed`.
+- `python scripts/skipped_test_debt_inventory.py`:
+  `NON_ENVIRONMENTAL_DEBT=0`.
+- `python scripts/skipped_test_debt_closure_smoke.py`:
+  `PASS=15 WARN=0 FAIL=0`, `ALLOWED_ENVIRONMENTAL_SKIPS=22`.
 
 Current version decision:
 

@@ -3,6 +3,8 @@
 Current checkpoint truth lives in `docs/operator/PROJECT_STATE.md`.
 Current full-pytest failure closure lives in
 `docs/operator/FULL_PYTEST_FAILURE_TRIAGE_V1.md`.
+Skipped-test debt closure lives in
+`docs/operator/SKIPPED_TEST_DEBT_CLOSURE_V1.md`.
 Subsystem reliability guarantees and missing fault-injection coverage live in
 `docs/operator/RELIABILITY_COVERAGE_GAP_AUDIT.md`.
 
@@ -16,19 +18,22 @@ a request to delete coverage immediately.
 - Smoke/proof/eval scripts by naming pattern: 41.
 - Primary live installed-product gates: 16.
 - Primary CI-safe deterministic gates: 9.
-- Current full `python -m pytest -q` closure baseline:
+- Original full `python -m pytest -q` closure baseline:
   `93 failed, 2406 passed` in 1071.29 seconds at
   `v0.2.2-final-release-audit-v1`.
 - All 93 original failures are inventoried in
   `docs/operator/V0_2_2_PYTEST_FAILURE_INVENTORY.json`. A second-wave closure
-  set of 18 additional order/fixture-dependent failures is recorded separately
-  in the same file. Default pytest excludes only those exact node ids while
-  replacement proof gates remain release-blocking.
+  set of 18 additional failures is recorded separately in the same file.
+- Skipped Test Debt Closure v1 resolved the 89 non-environmental historical
+  entries. Default pytest now excludes only the 22 environment-dependent exact
+  node ids while replacement proof gates remain release-blocking.
+- Current default `python -m pytest -q` result:
+  `2477 passed, 22 skipped, 0 failed`.
 
 The suite has good safety coverage, but it has accumulated overlapping proof
 lanes. The default source-tree suite is now authoritative again: it must exit
-zero, with exact inventory skips only until those stale/environment-dependent
-tests are rewritten or moved to their proper proof layer.
+zero, with only legitimate environment-dependent skips and named replacement
+gates.
 
 The reliability coverage audit is the guardrail for future test additions: add
 coverage to close a named subsystem guarantee or fault-injection gap, not just
@@ -74,6 +79,8 @@ because another phrasing failed once.
 | `scripts/release_artifact_smoke.py` | Builds and inspects release bundle, wheel, and sdist for version metadata, release notes, and forbidden state/cache/secret/personal-path content. | Medium | No | Writes artifacts under `/tmp` only | Yes | Yes for final release audit | No | Keep; do not publish artifacts. |
 | `scripts/full_pytest_closure_smoke.py` | Runs default `python -m pytest -q -rs`, requires zero failures, and verifies expected skips match the exact v0.2.2 failure inventory. | Slow | No | No | Yes | Yes for final release audit | No | Keep until every inventory skip is rewritten or moved to a replacement gate. |
 | `scripts/full_pytest_failure_triage.py` | Verifies the original 93 full-pytest failures are classified, non-duplicated, mapped to replacement proofs, and currently closed. | Fast after closure evidence exists | No | No | Yes | Yes for final release audit | No | Keep as the inventory guard; it is not a permanent allowlist for new failures. |
+| `scripts/skipped_test_debt_inventory.py` | Reports historical skip-debt accounting and fails if the 89 non-environmental entries are not resolved. | Fast | No | No | Yes | Yes for final release audit | No | Keep until the historical inventory is fully retired. |
+| `scripts/skipped_test_debt_closure_smoke.py` | Runs default pytest and verifies `NON_ENVIRONMENTAL_DEBT=0`, exact environmental skips, no unexpected xfail/xpass, and final audit integration. | Slow | No | No | Yes | Yes for final release audit | No | Keep while historical environmental exclusions remain. |
 | `scripts/final_release_audit.py` | Aggregate final release truth gate for version decision, accepted warnings, pytest closure, authorization audits, adversarial proof, latency closure, artifacts, docs, primary uninstall disabled, purge unsupported, and tag availability. | Slow | No | No live mutation | Yes | Yes for final release audit | No | Keep as the final local gate before manual commit/tag review. |
 | `scripts/perf_smoke.py` | Latency/no-LLM deterministic route check with robust samples. | Medium | Yes | No | No | Warning-only unless extreme | Yes | Keep warning-only; accepted warnings require `RUNTIME_LATENCY_ACCEPTANCE_V1.json`. |
 | `scripts/rc1_latency_closure_smoke.py` | RC1 latency distribution proof for `/ready`, `/state`, `/search/status`, package-state lookup, package preview, and pending-action status. | Medium | Yes | No | No | Yes for latency closure | Yes | Keep as the installed distribution gate; accepted warnings must remain evidence-backed. |

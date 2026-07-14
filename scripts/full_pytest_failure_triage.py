@@ -26,6 +26,7 @@ ALLOWED_CLASSIFICATIONS = {
     "obsolete_test",
     "unknown",
 }
+NON_ENV_CLASSES = {"stale_expectation", "test_fixture_bug", "test_isolation_bug", "obsolete_test"}
 
 
 def _load_inventory() -> dict:
@@ -41,7 +42,7 @@ def _failed_nodeids_from_text(text: str) -> list[str]:
     return nodeids
 
 
-def _current_default_pytest() -> tuple[int, str, int | None]:
+def _current_default_pytest(*, expected_skips: int) -> tuple[int, str, int | None]:
     if CLOSURE_EVIDENCE.exists():
         try:
             parsed = json.loads(CLOSURE_EVIDENCE.read_text(encoding="utf-8"))
@@ -49,7 +50,10 @@ def _current_default_pytest() -> tuple[int, str, int | None]:
             pass
         else:
             output = str(parsed.get("output") or "")
-            return int(parsed.get("returncode") or 0), output, int(parsed.get("skipped") or 0)
+            skipped = int(parsed.get("skipped") or 0)
+            failed = parsed.get("failed_nodeids")
+            if int(parsed.get("returncode") or 0) == 0 and skipped == expected_skips and failed == []:
+                return 0, output, skipped
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-rs"],
         cwd=ROOT,
@@ -100,11 +104,26 @@ def main() -> int:
     baseline_uninventoried = sorted(baseline_set - inventory_set)
     inventory_not_in_baseline = sorted(set(original_ids) - baseline_set) if baseline_set else []
 
-    current_rc, current_output, evidence_skipped = _current_default_pytest()
+    classification_totals = Counter(str(row.get("classification") or "unknown") for row in all_rows if isinstance(row, dict))
+    resolved_non_environmental = [
+        row
+        for row in all_rows
+        if isinstance(row, dict)
+        and str(row.get("classification") or "") in NON_ENV_CLASSES
+        and str(row.get("status") or "") in {"resolved", "removed_with_replacement"}
+    ]
+    environmental_exclusions = [
+        row
+        for row in all_rows
+        if isinstance(row, dict)
+        and str(row.get("classification") or "") == "environment_dependent"
+        and str(row.get("status") or "") == "environmental_exclusion"
+    ]
+    current_rc, current_output, evidence_skipped = _current_default_pytest(expected_skips=len(environmental_exclusions))
     current_failed = _failed_nodeids_from_text(current_output)
     skipped_match = re.search(r"(\d+) skipped", current_output)
     skipped_count = evidence_skipped if evidence_skipped is not None else (int(skipped_match.group(1)) if skipped_match else 0)
-    classification_totals = Counter(str(row.get("classification") or "unknown") for row in all_rows if isinstance(row, dict))
+    unexpected_skips = max(0, skipped_count - len(environmental_exclusions))
 
     release_blockers = 0
     if len(original_ids) != int(parsed.get("baseline", {}).get("failed", len(original_ids))):
@@ -113,14 +132,23 @@ def main() -> int:
         release_blockers += 1
     if current_rc != 0 or current_failed:
         release_blockers += 1
-    if skipped_count < len(inventory_ids):
+    if len(resolved_non_environmental) != sum(classification_totals.get(name, 0) for name in NON_ENV_CLASSES):
+        release_blockers += 1
+    if len(environmental_exclusions) != classification_totals.get("environment_dependent", 0):
+        release_blockers += 1
+    if unexpected_skips:
         release_blockers += 1
 
-    print(f"BASELINE_FAILURES={parsed.get('baseline', {}).get('failed', len(original_ids))}")
+    print(f"BASELINE_FAILURES={len(inventory_ids)}")
+    print(f"ORIGINAL_BASELINE_FAILURES={parsed.get('baseline', {}).get('failed', len(original_ids))}")
+    print(f"HISTORICAL_FAILURES={len(inventory_ids)}")
+    print(f"RESOLVED_NON_ENVIRONMENTAL={len(resolved_non_environmental)}")
+    print(f"ENVIRONMENTAL_EXCLUSIONS={len(environmental_exclusions)}")
     print(f"CURRENT_FAILURES={len(current_failed)}")
+    print(f"UNEXPECTED_SKIPS={unexpected_skips}")
     print(f"CLASSIFIED={len(inventory_ids) - len(unclassified)}")
     print(f"UNCLASSIFIED={len(unclassified)}")
-    print(f"RESOLVED={len(inventory_ids)}")
+    print(f"RESOLVED={len(resolved_non_environmental)}")
     print(f"EXCLUDED={skipped_count}")
     print(f"CLASSIFICATION_TOTALS={json.dumps(dict(sorted(classification_totals.items())), sort_keys=True)}")
     print(f"DUPLICATE_IDS={len(duplicate_ids)}")

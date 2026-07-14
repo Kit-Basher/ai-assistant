@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 INVENTORY = ROOT / "docs" / "operator" / "V0_2_2_PYTEST_FAILURE_INVENTORY.json"
 PYTEST_INI = ROOT / "pytest.ini"
 EVIDENCE = Path("/tmp/v022-full-pytest-closure.json")
+NON_ENV_CLASSES = {"stale_expectation", "test_isolation_bug", "test_fixture_bug", "obsolete_test"}
 
 
 def _run(args: list[str], *, timeout: int = 1500) -> subprocess.CompletedProcess[str]:
@@ -47,8 +48,24 @@ def main() -> int:
     _check("no duplicate test ids", not duplicate_ids, json.dumps(duplicate_ids[:10]), results)
 
     all_rows = [*failures, *additional]
+    resolved_non_environmental = [
+        row
+        for row in all_rows
+        if isinstance(row, dict)
+        and str(row.get("classification") or "") in NON_ENV_CLASSES
+        and str(row.get("status") or "") in {"resolved", "removed_with_replacement"}
+    ]
+    environmental_exclusions = [
+        row
+        for row in all_rows
+        if isinstance(row, dict)
+        and str(row.get("classification") or "") == "environment_dependent"
+        and str(row.get("status") or "") == "environmental_exclusion"
+    ]
     unclassified = [row for row in all_rows if not isinstance(row, dict) or str(row.get("classification") or "") == "unknown"]
     _check("no unclassified failures", not unclassified, f"count={len(unclassified)}", results)
+    _check("non-environmental historical tests are resolved", len(resolved_non_environmental) == 89, f"count={len(resolved_non_environmental)}", results)
+    _check("environmental exclusions remain narrow", len(environmental_exclusions) == 22, f"count={len(environmental_exclusions)}", results)
 
     missing_replacements = [row for row in all_rows if isinstance(row, dict) and not str(row.get("replacement_proof") or "").strip()]
     _check("release-gate replacement scripts named", not missing_replacements, f"count={len(missing_replacements)}", results)
@@ -69,6 +86,7 @@ def main() -> int:
 
     skipped_match = re.search(r"(\d+) skipped", output)
     skipped = int(skipped_match.group(1)) if skipped_match else 0
+    unexpected_skips = max(0, skipped - len(environmental_exclusions))
     EVIDENCE.write_text(
         json.dumps(
             {
@@ -84,7 +102,8 @@ def main() -> int:
         + "\n",
         encoding="utf-8",
     )
-    _check("expected skips match inventory", skipped == len(ids), f"skipped={skipped} inventory={len(ids)}", results)
+    _check("expected skips match environmental inventory", skipped == len(environmental_exclusions), f"skipped={skipped} environmental={len(environmental_exclusions)}", results)
+    _check("no unexpected skips", unexpected_skips == 0, f"unexpected={unexpected_skips}", results)
     _check("no unexpected xfails", "xfailed" not in output and "xpassed" not in output, "pytest -q -rs", results)
     _check("default suite does not require live state", "installed_product" in marker_text and "external_provider" in marker_text, "markers documented", results)
 

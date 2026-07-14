@@ -22,11 +22,23 @@ The final release decision now requires:
 
 - `python -m pytest -q` exits zero;
 - all original failures are classified;
-- excluded tests are exact inventoried node ids with replacement proofs,
-  including the separately recorded second-wave closure set;
+- the 89 non-environmental historical entries are resolved or replaced, not
+  skipped;
+- the only remaining skips are the 22 environment-dependent exact node ids with
+  replacement gates;
 - no broad ignore pattern hides failures;
 - `scripts/full_pytest_closure_smoke.py` and
-  `scripts/full_pytest_failure_triage.py` pass.
+  `scripts/full_pytest_failure_triage.py` pass;
+- `scripts/skipped_test_debt_inventory.py` reports
+  `NON_ENVIRONMENTAL_DEBT=0`;
+- `scripts/skipped_test_debt_closure_smoke.py` reports
+  `RELEASE_BLOCKERS=0`.
+
+Current closure result:
+
+```text
+2477 passed, 22 skipped, 0 failed
+```
 
 ## Version Decision
 

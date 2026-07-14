@@ -130,6 +130,22 @@ The current closure uses only `full_pytest_triage_excluded` for the exact
 inventoried node ids. Future use of the other markers must name the replacement
 release gate.
 
+## Skipped-Test Debt Closure
+
+The first closure pass left 111 exact skips. Skipped Test Debt Closure v1
+resolved the 89 non-environmental entries and left only the 22
+environment-dependent exclusions in the default suite.
+
+Current result:
+
+```text
+python -m pytest -q
+2477 passed, 22 skipped, 0 failed
+```
+
+The closure status is documented in
+`docs/operator/SKIPPED_TEST_DEBT_CLOSURE_V1.md`.
+
 ## Closure Gates
 
 Two new scripts enforce this policy:
@@ -140,11 +156,15 @@ python scripts/full_pytest_closure_smoke.py
 ```
 
 `full_pytest_closure_smoke.py` runs `python -m pytest -q -rs`, verifies zero
-current failures, and checks that expected skips match the inventory count.
+current failures, and checks that expected skips match the environmental
+exclusion count.
 
 `full_pytest_failure_triage.py` compares the reproduced baseline with the
-inventory and reuses the closure-smoke evidence so release tooling does not
-needlessly rerun the entire suite.
+inventory and verifies that non-environmental debt is resolved.
+
+`skipped_test_debt_closure_smoke.py` verifies
+`NON_ENVIRONMENTAL_DEBT=0`, exact environmental exclusions, default pytest
+success, and release-audit integration.
 
 `final_release_audit.py` and `prove_ready.py` now require these gates.
 
