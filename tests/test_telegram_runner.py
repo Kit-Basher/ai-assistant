@@ -47,6 +47,34 @@ class TestTelegramRunner(unittest.TestCase):
             class _FakeApp:
                 def __init__(self) -> None:
                     self.updater = _FakeUpdater()
+                    self.bot_data = {
+                        "_telegram_transport_health": {
+                            "handler_registered": True,
+                            "last_update_received_at": None,
+                            "last_update_processed_at": None,
+                            "last_reply_attempt_at": None,
+                            "last_reply_success_at": None,
+                            "last_error_code": None,
+                            "last_error_summary": None,
+                        }
+                    }
+                    self.bot_data = {
+                        "_telegram_transport_health": {
+                            "handler_registered": True,
+                            "last_update_received_at": None,
+                            "last_update_processed_at": None,
+                            "last_reply_attempt_at": None,
+                            "last_reply_success_at": None,
+                            "last_error_code": None,
+                            "last_error_summary": None,
+                        }
+                    }
+                    self.bot_data = {
+                        "_telegram_transport_health": {
+                            "handler_registered": True,
+                            "last_update_received_at": None,
+                        }
+                    }
 
                 async def initialize(self) -> None:
                     return
@@ -100,6 +128,17 @@ class TestTelegramRunner(unittest.TestCase):
             class _FakeApp:
                 def __init__(self) -> None:
                     self.updater = _FakeUpdater()
+                    self.bot_data = {
+                        "_telegram_transport_health": {
+                            "handler_registered": True,
+                            "last_update_received_at": None,
+                            "last_update_processed_at": None,
+                            "last_reply_attempt_at": None,
+                            "last_reply_success_at": None,
+                            "last_error_code": None,
+                            "last_error_summary": None,
+                        }
+                    }
 
                 async def initialize(self) -> None:
                     return
@@ -137,6 +176,10 @@ class TestTelegramRunner(unittest.TestCase):
             started_payload = started_rows[-1].get("payload") if isinstance(started_rows[-1], dict) else {}
             self.assertEqual("embedded", str((started_payload or {}).get("mode")))
             self.assertEqual("env", str((started_payload or {}).get("token_source")))
+            status = runner.status()
+            transport_health = status.get("transport_health") if isinstance(status.get("transport_health"), dict) else {}
+            self.assertTrue(bool(transport_health.get("handler_registered")))
+            self.assertIn("last_update_received_at", transport_health)
 
     def test_missing_token_disables_runner_and_logs_audit(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

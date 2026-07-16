@@ -36,7 +36,7 @@ class TestSystemHealthSkill(unittest.TestCase):
             return_value={"state": "up", "up_interfaces": ["eth0"], "default_route": True, "dns_configured": True},
         ):
             data = collect_system_health(sample_seconds=0.0)
-        self.assertEqual({"cpu", "memory", "disk", "gpu", "services", "network", "warnings", "collected_at"}, set(data.keys()))
+        self.assertEqual({"cpu", "memory", "processes", "disk", "gpu", "services", "network", "warnings", "collected_at"}, set(data.keys()))
         self.assertIsInstance(data["warnings"], list)
         self.assertEqual([], data["warnings"])
 

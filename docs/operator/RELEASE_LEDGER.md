@@ -7,23 +7,22 @@ line. It does not replace detailed design, operator, or checkpoint documents.
 
 ## Current Stable Checkpoint
 
-Current stable checkpoint: `v0.2.2-full-pytest-closure-v1`
+Current stable checkpoint: `v0.2.2`
 
-Commit: `144a240` Full Pytest Failure Triage and Closure v1
+Commit: `b43403de2cf8cf4a53e185ab8e06ba73ee98b893`
 
 Summary:
 
-- Skipped Test Debt Closure v1 is active. The full pytest failure inventory
-  remains historical evidence, 89 non-environmental entries are resolved by
-  replacement tests, and only 22 environment-dependent exact node ids remain
-  skipped.
+- v0.2.2 is released and verified.
+- v0.2.3 Transport Reliability and Local Intent Quality is active.
 - Current default pytest result: `2477 passed, 22 skipped, 0 failed`.
 - Primary uninstall remains disabled unless a local operator creates a valid
   activation marker. Purge remains unsupported.
 - Accepted latency variance is documented in
   `docs/operator/RUNTIME_LATENCY_ACCEPTANCE_V1.json`.
-- The final version decision recommends `v0.2.2`; no final tag has been
-  created automatically.
+- The v0.2.3 patch improves Telegram transport diagnostics, local PC intent
+  routing, process-level memory/CPU inspection, and ordinary-user health
+  summaries without weakening the v0.2.2 authorization boundary.
 
 ## Recent Release Tags
 
@@ -41,7 +40,8 @@ Summary:
 | `v0.2.2-runtime-latency-closure-v1` | 2026-07-12 | `3463218` | Runtime latency warning closure with accepted evidence record. |
 | `v0.2.2-final-release-audit-v1` | 2026-07-13 | `5238597` | Final release audit tooling and v0.2.2 version decision. |
 | `v0.2.2-full-pytest-closure-v1` | 2026-07-13 | `144a240` | Full pytest failure inventory and initial exact-skip closure. |
-| `v0.2.2` | not cut | pending | Recommended final release tag after final release audit commit. |
+| `v0.2.2` | 2026-07-14 | `b43403d` | Authorization, operational hardening, full pytest closure, clean checkout reproducibility, and release audit maturity. |
+| `v0.2.3-transport-local-intent-closure-v1` | recommended | pending | Transport diagnostics, local-device routing, and process-level system-health UX patch checkpoint. |
 | `v0.2.0-managed-searxng` | 2026-06-14 | `f26ba6f` | Managed local SearXNG safe web search. |
 | `v0.2.0-plan-mode-policy` | 2026-06-14 | `e88281b` | Central Plan Mode policy layer. |
 | `v0.2.0-plan-mode-pack-lifecycle` | 2026-06-14 | `7096852` | Plan Mode enforcement for external pack lifecycle writes. |

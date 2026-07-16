@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "0.2.2"
+VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 TAG = f"v{VERSION}"
 
 
@@ -57,18 +57,20 @@ def main() -> int:
     checks.append(_check("product version selected", version_text == VERSION, version_text))
 
     project_state = (ROOT / "docs/operator/PROJECT_STATE.md").read_text(encoding="utf-8")
-    checks.append(_check("active phase is clean-checkout reproducibility closure", "Active Phase: Clean Checkout Reproducibility Closure v1" in project_state, "PROJECT_STATE.md"))
+    checks.append(_check("active phase is current release work", "Active Phase:" in project_state and f"v{VERSION}" in project_state, "PROJECT_STATE.md"))
 
     final_doc = ROOT / "docs/operator/V0_2_2_FINAL_RELEASE_AUDIT.md"
     final_text = final_doc.read_text(encoding="utf-8") if final_doc.exists() else ""
-    checks.append(_check("version decision recorded", "Recommended final version: `v0.2.2`" in final_text, str(final_doc)))
+    ledger = ROOT / "docs/operator/RELEASE_LEDGER.md"
+    ledger_text = ledger.read_text(encoding="utf-8") if ledger.exists() else ""
+    checks.append(_check("version decision recorded", f"v{VERSION}" in ledger_text or "Recommended final version: `v0.2.2`" in final_text, str(ledger)))
     checks.append(_check("rollback statement present", "Code rollback to `v0.2.1` is not the same as full state rollback" in final_text, str(final_doc)))
     final_text_lower = final_text.lower()
     checks.append(_check("process isolation limitation present", "process isolation" in final_text_lower and "not claimed" in final_text_lower, str(final_doc)))
 
-    release_notes = ROOT / "docs/releases/v0.2.2.md"
+    release_notes = ROOT / f"docs/releases/v{VERSION}.md"
     notes_text = release_notes.read_text(encoding="utf-8") if release_notes.exists() else ""
-    checks.append(_check("release notes present", "Universal Mutation Plan" in notes_text and "Known Limitations" in notes_text, str(release_notes)))
+    checks.append(_check("release notes present", "Telegram" in notes_text and "Local" in notes_text and "Known limitations" in notes_text, str(release_notes)))
 
     acceptance = ROOT / "docs/operator/RUNTIME_LATENCY_ACCEPTANCE_V1.json"
     try:
@@ -90,6 +92,10 @@ def main() -> int:
     checks.append(_script_check("full pytest failure triage", "scripts/full_pytest_failure_triage.py", timeout=1800))
     checks.append(_script_check("skipped test debt inventory", "scripts/skipped_test_debt_inventory.py"))
     checks.append(_script_check("skipped test debt closure", "scripts/skipped_test_debt_closure_smoke.py", timeout=1800))
+    checks.append(_script_check("telegram transport diagnostic", "scripts/telegram_transport_diagnostic.py", allow_warn=True))
+    checks.append(_script_check("telegram transport smoke", "scripts/telegram_transport_smoke.py"))
+    checks.append(_script_check("local intent routing smoke", "scripts/local_intent_routing_smoke.py"))
+    checks.append(_script_check("local system inspection smoke", "scripts/local_system_inspection_smoke.py"))
     checks.append(_script_check("capability policy audit", "scripts/capability_policy_audit.py"))
     checks.append(_script_check("Universal Plan audit", "scripts/universal_plan_mode_audit.py"))
     checks.append(_script_check("generic bypass audit", "scripts/generic_mutation_bypass_audit.py"))

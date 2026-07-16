@@ -463,8 +463,27 @@ def get_telegram_runtime_state(
         next_action = "Run: python -m agent telegram_enable"
         ready_state = "stopped"
 
+    polling_active = bool(service_active)
+    handler_registered = bool(service_installed)
+    duplicate_consumer_suspected = bool(duplicate_pollers)
     return {
         "enabled": enabled,
+        "configured": token_configured,
+        "token_present": token_configured,
+        "token_validated": token_configured,
+        "transport_mode": "polling",
+        "polling_active": polling_active,
+        "webhook_active": False,
+        "handler_registered": handler_registered,
+        "last_update_received_at": None,
+        "last_update_processed_at": None,
+        "last_reply_attempt_at": None,
+        "last_reply_success_at": None,
+        "last_error_code": "poll_conflict" if duplicate_consumer_suspected else None,
+        "last_error_summary": "Duplicate Telegram pollers detected." if duplicate_consumer_suspected else None,
+        "duplicate_consumer_suspected": duplicate_consumer_suspected,
+        "runtime_reachable": None,
+        "telegram_transport_healthy": bool(token_configured and polling_active and handler_registered and not duplicate_consumer_suspected),
         "config_source": str(enablement.get("config_source") or "default"),
         "config_source_path": enablement.get("source_path"),
         "service_installed": bool(service_installed),

@@ -588,6 +588,20 @@ _OPERATIONAL_OBSERVE_PHRASES = (
     "what s eating cpu",
     "whats eating memory",
     "whats eating cpu",
+    "what is using my memory",
+    "what is using my ram",
+    "what program is using memory",
+    "what program is using my memory",
+    "what program is using ram",
+    "what program is using my ram",
+    "what program is using cpu",
+    "what is using my cpu",
+    "what is using my gpu memory",
+    "look at my pc",
+    "take a look at my pc",
+    "look at this machine",
+    "check my computer",
+    "check this machine",
 )
 _ASSISTANT_CAPABILITY_PHRASES = (
     "what can you do",
@@ -1196,6 +1210,10 @@ def _classify_operational_route(text: str | None, normalized: str) -> dict[str, 
             "generic_allowed": False,
             "fallback_reason": "operational_status",
         }
+    if _GENERAL_INSTRUCTION_RE.search(normalized) and not _CURRENT_DEVICE_RE.search(normalized):
+        return None
+    if re.search(r"\b(search for|look up)\b", normalized) and not _CURRENT_DEVICE_RE.search(normalized):
+        return None
     nl_intent = classify_free_text(str(text or ""))
     if nl_intent in {"OBSERVE_PC", "EXPLAIN_PREVIOUS"}:
         return {
@@ -1206,6 +1224,39 @@ def _classify_operational_route(text: str | None, normalized: str) -> dict[str, 
             "fallback_reason": "operational_status",
         }
     return None
+
+
+_CURRENT_DEVICE_RE = re.compile(
+    r"\b(?:my|this)\s+(?:pc|computer|machine|system)\b|"
+    r"\b(?:locally|on this computer|on this pc|on this machine)\b",
+    re.IGNORECASE,
+)
+_LOCAL_RESOURCE_RE = re.compile(
+    r"\b(?:memory|ram|cpu|gpu|vram|disk|storage|process|program|app|application|service|network|temperature|battery|running|slow)\b",
+    re.IGNORECASE,
+)
+_GENERAL_INSTRUCTION_RE = re.compile(
+    r"\b(?:how do i|how to|instructions?|tutorial|in windows|on windows|in linux|on linux|usually|generally|what usually causes)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_current_device_inspection(text: str | None, normalized: str) -> bool:
+    raw = str(text or "")
+    working = " ".join(str(normalized or "").strip().lower().split())
+    if not working:
+        return False
+    if _GENERAL_INSTRUCTION_RE.search(working) and not _CURRENT_DEVICE_RE.search(working):
+        return False
+    if _CURRENT_DEVICE_RE.search(working) and _LOCAL_RESOURCE_RE.search(working):
+        return True
+    if re.search(r"\bwhat\s+(?:program|process|app|application)\s+is\s+using\s+(?:the\s+)?(?:most\s+)?(?:memory|ram|cpu|gpu|vram)\b", working):
+        return True
+    if re.search(r"\bwhat\s+is\s+(?:using|eating)\s+(?:my\s+)?(?:memory|ram|cpu|gpu|vram)\b", working):
+        return True
+    if re.search(r"\b(?:check|inspect|look at|take a look at)\s+(?:my|this)\s+(?:pc|computer|machine|system)\b", working):
+        return True
+    return classify_free_text(raw) == "OBSERVE_PC" and bool(_CURRENT_DEVICE_RE.search(working))
 
 
 def _classify_operator_lifecycle_route(normalized: str) -> dict[str, Any] | None:
@@ -1463,6 +1514,7 @@ def _looks_like_safe_web_search_request(normalized: str) -> bool:
     if _contains_safe_web_search_suppression(working):
         return False
     explicit_prefixes = (
+        "search for ",
         "search the web for ",
         "search web for ",
         "web search for ",
@@ -1479,6 +1531,10 @@ def _looks_like_safe_web_search_request(normalized: str) -> bool:
     explicit_lookup = re.match(r"^(?:can you|could you|please)?\s*look up\s+(.+)$", working)
     if explicit_lookup is not None:
         lookup_target = explicit_lookup.group(1).strip()
+        if lookup_target.startswith(("whether ", "if ")):
+            return True
+        if re.search(r"\b(chrome|chromium|firefox|browser)\b", lookup_target) and re.search(r"\b(ram|memory|cpu|usage)\b", lookup_target):
+            return True
         if re.search(r"\b[a-z0-9][a-z0-9_.-]*\.[a-z0-9_.-]+\b", lookup_target):
             return True
         if re.search(r"\b(model|tool|library|project|package|repo|company|site|website|channel|creator)\b", lookup_target):
@@ -2483,6 +2539,13 @@ def _classify_runtime_chat_route_raw(
             "kind": "telegram_status",
             "generic_allowed": False,
             "fallback_reason": "telegram_status",
+        }
+    if _looks_like_current_device_inspection(text, normalized):
+        return {
+            "route": "operational_status",
+            "kind": "operational_observe",
+            "generic_allowed": False,
+            "fallback_reason": "current_device_inspection",
         }
     if any(phrase in normalized for phrase in _PLAN_DAY_PHRASES):
         return {

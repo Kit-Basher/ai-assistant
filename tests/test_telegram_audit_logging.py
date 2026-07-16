@@ -1084,4 +1084,6 @@ def test_api_proxy_exception_logs_traceback_and_returns_fallback(caplog):  # typ
 
         logged = "\n".join(record.getMessage() for record in caplog.records)
         assert "boom" in logged
-        assert "Traceback (most recent call last)" in logged
+        assert "RuntimeError" in logged
+        assert "Traceback (most recent call last)" not in logged
+        assert "show me task summary" not in logged

@@ -1,0 +1,51 @@
+[
+  {
+    "utterance": "can you take a look at my pc and tell me what is using the most memory?",
+    "expected_route": "operational_status",
+    "expected_capability": "local_system.inspect",
+    "confidence": "high",
+    "reason": "current-device grounding plus memory/process request"
+  },
+  {
+    "utterance": "What is using the most memory on my PC?",
+    "expected_route": "operational_status",
+    "expected_capability": "local_system.inspect",
+    "confidence": "high",
+    "reason": "my PC means the current machine"
+  },
+  {
+    "utterance": "What program is using my CPU?",
+    "expected_route": "operational_status",
+    "expected_capability": "local_system.inspect",
+    "confidence": "high",
+    "reason": "program plus CPU asks for local process inspection"
+  },
+  {
+    "utterance": "Can you check this machine?",
+    "expected_route": "operational_status",
+    "expected_capability": "local_system.inspect",
+    "confidence": "high",
+    "reason": "this machine is explicit local grounding"
+  },
+  {
+    "utterance": "How do I check memory usage in Windows?",
+    "expected_route": "generic_chat",
+    "expected_capability": "informational",
+    "confidence": "medium",
+    "reason": "general instructions, not this machine"
+  },
+  {
+    "utterance": "Search for the best Linux system monitors.",
+    "expected_route": "action_tool",
+    "expected_capability": "web_search",
+    "confidence": "high",
+    "reason": "explicit search request"
+  },
+  {
+    "utterance": "Look up whether Chrome uses more RAM than Firefox.",
+    "expected_route": "action_tool",
+    "expected_capability": "web_search",
+    "confidence": "high",
+    "reason": "explicit lookup of public comparison"
+  }
+]

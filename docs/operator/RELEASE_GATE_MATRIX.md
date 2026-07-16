@@ -34,6 +34,9 @@ local service:
 - `python scripts/full_pytest_failure_triage.py`
 - `python scripts/skipped_test_debt_inventory.py`
 - `python scripts/skipped_test_debt_closure_smoke.py`
+- `python scripts/local_intent_routing_smoke.py`
+- `python scripts/local_system_inspection_smoke.py`
+- `python scripts/telegram_transport_smoke.py`
 - `python scripts/final_release_audit.py`
 - `python -m pytest -q tests/test_release_gate.py tests/test_release_smoke.py`
 - `python -m pytest -q tests/test_backup_restore_proof.py tests/test_pre_vm_complete_gate.py`
@@ -90,6 +93,10 @@ Commands:
 - `python scripts/clean_checkout_reproducibility_smoke.py`
 - `python scripts/clean_checkout_debian_package_smoke.py`
 - `python scripts/final_release_audit.py`
+- `python scripts/telegram_transport_diagnostic.py`
+- `python scripts/telegram_transport_smoke.py`
+- `python scripts/local_intent_routing_smoke.py`
+- `python scripts/local_system_inspection_smoke.py`
 - `python scripts/perf_smoke.py`
 - `python scripts/rc1_latency_closure_smoke.py`
 - `python scripts/daily_driver_smoke.py --timeout 90`
@@ -193,6 +200,26 @@ version decision docs, release notes, accepted warnings, pytest closure,
 authorization audits, adversarial proof, latency closure, primary uninstall
 disabled, purge unsupported, docs truth, artifact audit, and tag-name
 availability. It does not create or push a tag.
+
+`telegram_transport_diagnostic.py` is a no-send live Telegram diagnostic. It
+reports whether Telegram is configured, whether polling/service state looks
+active, whether a handler is registered, whether a duplicate update consumer is
+suspected, and whether inbound/outbound timestamps exist. It never sends a real
+message and never prints the bot token or message contents.
+
+`telegram_transport_smoke.py` is the fixture Telegram transport proof. It
+exercises a fake update through handler dispatch, runtime response generation,
+and fake reply delivery. It records redacted transport events and does not
+contact Telegram.
+
+`local_intent_routing_smoke.py` proves explicit current-device questions such
+as “look at my PC” and “what is using my memory” route to local read-only
+inspection before web search. Explicit web/search wording remains routed to
+safe web behavior.
+
+`local_system_inspection_smoke.py` proves read-only process-level local
+inspection collects memory totals and top grouped processes, omits command
+lines/environments, and renders a memory-focused ordinary-user answer.
 
 `operator_lifecycle_smoke.py` is the installed operator-lifecycle gate. It
 proves health, broken-status, storage, repair, backup, restore, update,

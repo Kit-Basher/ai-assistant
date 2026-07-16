@@ -232,6 +232,16 @@ class TestTelegramAdapter(unittest.TestCase):
                 self.assertNotIn("Thinking…", str(update.effective_message.replies[0]["text"] or ""))
 
             rows = _read_log_rows(log_path)
+            event_types = [str(row.get("type") or "") for row in rows]
+            self.assertIn("telegram_update_received", event_types)
+            self.assertIn("telegram_update_dispatched", event_types)
+            self.assertIn("telegram_reply_attempted", event_types)
+            self.assertIn("telegram_reply_succeeded", event_types)
+            for row in rows:
+                if str(row.get("type") or "") in {"telegram_update_received", "telegram_update_dispatched"}:
+                    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+                    self.assertNotIn("text_prefix", payload)
+                    self.assertNotIn("hello", json.dumps(payload))
             summary_rows = _log_event_rows(rows, "telegram.latency_summary")
             self.assertEqual(len(cases), len(summary_rows))
             self.assertEqual(0, len(_log_event_rows(rows, "telegram.placeholder_send.start")))

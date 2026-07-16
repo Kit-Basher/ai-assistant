@@ -33,6 +33,9 @@ future work where to look first.
 | v0.2.2 skipped-test debt closure | `docs/operator/SKIPPED_TEST_DEBT_CLOSURE_V1.md` |
 | v0.2.2 clean-checkout reproducibility closure | `docs/operator/CLEAN_CHECKOUT_REPRODUCIBILITY_CLOSURE_V1.md` |
 | v0.2.2 release notes | `docs/releases/v0.2.2.md` |
+| v0.2.3 Telegram transport reliability | `docs/operator/TELEGRAM_TRANSPORT_RELIABILITY_V0_2_3.md` |
+| v0.2.3 local system intent and health UX | `docs/operator/LOCAL_SYSTEM_INTENT_AND_HEALTH_UX_V0_2_3.md` |
+| v0.2.3 release notes | `docs/releases/v0.2.3.md` |
 | Managed local services and sandboxed tools | `docs/design/MANAGED_LOCAL_SERVICES_AND_SANDBOXED_TOOLS.md` |
 | Managed SearXNG operator details | `docs/operator/SAFE_WEB_SEARCH.md` |
 | Managed-action reliability | `docs/design/MANAGED_ACTION_RELIABILITY_STANDARD.md` and `docs/operator/MANAGED_ACTION_RELIABILITY_AUDIT.md` |
@@ -109,11 +112,9 @@ because they overlap current docs.
 
 ## Current Next Work
 
-1. Clean Checkout Reproducibility Closure v1 is the active release track. The
-   primary checkout is green, but the final isolated worktree proof exposed
-   machine-local assumptions around control-plane paths, ignored LLM registry
-   state, and undeclared verification dependencies. This batch makes clean
-   checkout pytest and packaging reproducible before final tagging.
+1. v0.2.3 Transport Reliability and Local Intent Quality is the active patch
+   track. It fixes Telegram non-response diagnosis, local-device routing, and
+   process-level resource explanations found during normal post-release use.
 2. Keep managed SearXNG live verification separate from isolated proof:
    `prove_core_workflows.py` can honestly report search `BLOCKED` when no
    backend is configured, while live `/search/status` proves the configured

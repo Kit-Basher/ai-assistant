@@ -17,7 +17,110 @@ def _format_bytes(value: int | float | None) -> str:
     return f"{amount:.1f} {units[unit_index]}"
 
 
-def render_system_health_summary(observed: dict[str, Any], analysis: dict[str, Any] | None = None) -> str:
+def _memory_concern(memory: dict[str, Any]) -> tuple[str, str]:
+    total = float(memory.get("total_bytes") or 0.0)
+    available = float(memory.get("available_bytes") or 0.0)
+    used_pct = float(memory.get("used_pct") or 0.0)
+    available_pct = (available / total * 100.0) if total > 0 else 0.0
+    if available_pct < 5.0 or used_pct >= 95.0:
+        return "critical", "memory pressure is critical"
+    if available_pct < 10.0 or used_pct >= 90.0:
+        return "high", "memory pressure is high"
+    if available_pct < 20.0 or used_pct >= 80.0:
+        return "elevated", "memory use is elevated"
+    return "healthy", "memory pressure is low"
+
+
+def _question_focus(question: str | None) -> str:
+    text = " ".join(str(question or "").strip().lower().split())
+    if not text:
+        return "full"
+    if any(token in text for token in ("ram", "memory", "mem")) and any(
+        token in text for token in ("using", "eating", "program", "process", "app", "application", "most", "top")
+    ):
+        return "memory"
+    if "cpu" in text and any(token in text for token in ("using", "eating", "program", "process", "app", "most", "top")):
+        return "cpu"
+    if "gpu" in text or "vram" in text:
+        return "gpu"
+    if any(token in text for token in ("disk", "storage", "space")):
+        return "disk"
+    return "full"
+
+
+def _render_process_group(row: dict[str, Any], index: int) -> list[str]:
+    count = int(row.get("process_count_group") or 0)
+    suffix = f" across {count} processes" if count > 1 else ""
+    lines = [
+        f"{index}. {str(row.get('display_name') or 'Unknown')} — {_format_bytes(row.get('memory_rss_bytes'))}{suffix}",
+    ]
+    description = str(row.get("description") or "").strip()
+    if description:
+        lines.append(f"   {description}")
+    return lines
+
+
+def render_system_memory_answer(observed: dict[str, Any], analysis: dict[str, Any] | None = None) -> str:
+    _ = analysis
+    memory = observed.get("memory") if isinstance(observed.get("memory"), dict) else {}
+    processes = observed.get("processes") if isinstance(observed.get("processes"), dict) else {}
+    groups = processes.get("groups") if isinstance(processes.get("groups"), list) else []
+    gpu = observed.get("gpu") if isinstance(observed.get("gpu"), dict) else {}
+    disk_rows = observed.get("disk") if isinstance(observed.get("disk"), list) else []
+    concern, concern_text = _memory_concern(memory)
+
+    lines = [
+        "Your PC is using {used} of {total} RAM, so {concern}.".format(
+            used=_format_bytes(memory.get("used_bytes")),
+            total=_format_bytes(memory.get("total_bytes")),
+            concern=concern_text,
+        )
+    ]
+    if concern in {"healthy", "elevated"}:
+        lines.append(
+            "Linux uses spare RAM for cache and releases it when programs need it; available memory is the more useful number."
+        )
+    if not bool(processes.get("available", False)):
+        lines.append("")
+        lines.append("I could read overall memory use, but I could not inspect individual programs.")
+    else:
+        lines.append("")
+        lines.append("The largest memory users are:")
+        for index, row in enumerate([row for row in groups if isinstance(row, dict)][:5], start=1):
+            lines.extend(_render_process_group(row, index))
+
+    gpu_rows = gpu.get("gpus") if isinstance(gpu.get("gpus"), list) else []
+    if bool(gpu.get("available", False)) and gpu_rows:
+        first_gpu = gpu_rows[0] if isinstance(gpu_rows[0], dict) else {}
+        used_mb = int(first_gpu.get("memory_used_mb") or 0)
+        total_mb = int(first_gpu.get("memory_total_mb") or 0)
+        if total_mb > 0 and (used_mb / float(total_mb)) >= 0.70:
+            lines.append("")
+            lines.append(
+                "Separate note: normal RAM and GPU VRAM are different. "
+                f"The GPU is using about {used_mb} MiB of {total_mb} MiB VRAM."
+            )
+    high_usage_mounts = [
+        f"{str(row.get('mountpoint') or '?')} {float(row.get('used_pct') or 0.0):.1f}%"
+        for row in disk_rows
+        if isinstance(row, dict) and bool(row.get("high_usage", False))
+    ]
+    if high_usage_mounts:
+        lines.append("")
+        lines.append("Separate note: disk usage is high on " + ", ".join(high_usage_mounts[:2]) + ".")
+    return "\n".join(lines)
+
+
+def render_system_health_summary(
+    observed: dict[str, Any],
+    analysis: dict[str, Any] | None = None,
+    *,
+    question: str | None = None,
+    presentation: str = "friendly",
+) -> str:
+    focus = _question_focus(question)
+    if str(presentation or "friendly").strip().lower() != "technical" and focus == "memory":
+        return render_system_memory_answer(observed, analysis)
     cpu = observed.get("cpu") if isinstance(observed.get("cpu"), dict) else {}
     memory = observed.get("memory") if isinstance(observed.get("memory"), dict) else {}
     disk_rows = observed.get("disk") if isinstance(observed.get("disk"), list) else []
@@ -130,4 +233,4 @@ def render_system_health_summary(observed: dict[str, Any], analysis: dict[str, A
     return "\n".join(lines)
 
 
-__all__ = ["render_system_health_summary"]
+__all__ = ["render_system_health_summary", "render_system_memory_answer"]

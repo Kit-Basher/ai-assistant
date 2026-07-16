@@ -5,19 +5,34 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.2-skipped-test-debt-closure-v1`
-- Commit: `9f74f7af3ee0b823de520da71e644bbab93a34ec`
+- Version: `v0.2.2`
+- Commit: `b43403de2cf8cf4a53e185ab8e06ba73ee98b893`
 - Fresh Debian VM proof: not run
-- Release status: clean-checkout reproducibility closure is active; final tag has not been created
+- Release status: v0.2.2 is released and verified
 
-## Active Phase: Clean Checkout Reproducibility Closure v1
+## Active Phase: v0.2.3 Transport Reliability and Local Intent Quality
 
-The release candidate passes in the primary checkout, but final isolated
-verification exposed checkout-path assumptions, an ignored local packaging
-dependency, and incomplete verification dependency declarations.
+Normal post-release use exposed a non-responsive Telegram transport, incorrect
+web routing for local-device questions, and overly technical system-health
+summaries.
 
-This phase removes those machine-local assumptions and proves that tests and
-release artifacts are reproducible from a clean checkout.
+This patch improves live transport diagnostics, local inspection routing,
+process-level resource reporting, and ordinary-user explanations without
+weakening the v0.2.2 authorization boundary.
+
+Patch policy:
+
+- Telegram diagnostics are read-only by default and never expose bot tokens or
+  message bodies.
+- Local PC/system questions route to read-only local inspection before web
+  search.
+- Process inspection omits command lines and environment variables by default.
+- Any future Telegram repair remains a bounded Plan/confirmation-gated action.
+
+## Completed Release: v0.2.2
+
+The v0.2.2 release is complete at
+`b43403de2cf8cf4a53e185ab8e06ba73ee98b893`.
 
 Clean-checkout closure policy:
 

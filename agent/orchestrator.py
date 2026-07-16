@@ -15834,7 +15834,7 @@ class Orchestrator:
             )
         nl_decision = nl_route(text)
         if str(nl_decision.get("intent") or "") not in {"OBSERVE_PC", "EXPLAIN_PREVIOUS"}:
-            result = self._tool_handler_observe_system_health({}, user_id)
+            result = self._tool_handler_observe_system_health({"question": text}, user_id)
             return self._runtime_truth_response(
                 text=str(result.get("user_text") or "").strip() or "System health report ready.",
                 route="operational_status",
@@ -18745,14 +18745,15 @@ class Orchestrator:
         return {"ok": True, "user_text": text, "data": {"trace_id": report.trace_id, "summary_status": report.summary_status}}
 
     def _tool_handler_observe_system_health(self, request: dict[str, Any], user_id: str) -> dict[str, Any]:
-        _ = request
         _ = user_id
         report = build_system_health_report(collect_system_health())
+        question = str((request or {}).get("question") or "").strip()
         return {
             "ok": True,
             "user_text": render_system_health_summary(
                 report.get("observed") if isinstance(report.get("observed"), dict) else {},
                 report.get("analysis") if isinstance(report.get("analysis"), dict) else {},
+                question=question,
             ),
             "data": {"system_health": report},
         }
@@ -25776,8 +25777,23 @@ class Orchestrator:
             if isinstance(row, dict)
         ]
         top_labels = [label for index, label in enumerate(top_labels) if label and label not in top_labels[:index]]
-        if not top_labels:
-            top_labels = ["no single runaway process"]
+        top_memory_rows = analysis.get("top_memory") if isinstance(analysis.get("top_memory"), list) else []
+        top_process_summaries: list[str] = []
+        seen_process_labels: set[str] = set()
+        for row in top_memory_rows:
+            if not isinstance(row, dict):
+                continue
+            label = _safe_process_label(str(row.get("name") or ""))
+            if not label or label in seen_process_labels:
+                continue
+            rss_bytes = int(row.get("rss_bytes") or row.get("memory_rss_bytes") or 0)
+            amount = f" ({_format_gib_value(rss_bytes)})" if rss_bytes > 0 else ""
+            top_process_summaries.append(f"{label}{amount}")
+            seen_process_labels.add(label)
+            if len(top_process_summaries) >= 5:
+                break
+        if not top_process_summaries:
+            top_process_summaries = ["no single runaway process"]
         cpu_info = analysis.get("cpu") if isinstance(analysis.get("cpu"), dict) else {}
         load_1m = float(cpu_info.get("load_1m") or 0.0)
         load_5m = float(cpu_info.get("load_5m") or 0.0)
@@ -25809,7 +25825,7 @@ class Orchestrator:
             "",
             f"Used: {_format_gib_value(used)} / {_format_gib_value(total)}",
             f"Available: {_format_gib_value(available)}",
-            f"Biggest normal users: {', '.join(top_labels[:5])}.",
+            f"Biggest normal users: {', '.join(top_process_summaries[:5])}.",
         ]
         if load_line:
             lines.append(load_line)

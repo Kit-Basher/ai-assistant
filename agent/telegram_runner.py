@@ -5,6 +5,7 @@ import inspect
 import json
 import threading
 import time
+import copy
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -51,6 +52,7 @@ class TelegramRunner:
         self.token_source = "none"
         self.last_attempt = 0
         self._consecutive_failures = 0
+        self._transport_health: dict[str, Any] = {}
 
     def start(self) -> bool:
         with self._lock:
@@ -190,6 +192,13 @@ class TelegramRunner:
                     audit_log=self._audit_log,
                     runtime=self._runtime,
                 )
+                try:
+                    health = getattr(app, "bot_data", {}).get("_telegram_transport_health")
+                    if isinstance(health, dict):
+                        with self._lock:
+                            self._transport_health = health
+                except Exception:
+                    pass
                 self._run_application_loop(
                     app,
                     token_source=token_source,
@@ -337,6 +346,7 @@ class TelegramRunner:
             token_source = str(self.token_source or "none")
             attempt = int(self.last_attempt or 0)
             consecutive_failures = int(self._consecutive_failures or 0)
+            transport_health = copy.deepcopy(self._transport_health)
         state = "stopped"
         if last_event == "telegram.disabled" and last_error == "missing_token":
             state = "disabled_missing_token"
@@ -356,6 +366,7 @@ class TelegramRunner:
             "token_source": token_source,
             "attempt": attempt,
             "consecutive_failures": consecutive_failures,
+            "transport_health": transport_health if isinstance(transport_health, dict) else {},
         }
 
     def _emit_event(

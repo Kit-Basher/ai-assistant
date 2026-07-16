@@ -1207,13 +1207,24 @@ def _run_systemctl_user(
 
 
 def _render_telegram_status(state: dict[str, Any]) -> str:
+    transport_health = "healthy" if bool(state.get("telegram_transport_healthy", False)) else "degraded"
     lines = [
+        f"Telegram status: {transport_health.upper()}",
         f"enabled: {str(bool(state.get('enabled', False))).lower()}",
+        f"configured: {str(bool(state.get('configured', state.get('token_configured', False)))).lower()}",
         f"config_source: {str(state.get('config_source') or 'default')}",
         f"service_installed: {str(bool(state.get('service_installed', False))).lower()}",
         f"service_active: {str(bool(state.get('service_active', False))).lower()}",
         f"token_configured: {str(bool(state.get('token_configured', False))).lower()}",
+        f"transport_mode: {str(state.get('transport_mode') or 'polling')}",
+        f"polling_active: {str(bool(state.get('polling_active', state.get('service_active', False)))).lower()}",
+        f"webhook_active: {str(bool(state.get('webhook_active', False))).lower()}",
+        f"handler_registered: {str(bool(state.get('handler_registered', False))).lower()}",
+        f"last_update_received_at: {str(state.get('last_update_received_at') or 'none')}",
+        f"last_reply_success_at: {str(state.get('last_reply_success_at') or 'none')}",
+        f"last_error_code: {str(state.get('last_error_code') or 'none')}",
         f"lock_present: {str(bool(state.get('lock_present', False))).lower()}",
+        f"duplicate_consumer_suspected: {str(bool(state.get('duplicate_consumer_suspected', state.get('duplicate_pollers', False)))).lower()}",
         f"effective_state: {str(state.get('effective_state') or 'unknown')}",
         f"next_action: {str(state.get('next_action') or 'No action needed.')}",
     ]
