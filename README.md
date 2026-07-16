@@ -12,13 +12,17 @@ Current release-proof truth is tracked in
 It is exposed through the HTTP API, the browser/web UI served by the API
 server, the CLI, and the optional Telegram adapter.
 
+Telegram operator note: diagnostics and logs redact bot-token URLs. If an older
+journal ever contained `https://api.telegram.org/bot...`, rotate the bot token
+in BotFather, update the Personal Agent secret store, and restart
+`personal-agent-telegram.service`.
+
 ## Current Product Truth
-Current release line: v0.2.2 final audit. The v0.2.1 lifecycle and release
-hardening baseline is closed, and the v0.2.2 authorization foundation is
-implemented: central capability policy, Universal Mutation Plans, Executor
-Registry bindings, skill-pack permissions, generic bypass hardening,
-adversarial authorization proof, and runtime latency closure. The final release
-tag is not created automatically by the audit.
+Current release line: v0.2.4 development patch on top of released v0.2.3. The
+v0.2.2 authorization foundation is implemented and verified. v0.2.3 improved
+Telegram diagnostics and local system intent quality. v0.2.4 focuses on
+Telegram token redaction and first-reply reliability. Release tags are not
+created automatically by audit tooling.
 
 The user interacts with the assistant layer. The assistant interprets intent,
 asks the agent layer for grounded runtime/tool facts or bounded action results

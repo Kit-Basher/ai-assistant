@@ -54,7 +54,9 @@ fresh Debian VM install proof passes.
   Generic shell, generic HTTP mutation, raw domain DB mutation, raw secret read,
   and direct low-level helper calls are denied through platform APIs.
 - Telegram: optional by default. Inactive optional Telegram must not fail core
-  readiness. Raw tokens must not appear in status/chat/doctor output.
+  readiness. Raw tokens and token-bearing Telegram Bot API URLs must not appear
+  in status, chat, doctor, journald, support-bundle, audit, or diagnostic
+  output.
 - Backup/restore/support: backup paths include sensitive local state. Support
   bundles are redacted artifacts, not raw state exports.
 - Local exposure: runtime and web UI are intended for loopback/local user

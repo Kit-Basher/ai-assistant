@@ -119,6 +119,11 @@ Confirm:
   feels wrong; this gate verifies the Plan Mode-gated support-bundle executor,
   manifest, bounded summary files, redaction, journal id, and scoped rollback
   hint
+- run `python scripts/telegram_token_redaction_smoke.py` when Telegram
+  diagnostics, logging, support-bundle, or HTTP-client behavior changes. If any
+  previous journal contained `https://api.telegram.org/bot...`, rotate the bot
+  token in BotFather, update the Personal Agent secret store, and restart
+  `personal-agent-telegram.service`
 - run `python scripts/backup_v1_smoke.py` when backup behavior feels wrong;
   this gate verifies the Plan Mode-gated backup executor, timestamped local
   backup artifact, bounded redacted summary files, journal id, scoped rollback

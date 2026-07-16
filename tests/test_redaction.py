@@ -59,4 +59,3 @@ class TestSecretRedaction(unittest.TestCase):
     def test_non_secret_url_is_not_destroyed(self) -> None:
         url = "https://example.com/docs/tokenization"
         self.assertEqual(url, redact_text(url))
-
