@@ -276,6 +276,36 @@ def _truncate_telegram_text(text: str, *, max_len: int = 3900) -> tuple[str, boo
     return f"{trimmed}{suffix}", True
 
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _transport_health(bot_data: dict[str, Any] | None) -> dict[str, Any]:
+    data = bot_data if isinstance(bot_data, dict) else {}
+    health = data.get("_telegram_transport_health")
+    if not isinstance(health, dict):
+        health = {
+            "handler_registered": False,
+            "last_update_received_at": None,
+            "last_update_processed_at": None,
+            "last_reply_attempt_at": None,
+            "last_reply_success_at": None,
+            "last_error_code": None,
+            "last_error_summary": None,
+        }
+        data["_telegram_transport_health"] = health
+    return health
+
+
+def _mark_transport_health(bot_data: dict[str, Any] | None, **updates: Any) -> None:
+    health = _transport_health(bot_data)
+    for key, value in updates.items():
+        if key.endswith("_summary") and value is not None:
+            health[key] = _text_prefix(str(value), limit=120)
+        else:
+            health[key] = value
+
+
 def _plain_text_retry_variant(text: str) -> str:
     value = str(text or "")
     value = value.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "")
@@ -309,6 +339,7 @@ async def _send_reply(
     text: str,
     trace_id: str,
     parse_mode: str | None = None,
+    transport_health: dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> str:
     primary_text, primary_truncated = _truncate_telegram_text(text)
@@ -318,10 +349,27 @@ async def _send_reply(
 
     delivered_text = primary_text
     send_fallback = False
+    if isinstance(transport_health, dict):
+        transport_health["last_reply_attempt_at"] = _now_iso()
 
     try:
+        log_event(
+            log_path,
+            "telegram_reply_attempted",
+            {"trace_id": trace_id, "chat_id_redacted": _redact_chat_id(chat_id), "route": route, "msg_len": len(primary_text)},
+        )
         await message.reply_text(primary_text, **primary_kwargs)
     except Exception as exc:
+        log_event(
+            log_path,
+            "telegram_reply_failed",
+            {
+                "trace_id": trace_id,
+                "chat_id_redacted": _redact_chat_id(chat_id),
+                "route": route,
+                "error_class": exc.__class__.__name__,
+            },
+        )
         if _is_bad_request_error(exc):
             _LOGGER.error(
                 "telegram.reply.bad_request %s",
@@ -350,6 +398,9 @@ async def _send_reply(
                 retry_kwargs.pop("disable_web_page_preview", None)
                 await message.reply_text(retry_text, **retry_kwargs)
             except Exception as retry_exc:
+                if isinstance(transport_health, dict):
+                    transport_health["last_error_code"] = retry_exc.__class__.__name__
+                    transport_health["last_error_summary"] = _text_prefix(str(retry_exc), limit=120)
                 _LOGGER.error(
                     "telegram.reply.error %s",
                     json.dumps(
@@ -370,6 +421,9 @@ async def _send_reply(
             send_fallback = True
             primary_truncated = primary_truncated or retry_truncated
         else:
+            if isinstance(transport_health, dict):
+                transport_health["last_error_code"] = exc.__class__.__name__
+                transport_health["last_error_summary"] = _text_prefix(str(exc), limit=120)
             _LOGGER.error(
                 "telegram.reply.error %s",
                 json.dumps(
@@ -387,6 +441,15 @@ async def _send_reply(
             _LOGGER.error("%s", traceback.format_exc())
             raise
 
+    log_event(
+        log_path,
+        "telegram_reply_succeeded",
+        {"trace_id": trace_id, "chat_id_redacted": _redact_chat_id(chat_id), "route": route, "msg_len": len(delivered_text)},
+    )
+    if isinstance(transport_health, dict):
+        transport_health["last_reply_success_at"] = _now_iso()
+        transport_health["last_error_code"] = None
+        transport_health["last_error_summary"] = None
     log_event(
         log_path,
         "telegram.out",
@@ -613,6 +676,7 @@ async def _deliver_telegram_text_result(
     text: str,
     trace_id: str,
     cards_payload: dict[str, Any] | None = None,
+    transport_health: dict[str, Any] | None = None,
 ) -> None:
     parse_mode = None
     delivered_text = text
@@ -642,6 +706,7 @@ async def _deliver_telegram_text_result(
         text=delivered_text,
         trace_id=trace_id,
         parse_mode=parse_mode,
+        transport_health=transport_health,
     )
 
 
@@ -1703,6 +1768,7 @@ async def _run_async_telegram_chat(
             cards_payload=(
                 result.get("cards_payload") if isinstance(result.get("cards_payload"), dict) else None
             ),
+            transport_health=_transport_health(bot_data),
         )
         response_elapsed_ms = int(max(0.0, pytime.monotonic() - response_started_at) * 1000)
         log_event(
@@ -1806,7 +1872,7 @@ async def _run_async_telegram_chat(
                 {
                     "trace_id": trace_id,
                     "chat_id_redacted": _redact_chat_id(chat_id),
-                    "text_prefix": _text_prefix(text),
+                    "update_type": "text",
                     "error_type": exc.__class__.__name__,
                     "error": str(exc),
                 },
@@ -1814,7 +1880,7 @@ async def _run_async_telegram_chat(
                 sort_keys=True,
             ),
         )
-        _LOGGER.error("%s", traceback.format_exc())
+        _LOGGER.debug("telegram.message.traceback %s", traceback.format_exc())
         _emit_telegram_runtime_event(
             bot_data=bot_data,
             log_path=log_path,
@@ -1834,6 +1900,7 @@ async def _run_async_telegram_chat(
                 route="chat",
                 text="Sorry — the agent encountered an error.",
                 trace_id=trace_id,
+                transport_health=_transport_health(bot_data),
             )
         except Exception:
             return
@@ -2758,6 +2825,22 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             "trace_id": trace_id,
         },
     )
+    _mark_transport_health(
+        bot_data,
+        last_update_received_at=received_at.isoformat(),
+        last_error_code=None,
+        last_error_summary=None,
+    )
+    log_event(
+        log_path,
+        "telegram_update_received",
+        {
+            "trace_id": trace_id,
+            "chat_id_redacted": _redact_chat_id(chat_id),
+            "update_type": "text",
+            "telegram_message_age_ms": telegram_message_age_ms,
+        },
+    )
 
     try:
         # Remember which chat we're talking to (useful for reminders/jobs).
@@ -2867,6 +2950,16 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             awaiting_confirmation=bool((setup_state_hint or {}).get("awaiting_confirmation")),
         )
         selected_route_hint = str(route_hint.get("route") or "generic_chat").strip().lower() or "generic_chat"
+        _mark_transport_health(bot_data, last_update_processed_at=_now_iso())
+        log_event(
+            log_path,
+            "telegram_update_dispatched",
+            {
+                "trace_id": trace_id,
+                "chat_id_redacted": _redact_chat_id(chat_id),
+                "selected_route": selected_route_hint,
+            },
+        )
         placeholder_policy = "deferred" if _should_defer_telegram_placeholder(selected_route_hint) else "immediate"
         placeholder_grace_seconds = (
             float(_TELEGRAM_DETERMINISTIC_PLACEHOLDER_GRACE_SECONDS)
@@ -2928,7 +3021,7 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 {
                     "trace_id": trace_id,
                     "chat_id_redacted": _redact_chat_id(chat_id),
-                    "text_prefix": _text_prefix(text),
+                    "update_type": "text",
                     "error_type": exc.__class__.__name__,
                     "error": str(exc),
                 },
@@ -2936,7 +3029,7 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 sort_keys=True,
             ),
         )
-        _LOGGER.error("%s", traceback.format_exc())
+        _LOGGER.debug("telegram.message.traceback %s", traceback.format_exc())
         envelope = _envelope_from_exception(
             exc=exc,
             intent="telegram.message",
@@ -3894,6 +3987,15 @@ def build_app(
     )
     app.bot_data["runtime_git_commit"] = str(getattr(runtime, "git_commit", "") or "unknown")
     app.bot_data["runtime_started_ts"] = float(pytime.time())
+    app.bot_data["_telegram_transport_health"] = {
+        "handler_registered": True,
+        "last_update_received_at": None,
+        "last_update_processed_at": None,
+        "last_reply_attempt_at": None,
+        "last_reply_success_at": None,
+        "last_error_code": None,
+        "last_error_summary": None,
+    }
 
     app.job_queue.run_repeating(_check_reminders, interval=30, first=5)
     if loaded.enable_scheduled_snapshots:

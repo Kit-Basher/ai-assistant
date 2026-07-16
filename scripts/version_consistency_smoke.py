@@ -13,7 +13,7 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_VERSION = "0.2.2"
+EXPECTED_VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 
 
 @dataclass
@@ -70,13 +70,15 @@ def main() -> int:
         metadata_version = ""
     checks.append(_check("installed metadata absent or matches", metadata_version in {"", EXPECTED_VERSION}, metadata_version or "not installed"))
 
-    release_notes = ROOT / "docs" / "releases" / "v0.2.2.md"
+    release_notes = ROOT / "docs" / "releases" / f"v{EXPECTED_VERSION}.md"
     notes_text = release_notes.read_text(encoding="utf-8") if release_notes.exists() else ""
-    checks.append(_check("release notes version present", "v0.2.2" in notes_text and "0.2.2" in notes_text, str(release_notes)))
+    checks.append(_check("release notes version present", f"v{EXPECTED_VERSION}" in notes_text and EXPECTED_VERSION in notes_text, str(release_notes)))
 
     final_doc = ROOT / "docs" / "operator" / "V0_2_2_FINAL_RELEASE_AUDIT.md"
     final_text = final_doc.read_text(encoding="utf-8") if final_doc.exists() else ""
-    checks.append(_check("version decision recorded", "Recommended final version: `v0.2.2`" in final_text, str(final_doc)))
+    ledger = ROOT / "docs" / "operator" / "RELEASE_LEDGER.md"
+    ledger_text = ledger.read_text(encoding="utf-8") if ledger.exists() else ""
+    checks.append(_check("version decision recorded", f"v{EXPECTED_VERSION}" in ledger_text or f"Recommended final version: `v{EXPECTED_VERSION}`" in final_text, str(ledger)))
 
     support_smoke = ROOT / "scripts" / "support_bundle_v2_smoke.py"
     support_text = support_smoke.read_text(encoding="utf-8") if support_smoke.exists() else ""

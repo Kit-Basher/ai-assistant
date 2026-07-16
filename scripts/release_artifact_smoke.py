@@ -70,7 +70,7 @@ def main() -> int:
             checks.append(_check("bundle version file", (bundle_dir / "VERSION").read_text(encoding="utf-8").strip() == VERSION, str(bundle_dir / "VERSION")))
             manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
             checks.append(_check("bundle manifest version", manifest.get("bundle_version") == VERSION, json.dumps(manifest, sort_keys=True)[:800]))
-            checks.append(_check("bundle includes release notes", (bundle_dir / "payload" / "docs" / "releases" / "v0.2.2.md").is_file(), str(bundle_dir)))
+            checks.append(_check("bundle includes release notes", (bundle_dir / "payload" / "docs" / "releases" / f"v{VERSION}.md").is_file(), str(bundle_dir)))
             checks.append(_check("bundle checksum exists", checksum_path.is_file(), str(checksum_path)))
             checks.append(_check("bundle archive exists", archive_path.is_file(), str(archive_path)))
             with tarfile.open(archive_path, "r:gz") as tar:
@@ -97,7 +97,7 @@ def main() -> int:
             checks.append(_check("wheel contains no forbidden paths", not bad, ", ".join(bad[:10]) or f"files={len(names)}"))
         with tarfile.open(sdist_dir / sdist_name, "r:gz") as sdist:
             names = sdist.getnames()
-            checks.append(_check("sdist includes release notes", any(name.endswith("docs/releases/v0.2.2.md") for name in names), sdist_name))
+            checks.append(_check("sdist includes release notes", any(name.endswith(f"docs/releases/v{VERSION}.md") for name in names), sdist_name))
             bad = [f"{name}:{_bad_path(name)}" for name in names if _bad_path(name)]
             checks.append(_check("sdist contains no forbidden paths", not bad, ", ".join(bad[:10]) or f"files={len(names)}"))
 
