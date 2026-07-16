@@ -4,48 +4,13 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
-import re
 from typing import Any
 
-
-_SECRET_KEY_TOKENS = {
-    "api_key",
-    "token",
-    "secret",
-    "authorization",
-    "password",
-    "passphrase",
-}
-
-_TELEGRAM_TOKEN_RE = re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{20,}\b")
-_OPENAI_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{10,}\b")
-
-
-def _looks_secret_key(key: str) -> bool:
-    lowered = str(key or "").strip().lower()
-    return any(token in lowered for token in _SECRET_KEY_TOKENS)
-
-
-def _redact_string(value: str) -> str:
-    redacted = _TELEGRAM_TOKEN_RE.sub("***redacted***", value)
-    redacted = _OPENAI_KEY_RE.sub("***redacted***", redacted)
-    return redacted
+from agent.security.redaction import redact_value
 
 
 def redact(value: Any) -> Any:
-    if isinstance(value, dict):
-        output: dict[str, Any] = {}
-        for key, item in value.items():
-            if _looks_secret_key(str(key)):
-                output[str(key)] = "***redacted***"
-            else:
-                output[str(key)] = redact(item)
-        return output
-    if isinstance(value, list):
-        return [redact(item) for item in value]
-    if isinstance(value, str):
-        return _redact_string(value)
-    return value
+    return redact_value(value)
 
 
 class AuditLog:

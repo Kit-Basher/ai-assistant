@@ -5,32 +5,11 @@ import os
 from datetime import datetime, timezone
 from typing import Any
 
-SECRET_KEYS = {
-    "openai_api_key",
-    "openrouter_api_key",
-    "anthropic_api_key",
-    "telegram_bot_token",
-    "authorization",
-    "api_key",
-}
-
-
-def _redact(obj: Any) -> Any:
-    if isinstance(obj, dict):
-        redacted = {}
-        for key, value in obj.items():
-            if key.lower() in SECRET_KEYS:
-                redacted[key] = "***redacted***"
-            else:
-                redacted[key] = _redact(value)
-        return redacted
-    if isinstance(obj, list):
-        return [_redact(item) for item in obj]
-    return obj
+from agent.security.redaction import redact_value
 
 
 def redact_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    redacted = _redact(payload)
+    redacted = redact_value(payload)
     return redacted if isinstance(redacted, dict) else {}
 
 

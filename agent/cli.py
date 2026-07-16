@@ -10,6 +10,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -1207,9 +1208,9 @@ def _run_systemctl_user(
 
 
 def _render_telegram_status(state: dict[str, Any]) -> str:
-    transport_health = "healthy" if bool(state.get("telegram_transport_healthy", False)) else "degraded"
+    health_level = str(state.get("telegram_health_level") or ("HEALTHY" if bool(state.get("telegram_transport_healthy", False)) else "DEGRADED")).upper()
     lines = [
-        f"Telegram status: {transport_health.upper()}",
+        f"Telegram status: {health_level}",
         f"enabled: {str(bool(state.get('enabled', False))).lower()}",
         f"configured: {str(bool(state.get('configured', state.get('token_configured', False)))).lower()}",
         f"config_source: {str(state.get('config_source') or 'default')}",
@@ -1221,7 +1222,11 @@ def _render_telegram_status(state: dict[str, Any]) -> str:
         f"webhook_active: {str(bool(state.get('webhook_active', False))).lower()}",
         f"handler_registered: {str(bool(state.get('handler_registered', False))).lower()}",
         f"last_update_received_at: {str(state.get('last_update_received_at') or 'none')}",
+        f"last_dispatch_started_at: {str(state.get('last_dispatch_started_at') or 'none')}",
         f"last_reply_success_at: {str(state.get('last_reply_success_at') or 'none')}",
+        f"last_reply_error_class: {str(state.get('last_reply_error_class') or 'none')}",
+        f"last_roundtrip_ms: {str(state.get('last_roundtrip_ms') or 'none')}",
+        f"live_reply_verified: {str(bool(state.get('live_reply_verified', False))).lower()}",
         f"last_error_code: {str(state.get('last_error_code') or 'none')}",
         f"lock_present: {str(bool(state.get('lock_present', False))).lower()}",
         f"duplicate_consumer_suspected: {str(bool(state.get('duplicate_consumer_suspected', state.get('duplicate_pollers', False)))).lower()}",
@@ -1256,6 +1261,23 @@ def _cmd_telegram_disable(_args: argparse.Namespace) -> int:
         return 1
     state = body.get("state") if isinstance(body.get("state"), dict) else get_telegram_runtime_state(env=operator_env)
     print(_render_telegram_status(state), flush=True)
+    return 0
+
+
+def _cmd_telegram_canary(args: argparse.Namespace) -> int:
+    nonce = f"ping-canary-{uuid.uuid4().hex[:10]}"
+    timeout_seconds = max(1, int(getattr(args, "timeout", 60) or 60))
+    reply = bool(getattr(args, "reply", False))
+    print("Telegram live canary: no automatic send", flush=True)
+    print(f"Send the bot this phrase within {timeout_seconds}s: {nonce}", flush=True)
+    print(f"reply_enabled: {str(reply).lower()}", flush=True)
+    if reply:
+        print("A real Telegram reply may be sent only because --reply was supplied.", flush=True)
+    else:
+        print("No Telegram message will be sent by this command.", flush=True)
+    state = get_telegram_runtime_state(env=telegram_control_env())
+    print(_render_telegram_status(state), flush=True)
+    print("Observation note: use `python scripts/telegram_transport_diagnostic.py` after sending the phrase to inspect recent redacted update/reply state.", flush=True)
     return 0
 
 
@@ -1316,6 +1338,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("telegram_status", help="Show Telegram optional adapter state")
     sub.add_parser("telegram_enable", help="Enable and start the Telegram optional adapter")
     sub.add_parser("telegram_disable", help="Disable and stop the Telegram optional adapter")
+    canary_parser = sub.add_parser("telegram_canary", help="Print a no-send Telegram canary phrase and current status")
+    canary_parser.add_argument("--timeout", type=int, default=60)
+    canary_parser.add_argument("--reply", action="store_true", help="operator explicitly allows a real Telegram reply if a future observer is active")
     sub.add_parser("version", help="Show version and git commit")
     sub.add_parser("split_status", help="Show stable/dev split summary")
     return parser
@@ -1372,6 +1397,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_telegram_enable(args)
     if command == "telegram_disable":
         return _cmd_telegram_disable(args)
+    if command == "telegram_canary":
+        return _cmd_telegram_canary(args)
     if command == "version":
         return _cmd_version(args)
     if command == "split_status":

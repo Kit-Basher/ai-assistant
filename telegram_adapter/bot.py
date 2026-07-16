@@ -59,6 +59,7 @@ from agent.model_scout import build_model_scout
 from agent.audit_log import AuditLog
 from agent.identity import get_public_identity
 from agent.logging_bootstrap import configure_logging_if_needed
+from agent.security.redaction import redact_text
 from agent.setup_wizard import render_telegram_setup_text
 from agent.secret_store import SecretStore
 from agent.setup_chat_flow import classify_runtime_chat_route
@@ -230,6 +231,17 @@ def _text_prefix(text: str | None, *, limit: int = 80) -> str:
     return normalized[:limit].rstrip()
 
 
+def _scope_hash(value: str | None) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def _error_summary(exc_or_text: object, *, limit: int = 120) -> str:
+    return _text_prefix(redact_text(str(exc_or_text or "")), limit=limit)
+
+
 def _normalize_user_text(text: str | None) -> str:
     return " ".join(str(text or "").strip().lower().split())
 
@@ -282,16 +294,32 @@ def _now_iso() -> str:
 
 def _transport_health(bot_data: dict[str, Any] | None) -> dict[str, Any]:
     data = bot_data if isinstance(bot_data, dict) else {}
+    if "handler_registered" in data or "last_update_received_at" in data or "last_reply_success_at" in data:
+        return data
     health = data.get("_telegram_transport_health")
     if not isinstance(health, dict):
         health = {
             "handler_registered": False,
             "last_update_received_at": None,
+            "last_update_kind": None,
+            "last_update_scope_hash": None,
+            "last_update_accepted_at": None,
+            "last_update_rejected_at": None,
+            "last_rejection_reason": None,
+            "last_dispatch_started_at": None,
+            "last_dispatch_finished_at": None,
             "last_update_processed_at": None,
             "last_reply_attempt_at": None,
             "last_reply_success_at": None,
+            "last_reply_failed_at": None,
+            "last_reply_error_class": None,
+            "last_reply_error_summary": None,
             "last_error_code": None,
             "last_error_summary": None,
+            "last_roundtrip_ms": None,
+            "last_cold_start_ms": None,
+            "polling_started_at": None,
+            "polling_heartbeat_at": None,
         }
         data["_telegram_transport_health"] = health
     return health
@@ -301,7 +329,7 @@ def _mark_transport_health(bot_data: dict[str, Any] | None, **updates: Any) -> N
     health = _transport_health(bot_data)
     for key, value in updates.items():
         if key.endswith("_summary") and value is not None:
-            health[key] = _text_prefix(str(value), limit=120)
+            health[key] = _error_summary(value, limit=120)
         else:
             health[key] = value
 
@@ -350,7 +378,7 @@ async def _send_reply(
     delivered_text = primary_text
     send_fallback = False
     if isinstance(transport_health, dict):
-        transport_health["last_reply_attempt_at"] = _now_iso()
+        _mark_transport_health(transport_health, last_reply_attempt_at=_now_iso())
 
     try:
         log_event(
@@ -376,10 +404,10 @@ async def _send_reply(
                 json.dumps(
                     {
                         "trace_id": trace_id,
-                        "chat_id": chat_id,
+                        "chat_id_redacted": _redact_chat_id(chat_id),
                         "msg_len": len(primary_text),
                         "parse_mode": str(parse_mode or "none"),
-                        "error": str(exc),
+                        "error": _error_summary(exc),
                     },
                     ensure_ascii=True,
                     sort_keys=True,
@@ -399,17 +427,23 @@ async def _send_reply(
                 await message.reply_text(retry_text, **retry_kwargs)
             except Exception as retry_exc:
                 if isinstance(transport_health, dict):
-                    transport_health["last_error_code"] = retry_exc.__class__.__name__
-                    transport_health["last_error_summary"] = _text_prefix(str(retry_exc), limit=120)
+                    _mark_transport_health(
+                        transport_health,
+                        last_reply_failed_at=_now_iso(),
+                        last_reply_error_class=retry_exc.__class__.__name__,
+                        last_reply_error_summary=retry_exc,
+                        last_error_code=retry_exc.__class__.__name__,
+                        last_error_summary=retry_exc,
+                    )
                 _LOGGER.error(
                     "telegram.reply.error %s",
                     json.dumps(
                         {
                             "trace_id": trace_id,
-                            "chat_id": chat_id,
+                            "chat_id_redacted": _redact_chat_id(chat_id),
                             "msg_len": len(retry_text),
                             "parse_mode": "none",
-                            "error": str(retry_exc),
+                            "error": _error_summary(retry_exc),
                         },
                         ensure_ascii=True,
                         sort_keys=True,
@@ -422,17 +456,23 @@ async def _send_reply(
             primary_truncated = primary_truncated or retry_truncated
         else:
             if isinstance(transport_health, dict):
-                transport_health["last_error_code"] = exc.__class__.__name__
-                transport_health["last_error_summary"] = _text_prefix(str(exc), limit=120)
+                _mark_transport_health(
+                    transport_health,
+                    last_reply_failed_at=_now_iso(),
+                    last_reply_error_class=exc.__class__.__name__,
+                    last_reply_error_summary=exc,
+                    last_error_code=exc.__class__.__name__,
+                    last_error_summary=exc,
+                )
             _LOGGER.error(
                 "telegram.reply.error %s",
                 json.dumps(
                     {
                         "trace_id": trace_id,
-                        "chat_id": chat_id,
+                        "chat_id_redacted": _redact_chat_id(chat_id),
                         "msg_len": len(primary_text),
                         "parse_mode": str(parse_mode or "none"),
-                        "error": str(exc),
+                        "error": _error_summary(exc),
                     },
                     ensure_ascii=True,
                     sort_keys=True,
@@ -447,17 +487,21 @@ async def _send_reply(
         {"trace_id": trace_id, "chat_id_redacted": _redact_chat_id(chat_id), "route": route, "msg_len": len(delivered_text)},
     )
     if isinstance(transport_health, dict):
-        transport_health["last_reply_success_at"] = _now_iso()
-        transport_health["last_error_code"] = None
-        transport_health["last_error_summary"] = None
+        _mark_transport_health(
+            transport_health,
+            last_reply_success_at=_now_iso(),
+            last_reply_error_class=None,
+            last_reply_error_summary=None,
+            last_error_code=None,
+            last_error_summary=None,
+        )
     log_event(
         log_path,
         "telegram.out",
         {
-            "user_id": chat_id,
-            "chat_id": chat_id,
+            "chat_id_redacted": _redact_chat_id(chat_id),
+            "scope_hash": _scope_hash(chat_id),
             "route": route,
-            "reply_prefix": _text_prefix(delivered_text),
             "trace_id": trace_id,
             "msg_len": len(delivered_text),
             "send_fallback": bool(send_fallback),
@@ -469,10 +513,9 @@ async def _send_reply(
         json.dumps(
             {
                 "trace_id": trace_id,
-                "user_id": chat_id,
-                "chat_id": chat_id,
+                "chat_id_redacted": _redact_chat_id(chat_id),
+                "scope_hash": _scope_hash(chat_id),
                 "route": route,
-                "reply_prefix": _text_prefix(delivered_text),
                 "msg_len": len(delivered_text),
                 "send_fallback": bool(send_fallback),
                 "truncated": bool(primary_truncated),
@@ -485,10 +528,9 @@ async def _send_reply(
         log_path,
         "response_sent",
         {
-            "user_id": chat_id,
-            "chat_id": chat_id,
+            "chat_id_redacted": _redact_chat_id(chat_id),
+            "scope_hash": _scope_hash(chat_id),
             "route": route,
-            "reply_prefix": _text_prefix(delivered_text),
             "trace_id": trace_id,
         },
     )
@@ -527,10 +569,10 @@ async def _send_placeholder_message(
             json.dumps(
                 {
                     "trace_id": str(trace_id or "").strip() or None,
-                    "chat_id": str(chat_id or "").strip() or None,
+                    "chat_id_redacted": _redact_chat_id(chat_id),
                     "msg_len": len(primary_text),
                     "parse_mode": "none",
-                    "error": str(exc),
+                    "error": _error_summary(exc),
                 },
                 ensure_ascii=True,
                 sort_keys=True,
@@ -596,10 +638,9 @@ async def _edit_reply(
         log_path,
         "telegram.out",
         {
-            "user_id": chat_id,
-            "chat_id": chat_id,
+            "chat_id_redacted": _redact_chat_id(chat_id),
+            "scope_hash": _scope_hash(chat_id),
             "route": route,
-            "reply_prefix": _text_prefix(delivered_text),
             "trace_id": trace_id,
             "msg_len": len(delivered_text),
             "send_fallback": bool(edit_fallback),
@@ -611,10 +652,9 @@ async def _edit_reply(
         log_path,
         "response_sent",
         {
-            "user_id": chat_id,
-            "chat_id": chat_id,
+            "chat_id_redacted": _redact_chat_id(chat_id),
+            "scope_hash": _scope_hash(chat_id),
             "route": route,
-            "reply_prefix": _text_prefix(delivered_text),
             "trace_id": trace_id,
             "delivery_mode": "edit",
         },
@@ -624,10 +664,9 @@ async def _edit_reply(
         json.dumps(
             {
                 "trace_id": trace_id,
-                "user_id": chat_id,
-                "chat_id": chat_id,
+                "chat_id_redacted": _redact_chat_id(chat_id),
+                "scope_hash": _scope_hash(chat_id),
                 "route": route,
-                "reply_prefix": _text_prefix(delivered_text),
                 "msg_len": len(delivered_text),
                 "send_fallback": bool(edit_fallback),
                 "truncated": bool(primary_truncated),
@@ -1246,7 +1285,6 @@ def _telegram_chat_admit_or_queue_request(
                     "replaced_pending": True,
                     "previous_request_id": str((previous_request or {}).get("request_id") or ""),
                     "pending_request_id": request["request_id"],
-                    "text_prefix": _text_prefix(str((previous_request or {}).get("text") or "")),
                     "queue_mode": "latest_message_wins",
                 },
             )
@@ -1285,7 +1323,6 @@ def _telegram_chat_log_pending_promotion(
             "trace_id": active_trace_id,
             "pending_trace_id": str(next_request.get("trace_id") or ""),
             "pending_request_id": str(next_request.get("request_id") or ""),
-            "text_prefix": _text_prefix(str(next_request.get("text") or "")),
             "queue_mode": "latest_message_wins",
             "promoted": True,
         },
@@ -1771,6 +1808,15 @@ async def _run_async_telegram_chat(
             transport_health=_transport_health(bot_data),
         )
         response_elapsed_ms = int(max(0.0, pytime.monotonic() - response_started_at) * 1000)
+        roundtrip_ms = int(max(0.0, pytime.monotonic() - started) * 1000)
+        health_updates: dict[str, Any] = {
+            "last_dispatch_finished_at": _now_iso(),
+            "last_roundtrip_ms": roundtrip_ms,
+        }
+        if not bool(bot_data.get("_telegram_first_reply_recorded", False)):
+            health_updates["last_cold_start_ms"] = roundtrip_ms
+            bot_data["_telegram_first_reply_recorded"] = True
+        _mark_transport_health(bot_data, **health_updates)
         log_event(
             log_path,
             "telegram.response_delivery.finish",
@@ -1874,7 +1920,7 @@ async def _run_async_telegram_chat(
                     "chat_id_redacted": _redact_chat_id(chat_id),
                     "update_type": "text",
                     "error_type": exc.__class__.__name__,
-                    "error": str(exc),
+                    "error": _error_summary(exc),
                 },
                 ensure_ascii=True,
                 sort_keys=True,
@@ -1889,7 +1935,13 @@ async def _run_async_telegram_chat(
             chat_id_redacted=_redact_chat_id(chat_id),
             duration_ms=int(max(0.0, pytime.monotonic() - started) * 1000),
             error_type=exc.__class__.__name__,
-            error=str(exc),
+            error=_error_summary(exc),
+        )
+        _mark_transport_health(
+            bot_data,
+            last_dispatch_finished_at=_now_iso(),
+            last_error_code=exc.__class__.__name__,
+            last_error_summary=exc,
         )
         try:
             await _deliver_telegram_text_result(
@@ -2779,8 +2831,9 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         json.dumps(
             {
                 "trace_id": trace_id,
-                "user_id": chat_id,
-                "text_prefix": _text_prefix(text),
+                "chat_id_redacted": _redact_chat_id(chat_id),
+                "scope_hash": _scope_hash(chat_id),
+                "msg_len": len(text),
                 "telegram_message_age_ms": telegram_message_age_ms,
             },
             ensure_ascii=True,
@@ -2791,8 +2844,9 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         log_path,
         "telegram.in",
         {
-            "user_id": chat_id,
-            "text_prefix": _text_prefix(text),
+            "chat_id_redacted": _redact_chat_id(chat_id),
+            "scope_hash": _scope_hash(chat_id),
+            "msg_len": len(text),
             "trace_id": trace_id,
             "telegram_message_age_ms": telegram_message_age_ms,
         },
@@ -2801,8 +2855,9 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         log_path,
         "incoming_message",
         {
-            "user_id": chat_id,
-            "text_prefix": _text_prefix(text),
+            "chat_id_redacted": _redact_chat_id(chat_id),
+            "scope_hash": _scope_hash(chat_id),
+            "msg_len": len(text),
             "trace_id": trace_id,
             "telegram_message_age_ms": telegram_message_age_ms,
         },
@@ -2819,7 +2874,8 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         log_path,
         "telegram.route",
         {
-            "user_id": chat_id,
+            "chat_id_redacted": _redact_chat_id(chat_id),
+            "scope_hash": _scope_hash(chat_id),
             "message_kind": "text",
             "route": "text",
             "trace_id": trace_id,
@@ -2828,6 +2884,9 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     _mark_transport_health(
         bot_data,
         last_update_received_at=received_at.isoformat(),
+        last_update_kind="text",
+        last_update_scope_hash=_scope_hash(chat_id),
+        last_update_accepted_at=received_at.isoformat(),
         last_error_code=None,
         last_error_summary=None,
     )
@@ -2950,7 +3009,8 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             awaiting_confirmation=bool((setup_state_hint or {}).get("awaiting_confirmation")),
         )
         selected_route_hint = str(route_hint.get("route") or "generic_chat").strip().lower() or "generic_chat"
-        _mark_transport_health(bot_data, last_update_processed_at=_now_iso())
+        dispatch_started = pytime.monotonic()
+        _mark_transport_health(bot_data, last_update_processed_at=_now_iso(), last_dispatch_started_at=_now_iso())
         log_event(
             log_path,
             "telegram_update_dispatched",
@@ -3023,7 +3083,7 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     "chat_id_redacted": _redact_chat_id(chat_id),
                     "update_type": "text",
                     "error_type": exc.__class__.__name__,
-                    "error": str(exc),
+                    "error": _error_summary(exc),
                 },
                 ensure_ascii=True,
                 sort_keys=True,
@@ -3079,7 +3139,8 @@ def _log_command_route(
         log_path,
         "telegram.route",
         {
-            "user_id": chat_id,
+            "chat_id_redacted": _redact_chat_id(chat_id),
+            "scope_hash": _scope_hash(chat_id),
             "message_kind": "command",
             "route": "command",
             "command": command,
@@ -3102,7 +3163,17 @@ async def _handle_remind(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     response = orchestrator.handle_message(prompt, user_id=chat_id)
     await update.effective_message.reply_text(_safe_reply_text(response.text))
-    log_event(log_path, "telegram_command", {"chat_id": chat_id, "text": text, "forwarded": prompt})
+    log_event(
+        log_path,
+        "telegram_command",
+        {
+            "chat_id_redacted": _redact_chat_id(chat_id),
+            "scope_hash": _scope_hash(chat_id),
+            "command": "/remind",
+            "msg_len": len(text),
+            "forwarded_len": len(prompt),
+        },
+    )
 
 
 async def _handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3990,11 +4061,25 @@ def build_app(
     app.bot_data["_telegram_transport_health"] = {
         "handler_registered": True,
         "last_update_received_at": None,
+        "last_update_kind": None,
+        "last_update_scope_hash": None,
+        "last_update_accepted_at": None,
+        "last_update_rejected_at": None,
+        "last_rejection_reason": None,
+        "last_dispatch_started_at": None,
+        "last_dispatch_finished_at": None,
         "last_update_processed_at": None,
         "last_reply_attempt_at": None,
         "last_reply_success_at": None,
+        "last_reply_failed_at": None,
+        "last_reply_error_class": None,
+        "last_reply_error_summary": None,
         "last_error_code": None,
         "last_error_summary": None,
+        "last_roundtrip_ms": None,
+        "last_cold_start_ms": None,
+        "polling_started_at": None,
+        "polling_heartbeat_at": None,
     }
 
     app.job_queue.run_repeating(_check_reminders, interval=30, first=5)
@@ -4036,7 +4121,7 @@ def run_polling_with_backoff(
             backoff_seconds = telegram_conflict_backoff_seconds(conflict_retries)
             payload = {
                 "error_type": exc.__class__.__name__,
-                "error": str(exc),
+                "error": _error_summary(exc),
                 "token_source": token_source,
                 "backoff_seconds": backoff_seconds,
                 "retry": conflict_retries,

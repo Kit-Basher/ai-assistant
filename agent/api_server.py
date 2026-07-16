@@ -53,6 +53,7 @@ from agent.intent.llm_rerank import rerank_intents_with_llm
 from agent.intent.low_confidence import detect_low_confidence
 from agent.intent.thread_integrity import detect_thread_drift, normalize_text as normalize_thread_text
 from agent.logging_utils import log_event
+from agent.security.redaction import redact_text
 from agent.memory_authority import MEMORY_AUTHORITY_LABELS, build_memory_injection_diagnostics
 from agent.model_watch import (
     CatalogDelta,
@@ -5584,15 +5585,40 @@ class AgentRuntime:
         )
         polling_active = bool(runner_status.get("embedded_running", False)) or bool(runtime_state.get("service_active", False))
         inbound_seen = bool(transport_health.get("last_update_received_at"))
+        dispatch_seen = bool(transport_health.get("last_dispatch_started_at") or transport_health.get("last_update_processed_at"))
         outbound_seen = bool(transport_health.get("last_reply_success_at"))
         duplicate_consumer_suspected = bool(runtime_state.get("duplicate_pollers", False)) or str(
             runner_status.get("last_error") or ""
         ).lower().find("conflict") >= 0
+        handler_registered = bool(transport_health.get("handler_registered", False) or runtime_state.get("service_active", False))
+        recent_error = bool(
+            transport_health.get("last_error_code")
+            or transport_health.get("last_reply_error_class")
+            or runner_status.get("last_error")
+        )
+        if duplicate_consumer_suspected or (bool(runtime_state.get("token_configured", False)) and not polling_active):
+            telegram_health_level = "DEGRADED"
+        elif outbound_seen and polling_active and handler_registered and not recent_error:
+            telegram_health_level = "HEALTHY"
+        elif outbound_seen:
+            telegram_health_level = "REPLYING"
+        elif dispatch_seen:
+            telegram_health_level = "DISPATCHING"
+        elif inbound_seen:
+            telegram_health_level = "RECEIVING"
+        elif polling_active:
+            telegram_health_level = "POLLING"
+        elif bool(runtime_state.get("token_configured", False)):
+            telegram_health_level = "CONFIGURED"
+        else:
+            telegram_health_level = "UNVERIFIED"
         telegram_transport_healthy = bool(
             runtime_state.get("token_configured", False)
             and polling_active
-            and bool(transport_health.get("handler_registered", False) or runtime_state.get("service_active", False))
+            and handler_registered
+            and outbound_seen
             and not duplicate_consumer_suspected
+            and not recent_error
         )
         payload = {
             "ok": True,
@@ -5611,9 +5637,23 @@ class AgentRuntime:
             "webhook_active": False,
             "handler_registered": bool(transport_health.get("handler_registered", False) or runtime_state.get("service_active", False)),
             "last_update_received_at": transport_health.get("last_update_received_at"),
+            "last_update_kind": transport_health.get("last_update_kind"),
+            "last_update_scope_hash": transport_health.get("last_update_scope_hash"),
+            "last_update_accepted_at": transport_health.get("last_update_accepted_at"),
+            "last_update_rejected_at": transport_health.get("last_update_rejected_at"),
+            "last_rejection_reason": transport_health.get("last_rejection_reason"),
+            "last_dispatch_started_at": transport_health.get("last_dispatch_started_at"),
+            "last_dispatch_finished_at": transport_health.get("last_dispatch_finished_at"),
             "last_update_processed_at": transport_health.get("last_update_processed_at"),
             "last_reply_attempt_at": transport_health.get("last_reply_attempt_at"),
             "last_reply_success_at": transport_health.get("last_reply_success_at"),
+            "last_reply_failed_at": transport_health.get("last_reply_failed_at"),
+            "last_reply_error_class": transport_health.get("last_reply_error_class"),
+            "last_reply_error_summary": transport_health.get("last_reply_error_summary"),
+            "last_roundtrip_ms": transport_health.get("last_roundtrip_ms"),
+            "last_cold_start_ms": transport_health.get("last_cold_start_ms"),
+            "polling_started_at": transport_health.get("polling_started_at"),
+            "polling_heartbeat_at": transport_health.get("polling_heartbeat_at"),
             "last_error_code": transport_health.get("last_error_code") or (
                 "poll_conflict" if duplicate_consumer_suspected else None
             ),
@@ -5622,6 +5662,8 @@ class AgentRuntime:
             "runtime_reachable": True,
             "inbound_health": "seen" if inbound_seen else "no_updates_seen",
             "outbound_health": "seen" if outbound_seen else "no_replies_seen",
+            "telegram_health_level": telegram_health_level,
+            "live_reply_verified": outbound_seen,
             "telegram_transport_healthy": telegram_transport_healthy,
             "config_source": str(runtime_state.get("config_source") or "unknown"),
             "config_source_path": runtime_state.get("config_source_path"),
@@ -6596,7 +6638,7 @@ class AgentRuntime:
                 pass
             return False, {"ok": False, "error": "telegram_api_error", "message": error_message}
         except (OSError, TimeoutError, ValueError, UnicodeError, json.JSONDecodeError, urllib.error.URLError) as exc:
-            return False, {"ok": False, "error": "telegram_request_failed", "message": str(exc) or "request_failed"}
+            return False, {"ok": False, "error": "telegram_request_failed", "message": redact_text(str(exc)) or "request_failed"}
 
         if not isinstance(parsed, dict):
             return False, {"ok": False, "error": "telegram_invalid_response"}

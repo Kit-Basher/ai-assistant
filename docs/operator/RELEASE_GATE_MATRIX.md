@@ -37,6 +37,8 @@ local service:
 - `python scripts/local_intent_routing_smoke.py`
 - `python scripts/local_system_inspection_smoke.py`
 - `python scripts/telegram_transport_smoke.py`
+- `python scripts/telegram_token_redaction_smoke.py`
+- `python scripts/telegram_first_reply_latency_smoke.py`
 - `python scripts/final_release_audit.py`
 - `python -m pytest -q tests/test_release_gate.py tests/test_release_smoke.py`
 - `python -m pytest -q tests/test_backup_restore_proof.py tests/test_pre_vm_complete_gate.py`
@@ -95,6 +97,8 @@ Commands:
 - `python scripts/final_release_audit.py`
 - `python scripts/telegram_transport_diagnostic.py`
 - `python scripts/telegram_transport_smoke.py`
+- `python scripts/telegram_token_redaction_smoke.py`
+- `python scripts/telegram_first_reply_latency_smoke.py`
 - `python scripts/local_intent_routing_smoke.py`
 - `python scripts/local_system_inspection_smoke.py`
 - `python scripts/perf_smoke.py`

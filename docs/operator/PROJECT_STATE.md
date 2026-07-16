@@ -5,25 +5,28 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Version: `v0.2.2`
-- Commit: `b43403de2cf8cf4a53e185ab8e06ba73ee98b893`
+- Version: `v0.2.3`
+- Commit: `a63ddd5265f612dc3dc2f1fc9eef352f98af162b`
 - Fresh Debian VM proof: not run
-- Release status: v0.2.2 is released and verified
+- Release status: v0.2.3 is released and verified
 
-## Active Phase: v0.2.3 Transport Reliability and Local Intent Quality
+## Active Phase: v0.2.4 Telegram Token Redaction and First-Reply Reliability
 
-Normal post-release use exposed a non-responsive Telegram transport, incorrect
-web routing for local-device questions, and overly technical system-health
-summaries.
+Post-release Telegram use confirmed that the live transport works, but journal
+logs exposed Telegram bot-token URLs and the first cold Telegram reply was slow
+and weak.
 
-This patch improves live transport diagnostics, local inspection routing,
-process-level resource reporting, and ordinary-user explanations without
-weakening the v0.2.2 authorization boundary.
+This patch redacts Telegram secrets from logs and diagnostics, improves live
+reply tracing, and makes simple greeting/typo messages reliable without
+weakening authorization.
 
 Patch policy:
 
 - Telegram diagnostics are read-only by default and never expose bot tokens or
   message bodies.
+- If any previous log contained `https://api.telegram.org/bot...`, rotate the
+  bot token in BotFather, update the Personal Agent secret store, and restart
+  `personal-agent-telegram.service`.
 - Local PC/system questions route to read-only local inspection before web
   search.
 - Process inspection omits command lines and environment variables by default.

@@ -182,6 +182,38 @@ class TestTelegramAdapter(unittest.TestCase):
             event_types = [str(row.get("type") or "") for row in _read_log_rows(log_path)]
             self.assertIn("telegram.social_turn.fast_path", event_types)
 
+    def test_typo_greetings_use_fast_path_without_local_api(self) -> None:
+        prompts = ["are you ther?", "hello?>", "ping", "test"]
+        for prompt in prompts:
+            with self.subTest(prompt=prompt):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    log_path = f"{tmpdir}/agent.log"
+
+                    async def _scenario() -> dict[str, object]:
+                        with patch(
+                            "telegram_adapter.bot._post_local_api_chat_json_async",
+                            side_effect=AssertionError("greetings must not call the local API"),
+                        ):
+                            return await _handle_telegram_text_via_local_api(
+                                text=prompt,
+                                chat_id="42",
+                                trace_id="trace-typo",
+                                bot_data={},
+                                log_path=log_path,
+                                runtime=None,
+                                orchestrator=None,
+                                runtime_version=None,
+                                runtime_git_commit=None,
+                                runtime_started_ts=None,
+                            )
+
+                    result = asyncio.run(_scenario())
+                    self.assertTrue(bool(result.get("ok")))
+                    self.assertEqual("telegram_social_turn", result.get("handler_name"))
+                    self.assertIn("I’m here", str(result.get("text") or ""))
+                    chat_meta = result.get("chat_meta") if isinstance(result.get("chat_meta"), dict) else {}
+                    self.assertTrue(bool(chat_meta.get("fast_path")))
+
     def test_deterministic_status_routes_skip_placeholder_and_log_latency_breakdown(self) -> None:
         cases = [
             ("what model are you using right now", "model_status", "Current model is ollama:qwen3.5:4b."),
@@ -327,11 +359,21 @@ class TestTelegramAdapter(unittest.TestCase):
 
             self.assertEqual([], orchestrator.calls)
             self.assertEqual("adapter reply", str(update.effective_message.replies[-1]["text"] or ""))
-            event_types = [str(row.get("type") or "") for row in _read_log_rows(log_path)]
+            rows = _read_log_rows(log_path)
+            event_types = [str(row.get("type") or "") for row in rows]
             self.assertIn("incoming_message", event_types)
             self.assertIn("telegram.route.selected", event_types)
             self.assertIn("telegram_message", event_types)
             self.assertIn("response_sent", event_types)
+            rendered_rows = json.dumps(rows)
+            self.assertNotIn("tell me a joke", rendered_rows)
+            for row in rows:
+                payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+                if str(row.get("type") or "") in {"telegram.in", "incoming_message", "telegram.out", "response_sent"}:
+                    self.assertNotIn("text_prefix", payload)
+                    self.assertNotIn("reply_prefix", payload)
+                    self.assertNotIn("chat_id", payload)
+                    self.assertIn("chat_id_redacted", payload)
 
     def test_text_message_acknowledges_immediately_and_edits_later(self) -> None:
         async def _scenario() -> tuple[_FakeUpdate, list[dict[str, object]]]:

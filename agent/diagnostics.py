@@ -5,6 +5,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Iterable
 
+from agent.security.redaction import redact_text
 
 @dataclass(frozen=True)
 class CommandResult:
@@ -72,7 +73,6 @@ def run_command(args: Iterable[str], timeout_s: float = 2.0) -> CommandResult:
     )
 
 
-_TOKEN_RE = re.compile(r"\b\d+:[A-Za-z0-9_-]{20,}\b")
 _ENV_SECRET_RE = re.compile(r"(\b[A-Z0-9_]*(?:TOKEN|API_KEY)[A-Z0-9_]*=)([^\s]+)", re.IGNORECASE)
 
 
@@ -83,7 +83,7 @@ def redact_secrets(text: str | bytes) -> str:
         return ""
     redacted_lines: list[str] = []
     for line in text.splitlines():
-        line = _TOKEN_RE.sub("[REDACTED]", line)
+        line = redact_text(line)
         line = _ENV_SECRET_RE.sub(r"\1[REDACTED]", line)
         redacted_lines.append(line)
     return "\n".join(redacted_lines)

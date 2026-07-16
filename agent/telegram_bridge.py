@@ -745,9 +745,9 @@ def build_telegram_chat_proxy_error_result(
 
     if kind == "timeout":
         if backend_ready or backend_reachable:
-            message = "The agent is running, but that request timed out. Please try again."
+            message = "I received your message, but the response step timed out. Please try again, or ask me to run a specific check."
         else:
-            message = "I couldn't get a reply from the agent in time. Please try again."
+            message = "I received your message, but the local agent did not reply in time. Please try again in one sentence."
     elif kind == "disconnect":
         if backend_ready or backend_reachable:
             message = "The connection to the agent dropped before the reply finished. Please try again."
@@ -757,17 +757,17 @@ def build_telegram_chat_proxy_error_result(
         if backend_ready or backend_reachable:
             message = "The agent returned an error while handling that request. Please try again."
         else:
-            message = "I couldn't get a clean response from the agent backend."
+            message = "I’m here, but that request did not come through cleanly. Could you send it again in one sentence?"
     elif kind == "unreachable":
         if backend_ready or backend_reachable:
             message = "The agent looks healthy, but this request could not connect cleanly. Please try again."
         else:
-            message = "I couldn't reach the agent backend right now."
+            message = "I’m here, but I could not reach the local agent backend right now. Please try again shortly."
     else:
         if backend_ready or backend_reachable:
             message = "The agent hit a transient local connection problem. Please try again."
         else:
-            message = "I couldn't talk to the local agent backend right now."
+            message = "I’m here, but the local response path did not complete cleanly. Could you send it again in one sentence?"
 
     return {
         "ok": False,

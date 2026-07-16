@@ -441,7 +441,9 @@ class TestTelegramBridge(unittest.TestCase):
         )
         self.assertTrue(bool(result.get("handled")))
         self.assertEqual("chat_proxy_error", result.get("route"))
-        self.assertIn("couldn't reach the agent backend", str(result.get("text") or "").lower())
+        reply = str(result.get("text") or "").lower()
+        self.assertIn("i’m here", reply)
+        self.assertIn("could not reach the local agent backend", reply)
 
 
 if __name__ == "__main__":

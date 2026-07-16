@@ -10,10 +10,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from agent.telegram_runtime_state import get_telegram_runtime_state, telegram_control_env
+from agent.security.redaction import redact_value
 
 
 API_URL = "http://127.0.0.1:8765/telegram/status"
-RAW_TOKEN_MARKERS = (":AA", "bot_token", "telegram_bot_token")
+RAW_TOKEN_MARKERS = ("https://api.telegram.org/bot", "telegram_bot_token")
 
 
 def _api_status() -> dict[str, object]:
@@ -40,11 +41,13 @@ def _normalized_state(state: dict[str, object]) -> dict[str, object]:
     )
     normalized.setdefault("runtime_reachable", state.get("runtime_reachable"))
     normalized.setdefault("telegram_transport_healthy", bool(state.get("telegram_transport_healthy", False)))
+    normalized.setdefault("telegram_health_level", str(state.get("telegram_health_level") or "UNVERIFIED"))
+    normalized.setdefault("live_reply_verified", bool(state.get("live_reply_verified", False)))
     return normalized
 
 
 def _token_redacted(state: dict[str, object]) -> bool:
-    rendered = json.dumps(state, ensure_ascii=True, sort_keys=True).lower()
+    rendered = json.dumps(redact_value(state), ensure_ascii=True, sort_keys=True).lower()
     return not any(marker.lower() in rendered for marker in RAW_TOKEN_MARKERS)
 
 
@@ -61,6 +64,8 @@ def main() -> int:
         ("polling status present", "polling_active" in state, str(state.get("polling_active"))),
         ("duplicate consumer status present", "duplicate_consumer_suspected" in state or "duplicate_pollers" in state, str(state.get("duplicate_consumer_suspected", state.get("duplicate_pollers")))),
         ("runtime reachability classified", "runtime_reachable" in state or bool(live), str(state.get("runtime_reachable"))),
+        ("health level classified", str(state.get("telegram_health_level") or "") in {"CONFIGURED", "POLLING", "RECEIVING", "DISPATCHING", "REPLYING", "HEALTHY", "DEGRADED", "UNVERIFIED"}, str(state.get("telegram_health_level"))),
+        ("reply trace fields present", "last_reply_success_at" in state and "last_reply_attempt_at" in state, f"last_reply_success_at={state.get('last_reply_success_at')}"),
     ]
     failed = 0
     warn = 0
@@ -70,8 +75,10 @@ def main() -> int:
         failed += 0 if ok else 1
     if configured and not healthy:
         warn += 1
-        print("WARN: Telegram is configured but transport is not proven healthy.")
+        print(f"WARN: Telegram is configured but transport is not proven healthy. level={state.get('telegram_health_level')}")
         print("Suggested checks: poller active, webhook disabled, no duplicate getUpdates consumer, runtime reachable.")
+    print(f"TELEGRAM_HEALTH_LEVEL={state.get('telegram_health_level')}")
+    print(f"TELEGRAM_LIVE_REPLY_VERIFIED={'true' if bool(state.get('live_reply_verified')) else 'false'}")
     print(f"PASS={len(checks)-failed} WARN={warn} FAIL={failed}")
     print(f"TELEGRAM_CONFIGURED={'true' if configured else 'false'}")
     print(f"TELEGRAM_TRANSPORT_HEALTHY={'true' if healthy else 'false'}")

@@ -765,7 +765,7 @@ def _check_telegram_token(online: bool) -> DoctorCheck:
         return DoctorCheck(
             check_id="telegram.token",
             status="WARN",
-            detail_short=f"token present, online check failed: {payload_or_error}",
+            detail_short=f"token present, online check failed: {redact_secrets(str(payload_or_error))}",
             next_action="Verify network access and Telegram token validity.",
         )
     payload = payload_or_error if isinstance(payload_or_error, dict) else {}

@@ -466,6 +466,14 @@ def get_telegram_runtime_state(
     polling_active = bool(service_active)
     handler_registered = bool(service_installed)
     duplicate_consumer_suspected = bool(duplicate_pollers)
+    if duplicate_consumer_suspected or (token_configured and not polling_active):
+        telegram_health_level = "DEGRADED"
+    elif polling_active:
+        telegram_health_level = "POLLING"
+    elif token_configured:
+        telegram_health_level = "CONFIGURED"
+    else:
+        telegram_health_level = "UNVERIFIED"
     return {
         "enabled": enabled,
         "configured": token_configured,
@@ -476,14 +484,30 @@ def get_telegram_runtime_state(
         "webhook_active": False,
         "handler_registered": handler_registered,
         "last_update_received_at": None,
+        "last_update_kind": None,
+        "last_update_scope_hash": None,
+        "last_update_accepted_at": None,
+        "last_update_rejected_at": None,
+        "last_rejection_reason": None,
+        "last_dispatch_started_at": None,
+        "last_dispatch_finished_at": None,
         "last_update_processed_at": None,
         "last_reply_attempt_at": None,
         "last_reply_success_at": None,
+        "last_reply_failed_at": None,
+        "last_reply_error_class": None,
+        "last_reply_error_summary": None,
+        "last_roundtrip_ms": None,
+        "last_cold_start_ms": None,
+        "polling_started_at": None,
+        "polling_heartbeat_at": None,
         "last_error_code": "poll_conflict" if duplicate_consumer_suspected else None,
         "last_error_summary": "Duplicate Telegram pollers detected." if duplicate_consumer_suspected else None,
         "duplicate_consumer_suspected": duplicate_consumer_suspected,
         "runtime_reachable": None,
-        "telegram_transport_healthy": bool(token_configured and polling_active and handler_registered and not duplicate_consumer_suspected),
+        "telegram_health_level": telegram_health_level,
+        "live_reply_verified": False,
+        "telegram_transport_healthy": False,
         "config_source": str(enablement.get("config_source") or "default"),
         "config_source_path": enablement.get("source_path"),
         "service_installed": bool(service_installed),

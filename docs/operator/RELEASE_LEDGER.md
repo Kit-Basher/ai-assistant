@@ -7,22 +7,22 @@ line. It does not replace detailed design, operator, or checkpoint documents.
 
 ## Current Stable Checkpoint
 
-Current stable checkpoint: `v0.2.2`
+Current stable checkpoint: `v0.2.3`
 
-Commit: `b43403de2cf8cf4a53e185ab8e06ba73ee98b893`
+Commit: `a63ddd5265f612dc3dc2f1fc9eef352f98af162b`
 
 Summary:
 
-- v0.2.2 is released and verified.
-- v0.2.3 Transport Reliability and Local Intent Quality is active.
-- Current default pytest result: `2477 passed, 22 skipped, 0 failed`.
+- v0.2.3 is released and verified.
+- v0.2.4 Telegram Token Redaction and First-Reply Reliability is active.
+- Current default pytest result: `2481 passed, 22 skipped, 0 failed`.
 - Primary uninstall remains disabled unless a local operator creates a valid
   activation marker. Purge remains unsupported.
 - Accepted latency variance is documented in
   `docs/operator/RUNTIME_LATENCY_ACCEPTANCE_V1.json`.
-- The v0.2.3 patch improves Telegram transport diagnostics, local PC intent
-  routing, process-level memory/CPU inspection, and ordinary-user health
-  summaries without weakening the v0.2.2 authorization boundary.
+- The v0.2.4 patch redacts Telegram API tokens from logs/diagnostics and makes
+  first greeting/typo replies use a fast local path without weakening the
+  authorization boundary.
 
 ## Recent Release Tags
 
@@ -41,7 +41,8 @@ Summary:
 | `v0.2.2-final-release-audit-v1` | 2026-07-13 | `5238597` | Final release audit tooling and v0.2.2 version decision. |
 | `v0.2.2-full-pytest-closure-v1` | 2026-07-13 | `144a240` | Full pytest failure inventory and initial exact-skip closure. |
 | `v0.2.2` | 2026-07-14 | `b43403d` | Authorization, operational hardening, full pytest closure, clean checkout reproducibility, and release audit maturity. |
-| `v0.2.3-transport-local-intent-closure-v1` | recommended | pending | Transport diagnostics, local-device routing, and process-level system-health UX patch checkpoint. |
+| `v0.2.3` | 2026-07-15 | `a63ddd5` | Telegram transport diagnostics, local-device routing, process-level system-health UX, and friendly memory summaries. |
+| `v0.2.4-telegram-redaction-first-reply-closure-v1` | recommended | pending | Telegram token redaction, redacted live reply tracing, and first-reply greeting reliability patch checkpoint. |
 | `v0.2.0-managed-searxng` | 2026-06-14 | `f26ba6f` | Managed local SearXNG safe web search. |
 | `v0.2.0-plan-mode-policy` | 2026-06-14 | `e88281b` | Central Plan Mode policy layer. |
 | `v0.2.0-plan-mode-pack-lifecycle` | 2026-06-14 | `7096852` | Plan Mode enforcement for external pack lifecycle writes. |
