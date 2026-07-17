@@ -96,6 +96,7 @@ def main() -> int:
     checks.append(_script_check("telegram transport smoke", "scripts/telegram_transport_smoke.py"))
     checks.append(_script_check("telegram token redaction smoke", "scripts/telegram_token_redaction_smoke.py"))
     checks.append(_script_check("telegram first reply latency smoke", "scripts/telegram_first_reply_latency_smoke.py"))
+    checks.append(_script_check("assistant personality memory smoke", "scripts/assistant_personality_memory_smoke.py"))
     checks.append(_script_check("local intent routing smoke", "scripts/local_intent_routing_smoke.py"))
     checks.append(_script_check("local system inspection smoke", "scripts/local_system_inspection_smoke.py"))
     checks.append(_script_check("capability policy audit", "scripts/capability_policy_audit.py"))

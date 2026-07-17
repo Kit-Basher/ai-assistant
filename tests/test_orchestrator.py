@@ -3608,8 +3608,11 @@ class TestOrchestrator(unittest.TestCase):
         with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
             response = orchestrator.handle_message("what can you help me with?", "user1")
         self.assertEqual("assistant_capabilities", response.data["route"])
-        self.assertIn("External skill acquisition", response.text)
-        self.assertIn("missing capabilit", response.text.lower())
+        self.assertIn("everyday questions", response.text)
+        self.assertIn("check what is using memory", response.text)
+        self.assertIn("ask before doing it", response.text)
+        self.assertNotIn("agent layer", response.text.lower())
+        self.assertNotIn("control plane", response.text.lower())
         self.assertFalse(response.data["used_llm"])
         self.assertEqual(0, len(llm.chat_calls))
         self.assertTrue(response.data.get("skip_post_response_hooks", False))
@@ -11429,8 +11432,14 @@ Workflow:
         self.assertEqual(0, new_thread_ctx.thread_turn_count)
 
     def test_epistemic_turn_activity_logs_include_thread_id(self) -> None:
-        orch = self._orchestrator()
-        orch.handle_message("hello there", "user1")
+        orch = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=_FakeChatLLM(enabled=True, text="Here is a normal chat reply."),
+        )
+        orch.handle_message("tell me one useful thing", "user1")
         rows = self.db.activity_log_list_recent("epistemic_turn", limit=2)
         self.assertGreaterEqual(len(rows), 2)
         for row in rows:

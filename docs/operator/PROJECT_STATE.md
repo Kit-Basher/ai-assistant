@@ -5,32 +5,29 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Version: `v0.2.3`
-- Commit: `a63ddd5265f612dc3dc2f1fc9eef352f98af162b`
+- Version: `v0.2.4`
+- Commit: `d202756684063fd787699c0e7656b6a86037c37b`
 - Fresh Debian VM proof: not run
-- Release status: v0.2.3 is released and verified
+- Release status: v0.2.4 redaction/reply checkpoint is committed
 
-## Active Phase: v0.2.4 Telegram Token Redaction and First-Reply Reliability
+## Active Phase: v0.2.5 Assistant Personality, Memory, and Capability UX Audit
 
-Post-release Telegram use confirmed that the live transport works, but journal
-logs exposed Telegram bot-token URLs and the first cold Telegram reply was slow
-and weak.
+Live Telegram use showed that the assistant could answer “what can you help me
+do?” with internal architecture language instead of a normal user-facing
+capability summary.
 
-This patch redacts Telegram secrets from logs and diagnostics, improves live
-reply tracing, and makes simple greeting/typo messages reliable without
-weakening authorization.
+This patch improves capability explanations, memory classification, memory
+recall/forget behavior, and clarification quality while preserving Plan Mode,
+token redaction, local inspection boundaries, and authorization gates.
 
 Patch policy:
 
-- Telegram diagnostics are read-only by default and never expose bot tokens or
-  message bodies.
-- If any previous log contained `https://api.telegram.org/bot...`, rotate the
-  bot token in BotFather, update the Personal Agent secret store, and restart
-  `personal-agent-telegram.service`.
-- Local PC/system questions route to read-only local inspection before web
-  search.
-- Process inspection omits command lines and environment variables by default.
-- Any future Telegram repair remains a bounded Plan/confirmation-gated action.
+- Capability answers must be friendly and avoid internal architecture terms
+  unless the user explicitly asks how the system works.
+- Durable memories may be stored when clearly useful; temporary, sensitive, or
+  uncertain memories are handled conservatively.
+- Mutating actions still require preview and confirmation.
+- Telegram/Web behavior should remain consistent.
 
 ## Completed Release: v0.2.2
 

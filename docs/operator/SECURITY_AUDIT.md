@@ -155,6 +155,8 @@ fresh Debian VM install proof passes.
 - Direct llama.cpp binary/library management is absent.
 - MCP/tool runtime execution is absent.
 - Semantic memory remains off by default and release-gated.
+- Assistant memory policy refuses secret-like values and directs operators to
+  the secret store or a password manager instead of durable chat memory.
 
 ## Operator Rule
 

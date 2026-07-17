@@ -18,11 +18,13 @@ in BotFather, update the Personal Agent secret store, and restart
 `personal-agent-telegram.service`.
 
 ## Current Product Truth
-Current release line: v0.2.4 development patch on top of released v0.2.3. The
-v0.2.2 authorization foundation is implemented and verified. v0.2.3 improved
-Telegram diagnostics and local system intent quality. v0.2.4 focuses on
-Telegram token redaction and first-reply reliability. Release tags are not
-created automatically by audit tooling.
+Current release line: v0.2.5 development patch on top of the v0.2.4 Telegram
+redaction checkpoint. The v0.2.2 authorization foundation is implemented and
+verified. v0.2.3 improved Telegram diagnostics and local system intent quality.
+v0.2.4 added token redaction and first-reply reliability. v0.2.5 focuses on
+friendly capability answers, conservative memory behavior, and better
+clarifying questions. Release tags are not created automatically by audit
+tooling.
 
 The user interacts with the assistant layer. The assistant interprets intent,
 asks the agent layer for grounded runtime/tool facts or bounded action results

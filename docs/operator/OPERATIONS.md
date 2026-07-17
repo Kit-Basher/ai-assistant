@@ -124,6 +124,9 @@ Confirm:
   previous journal contained `https://api.telegram.org/bot...`, rotate the bot
   token in BotFather, update the Personal Agent secret store, and restart
   `personal-agent-telegram.service`
+- run `python scripts/assistant_personality_memory_smoke.py` when assistant
+  capability wording, memory classification, clarification behavior, or
+  user-facing personality changes
 - run `python scripts/backup_v1_smoke.py` when backup behavior feels wrong;
   this gate verifies the Plan Mode-gated backup executor, timestamped local
   backup artifact, bounded redacted summary files, journal id, scoped rollback

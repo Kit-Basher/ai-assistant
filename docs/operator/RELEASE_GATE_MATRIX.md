@@ -39,6 +39,7 @@ local service:
 - `python scripts/telegram_transport_smoke.py`
 - `python scripts/telegram_token_redaction_smoke.py`
 - `python scripts/telegram_first_reply_latency_smoke.py`
+- `python scripts/assistant_personality_memory_smoke.py`
 - `python scripts/final_release_audit.py`
 - `python -m pytest -q tests/test_release_gate.py tests/test_release_smoke.py`
 - `python -m pytest -q tests/test_backup_restore_proof.py tests/test_pre_vm_complete_gate.py`
@@ -99,6 +100,7 @@ Commands:
 - `python scripts/telegram_transport_smoke.py`
 - `python scripts/telegram_token_redaction_smoke.py`
 - `python scripts/telegram_first_reply_latency_smoke.py`
+- `python scripts/assistant_personality_memory_smoke.py`
 - `python scripts/local_intent_routing_smoke.py`
 - `python scripts/local_system_inspection_smoke.py`
 - `python scripts/perf_smoke.py`
@@ -224,6 +226,11 @@ safe web behavior.
 `local_system_inspection_smoke.py` proves read-only process-level local
 inspection collects memory totals and top grouped processes, omits command
 lines/environments, and renders a memory-focused ordinary-user answer.
+
+`assistant_personality_memory_smoke.py` proves user-facing capability answers,
+memory classification, recall, forget behavior, clarification quality, mutating
+action approval boundaries, and absence of internal architecture terms in
+ordinary answers.
 
 `operator_lifecycle_smoke.py` is the installed operator-lifecycle gate. It
 proves health, broken-status, storage, repair, backup, restore, update,

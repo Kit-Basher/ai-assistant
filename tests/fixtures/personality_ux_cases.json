@@ -1,0 +1,47 @@
+[
+  {
+    "utterance": "you there?",
+    "expected_route": "social_turn",
+    "assertions": ["presence_response"]
+  },
+  {
+    "utterance": "hello?>",
+    "expected_route": "social_turn",
+    "assertions": ["presence_response"]
+  },
+  {
+    "utterance": "are you ther?",
+    "expected_route": "social_turn",
+    "assertions": ["presence_response"]
+  },
+  {
+    "utterance": "what can you help me do?",
+    "expected_route": "assistant_capabilities",
+    "assertions": ["friendly_capability", "no_internal_terms"]
+  },
+  {
+    "utterance": "what are your capabilities?",
+    "expected_route": "assistant_capabilities",
+    "assertions": ["friendly_capability", "no_internal_terms"]
+  },
+  {
+    "utterance": "can you check if my computer is running okay?",
+    "expected_route": "local_system",
+    "assertions": ["local_read_only"]
+  },
+  {
+    "utterance": "can you clean up my downloads folder?",
+    "expected_route": "assistant_clarification",
+    "assertions": ["approval_boundary"]
+  },
+  {
+    "utterance": "send a message to someone saying I'll be late",
+    "expected_route": "assistant_clarification",
+    "assertions": ["asks_recipient", "no_send"]
+  },
+  {
+    "utterance": "I want to build something cool",
+    "expected_route": "assistant_clarification",
+    "assertions": ["one_useful_followup"]
+  }
+]

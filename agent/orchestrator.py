@@ -52,6 +52,13 @@ from agent.primary_uninstall_policy import build_policy_context, validate_primar
 from agent.disk_grow import resolve_allowed_path, build_growth_report, _run_du
 from agent.action_gate import handle_action_text, propose_action
 from agent.assistant_planner import AssistantPlanner, AssistantPlan, validate_assistant_plan
+from agent.assistant_ux import (
+    build_clarification_for_vague_request,
+    build_user_facing_capability_answer,
+    classify_memory_request,
+    looks_like_capability_question,
+    looks_like_internal_architecture_question,
+)
 from agent.commands import parse_command, split_pipe_args
 from agent.confirmations import ConfirmationStore, PendingAction
 from agent.logging_utils import log_event, redact_payload
@@ -107,6 +114,7 @@ from agent.report_followups import resource_followup
 from agent.resource_insights import classify_memory_pressure, summarize_resource_report
 from agent.changed_report import build_changed_report_from_system_facts
 from agent.policy import build_canonical_plan, evaluate_policy
+from agent.public_chat import build_trivial_social_turn_message
 from agent.mutation_plan import (
     MUTATION_PLAN_SCHEMA_VERSION,
     MutationPlanStore,
@@ -4553,15 +4561,7 @@ class Orchestrator:
         brief_prompt = self._looks_like_brief_capabilities_prompt(query_text)
         guided_thinking_prompt = self._looks_like_guided_thinking_prompt(query_text)
         normalized_query = normalize_setup_text(query_text).replace("/", " ")
-        agent_layer_prompt = any(
-            phrase in normalized_query
-            for phrase in (
-                "agent layer",
-                "assistant layer",
-                "what are you",
-                "who are you",
-            )
-        )
+        agent_layer_prompt = looks_like_internal_architecture_question(query_text)
         if agent_layer_prompt:
             text = (
                 "You interact with me, the assistant. I decide when to ask the agent layer for grounded work: "
@@ -4589,18 +4589,10 @@ class Orchestrator:
             brief_parts.append("If you want, I can start by checking the runtime or inspecting system resources.")
             text = " ".join(brief_parts)
         else:
-            lines = ["Here’s what I can do right now:"]
-            for row in areas:
-                title = str(row.get("title") or "Capability").strip()
-                summary = str(row.get("summary") or "").strip()
-                if not summary:
-                    continue
-                lines.append(f"- {title}: {summary}")
-            if safe_mode_enabled:
-                lines.append("- Safe mode: background automation and remote fallback are currently paused on purpose.")
-            lines.append("")
-            lines.append("Ask me to check the runtime or inspect your system resources.")
-            text = "\n".join(lines).strip()
+            text = build_user_facing_capability_answer(
+                search_available=bool(areas[-1].get("available")) if areas else None,
+                safe_mode=safe_mode_enabled,
+            )
         return self._runtime_truth_response(
             text=text,
             route="assistant_capabilities",
@@ -21681,6 +21673,30 @@ class Orchestrator:
                 return self._cancel_current_plan_response(user_id)
             if not cmd and self._looks_like_plan_revise_request(effective_user_text):
                 return self._revise_current_plan_response(user_id)
+            if not cmd:
+                normalized_social_candidate = " ".join(str(effective_user_text or "").strip().lower().split())
+                social_reply = None
+                social_fast_path_allowed = (
+                    normalized_social_candidate in {"you there?", "you there", "you ther?", "you ther", "are you ther?", "are you ther", "ping", "test"}
+                    or "are you there" in normalized_social_candidate
+                )
+                if social_fast_path_allowed and not any(
+                    token in normalized_social_candidate
+                    for token in ("ollama", "model", "provider", "runtime", "running", "working")
+                ):
+                    social_reply = build_trivial_social_turn_message(effective_user_text)
+                if social_reply is not None:
+                    return self._runtime_truth_response(
+                        text=social_reply,
+                        route="social_turn",
+                        used_runtime_state=False,
+                        used_memory=False,
+                        used_tools=[],
+                        payload={
+                            "type": "social_turn",
+                            "summary": social_reply,
+                        },
+                    )
             if not cmd and self._looks_like_plan_confirmation_accept(effective_user_text):
                 pending_action = self.confirmations.get(user_id)
                 if pending_action is None:
@@ -21730,6 +21746,27 @@ class Orchestrator:
                 == "ambiguous_restart_target"
             ):
                 return self._ambiguous_restart_target_response(user_id)
+            if not cmd and looks_like_capability_question(effective_user_text):
+                return self._assistant_capabilities_response(effective_user_text)
+            memory_policy_response = self._assistant_memory_policy_response(user_id, effective_user_text)
+            if memory_policy_response is not None:
+                return memory_policy_response
+            clarification = build_clarification_for_vague_request(effective_user_text)
+            if clarification:
+                return self._runtime_truth_response(
+                    text=clarification,
+                    route="assistant_clarification",
+                    used_runtime_state=False,
+                    used_memory=False,
+                    used_tools=[],
+                    next_question=clarification,
+                    payload={
+                        "type": "assistant_clarification",
+                        "summary": clarification,
+                        "reason": "vague_or_missing_detail",
+                    },
+                    skip_post_response_hooks=True,
+                )
             if not cmd and self._looks_like_context_reset_request(effective_user_text):
                 thread_id = self._active_thread_id_for_user(user_id)
                 self._clear_runtime_setup_state(user_id)
@@ -24979,6 +25016,125 @@ class Orchestrator:
         if m_window:
             result["baseline_window"] = m_window.group(1).strip()[:50]
         return result
+
+    def _assistant_memory_policy_response(self, user_id: str, text: str | None) -> OrchestratorResponse | None:
+        decision = classify_memory_request(text)
+        if decision is None:
+            return None
+        if decision.kind == "store":
+            if decision.key and decision.value:
+                self.db.set_user_pref(f"{decision.key}:{user_id}", decision.value)
+                self.db.set_user_pref(decision.key, decision.value)
+            return self._runtime_truth_response(
+                text=decision.message,
+                route="agent_memory",
+                used_runtime_state=False,
+                used_memory=True,
+                used_tools=["memory_store"],
+                payload={
+                    "type": "assistant_memory_policy",
+                    "kind": "store",
+                    "key": decision.key,
+                    "stored": bool(decision.key and decision.value),
+                    "summary": decision.message,
+                },
+                skip_post_response_hooks=True,
+            )
+        if decision.kind == "forget":
+            keys = [decision.key, f"{decision.key}:{user_id}"] if decision.key else []
+            if keys:
+                self.db.clear_user_prefs([key for key in keys if key])
+            return self._runtime_truth_response(
+                text=decision.message or "I forgot that saved detail.",
+                route="agent_memory",
+                used_runtime_state=False,
+                used_memory=True,
+                used_tools=["memory_store"],
+                payload={
+                    "type": "assistant_memory_policy",
+                    "kind": "forget",
+                    "key": decision.key,
+                    "mutated": bool(keys),
+                    "summary": decision.message,
+                },
+                skip_post_response_hooks=True,
+            )
+        if decision.kind == "recall":
+            value = self.db.get_user_pref(f"{decision.key}:{user_id}") or self.db.get_user_pref(decision.key)
+            if value:
+                if decision.key == "assistant_memory:main_pc_gpu":
+                    message = f"Your main PC has an {value}."
+                else:
+                    message = f"I have this saved: {value}."
+            else:
+                message = "I do not have that saved in durable memory."
+            return self._runtime_truth_response(
+                text=message,
+                route="agent_memory",
+                used_runtime_state=False,
+                used_memory=True,
+                used_tools=["memory_store"],
+                payload={
+                    "type": "assistant_memory_policy",
+                    "kind": "recall",
+                    "key": decision.key,
+                    "found": bool(value),
+                    "summary": message,
+                },
+                skip_post_response_hooks=True,
+            )
+        if decision.kind == "recall_install_preference":
+            value = self.db.get_user_pref(f"{decision.key}:{user_id}") or self.db.get_user_pref(decision.key)
+            if str(value or "").strip().lower() == "debian":
+                message = "I’ll assume Debian for system install instructions unless you tell me otherwise."
+            else:
+                message = "Tell me your operating system and I’ll tailor the install steps."
+            return self._runtime_truth_response(
+                text=message,
+                route="agent_memory",
+                used_runtime_state=False,
+                used_memory=bool(value),
+                used_tools=["memory_store"],
+                payload={
+                    "type": "assistant_memory_policy",
+                    "kind": "recall_install_preference",
+                    "found": bool(value),
+                    "summary": message,
+                },
+                skip_post_response_hooks=True,
+            )
+        if decision.kind == "recall_food":
+            message = "I do not have a durable food preference saved for you."
+            return self._runtime_truth_response(
+                text=message,
+                route="agent_memory",
+                used_runtime_state=False,
+                used_memory=True,
+                used_tools=["memory_store"],
+                payload={
+                    "type": "assistant_memory_policy",
+                    "kind": "recall_food",
+                    "found": False,
+                    "summary": message,
+                },
+                skip_post_response_hooks=True,
+            )
+        message = decision.message or "I need one more detail before I save that."
+        return self._runtime_truth_response(
+            text=message,
+            route="agent_memory",
+            used_runtime_state=False,
+            used_memory=False,
+            used_tools=[],
+            next_question=message if decision.kind in {"clarify", "confirm_uncertain"} else None,
+            payload={
+                "type": "assistant_memory_policy",
+                "kind": decision.kind,
+                "stored": False,
+                "summary": message,
+            },
+            skip_post_response_hooks=True,
+        )
 
     def _today_cards_payload(self, request_text: str = "") -> dict[str, Any]:
         tasks_md = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "tasks.md"))
