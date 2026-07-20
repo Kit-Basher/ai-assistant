@@ -16,6 +16,8 @@ Environment=AGENT_AUDIT_LOG_PATH=%h/.local/share/personal-agent/audit.jsonl
 Environment=AGENT_SKILLS_PATH=__PERSONAL_AGENT_RUNTIME_ROOT__/skills
 Environment=AGENT_WEBUI_DIST_PATH=__PERSONAL_AGENT_RUNTIME_ROOT__/agent/webui/dist
 Environment=PERSONAL_AGENT_INSTANCE=stable
+Environment=AGENT_SAFE_MODE=1
+Environment=TELEGRAM_ENABLED=0
 ExecStart=/usr/bin/python3 -m agent.api_server --host 127.0.0.1 --port 8765
 Restart=on-failure
 RestartSec=2

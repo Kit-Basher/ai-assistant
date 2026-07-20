@@ -252,7 +252,7 @@ brittle whole-answer wording snapshots.
 
 Status: ready for controlled trial after a clean end-to-end install pass.
 
-`install_local.sh` is the developer checkout path. The release bundle installer
+`install_dev.sh` is the developer checkout path. The release bundle installer
 and uninstaller are tested for idempotence and state-preserving/state-removing
 uninstall. The Debian package path is present and tested as an optional install
 path.

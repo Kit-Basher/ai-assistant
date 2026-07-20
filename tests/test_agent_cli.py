@@ -13,6 +13,7 @@ from unittest.mock import patch
 from agent import cli
 from agent.setup_wizard import SetupWizardResult
 from agent.version import BuildInfo
+from scripts import telegram_transport_diagnostic
 
 
 class TestAgentCLI(unittest.TestCase):
@@ -362,7 +363,7 @@ class TestAgentCLI(unittest.TestCase):
                 "config_source": "default",
                 "service_installed": True,
                 "service_active": False,
-                "token_configured": False,
+                "token_configured": True,
                 "lock_present": False,
                 "effective_state": "disabled_optional",
                 "next_action": "Run: python -m agent telegram_enable",
@@ -371,8 +372,67 @@ class TestAgentCLI(unittest.TestCase):
             code = cli.main(["telegram_status"])
         self.assertEqual(0, code)
         text = output.getvalue()
+        self.assertIn("Telegram status: DISABLED_OPTIONAL", text)
         self.assertIn("enabled: false", text)
         self.assertIn("effective_state: disabled_optional", text)
+        self.assertIn("next_action: No action needed.", text)
+        self.assertNotIn("DEGRADED", text)
+
+    def test_operator_status_treats_disabled_telegram_as_neutral(self) -> None:
+        output = io.StringIO()
+        ready_payload = {
+            "ok": True,
+            "ready": True,
+            "runtime_status": {"runtime_mode": "READY", "summary": "Ready."},
+            "message": "Ready.",
+            "telegram": {"enabled": False, "state": "disabled_optional", "warning": None},
+        }
+        with patch("agent.cli._load_ready_status_payload", return_value=(True, ready_payload)), patch(
+            "agent.cli._load_runtime_status_payload",
+            return_value=(False, "runtime_unavailable"),
+        ), patch(
+            "agent.cli._load_runtime_history_payload",
+            return_value=(False, "runtime_history_unavailable"),
+        ), patch(
+            "agent.cli.get_telegram_runtime_state",
+            return_value={
+                "enabled": False,
+                "effective_state": "disabled_optional",
+                "telegram_health_level": "DISABLED_OPTIONAL",
+                "next_action": "No action needed.",
+            },
+        ), redirect_stdout(output):
+            code = cli.main(["status"])
+        self.assertEqual(0, code)
+        text = output.getvalue()
+        self.assertIn("runtime_mode: READY", text)
+        self.assertIn("telegram: disabled_optional", text)
+        self.assertNotIn("telegram_next_action", text)
+        self.assertNotIn("DEGRADED", text)
+
+    def test_telegram_diagnostic_does_not_warn_when_optional_adapter_is_disabled(self) -> None:
+        output = io.StringIO()
+        disabled = {
+            "enabled": False,
+            "configured": True,
+            "token_configured": True,
+            "effective_state": "disabled_optional",
+            "telegram_transport_healthy": False,
+            "transport_mode": "polling",
+            "handler_registered": False,
+            "polling_active": False,
+            "duplicate_consumer_suspected": False,
+            "runtime_reachable": True,
+            "last_reply_success_at": None,
+            "last_reply_attempt_at": None,
+        }
+        with patch.object(telegram_transport_diagnostic, "_api_status", return_value=disabled), redirect_stdout(output):
+            code = telegram_transport_diagnostic.main()
+        self.assertEqual(0, code)
+        text = output.getvalue()
+        self.assertIn("TELEGRAM_HEALTH_LEVEL=DISABLED_OPTIONAL", text)
+        self.assertIn("WARN=0", text)
+        self.assertNotIn("Suggested checks", text)
 
     def test_telegram_enable_command_starts_service(self) -> None:
         output = io.StringIO()

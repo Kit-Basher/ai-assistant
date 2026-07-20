@@ -1931,15 +1931,15 @@ class TestOrchestrator(unittest.TestCase):
 
     def test_operator_lifecycle_mutators_require_confirmation(self) -> None:
         cases = {
-            "back up the assistant": ("Backup assistant preview", "include local state"),
-            "restore from backup": ("Restore from backup preview", "safety snapshot"),
-            "update the assistant": ("Update assistant preview", "not pull code"),
-            "clean old runtime files": ("Cleanup old Personal Agent files preview", "show exact paths"),
-            "uninstall the assistant": ("Uninstall assistant preview", "Uninstall is destructive"),
-            "make a support bundle": ("Support bundle preview", "raw tokens"),
-            "repair the assistant": ("Repair assistant preview", "check services first"),
+            "back up the assistant": ("Backup assistant preview", "include local state", True),
+            "restore from backup": ("could not find a valid Backup v1 artifact", "show my backups", False),
+            "update the assistant": ("Update assistant preview", "not pull code", True),
+            "clean old runtime files": ("Cleanup old Personal Agent files preview", "show exact paths", True),
+            "uninstall the assistant": ("Uninstall assistant preview", "Uninstall is destructive", True),
+            "make a support bundle": ("Support bundle preview", "raw tokens", True),
+            "repair the assistant": ("Repair assistant preview", "check services first", True),
         }
-        for prompt, (title, expected_text) in cases.items():
+        for prompt, (title, expected_text, expects_confirmation) in cases.items():
             with self.subTest(prompt=prompt):
                 llm = _FakeChatLLM(enabled=True, text="LLM should not answer operator lifecycle.")
                 orchestrator = Orchestrator(
@@ -1957,6 +1957,12 @@ class TestOrchestrator(unittest.TestCase):
                 self.assertEqual([], llm.chat_calls)
                 self.assertIn(title, response.data.get("next_question", "") or response.text)
                 self.assertIn(expected_text, response.text)
+                if not expects_confirmation:
+                    payload = response.data.get("runtime_payload")
+                    self.assertIsInstance(payload, dict)
+                    self.assertFalse(payload.get("valid"))
+                    self.assertFalse(payload.get("mutated"))
+                    continue
                 self.assertIn("Say yes to continue, or no to cancel.", response.text)
                 payload = response.data.get("runtime_payload")
                 self.assertIsInstance(payload, dict)

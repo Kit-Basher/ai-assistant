@@ -72,7 +72,7 @@ Manual/operator checks before calling a build releasable:
 - uninstall once with state preserved and once with `--remove-state`
 - remove the Debian package and, if desired, run `personal-agent-uninstall --remove-state`
 - install the checkout/dev path on a clean machine or clean local state with:
-  - `bash scripts/install_local.sh --desktop-launcher`
+  - `bash scripts/install_dev.sh --desktop-launcher`
 - fresh startup on a clean runtime state
 - first web-ui launch shows onboarding only on a fresh state, and second launch
   stays quiet after onboarding is completed or skipped
@@ -144,7 +144,7 @@ Important shipped defaults are intentionally conservative:
 | `LLM_PROVIDER=none` | Do not assume a provider before setup. | You have explicitly configured a provider. |
 | `TELEGRAM_ENABLED=false` | Keep optional transport off by default. | You want the Telegram adapter active. |
 | `LLM_AUTOMATION_ENABLED=true` | Keep background maintenance available. | You want fully manual operation or a safe-mode test. |
-| `AGENT_SAFE_MODE=false` | Ship the normal runtime, not read-only mode. | You need a conservative read-only session. |
+| `AGENT_SAFE_MODE=true` | Keep the shipped runtime in the conservative SAFE MODE baseline. | Only an operator intentionally opts into a less restrictive control mode. |
 | `MODEL_SCOUT_ENABLED=true` | Keep model advisory available. | You need a quieter or more manual setup. |
 | `AGENT_MODEL_WATCH_HF_ENABLED=false` | Keep external model discovery opt-in. | You want Hugging Face discovery enabled. |
 | `AGENT_MODEL_WATCH_BUZZ_ENABLED=false` | Keep buzz-based discovery opt-in. | You want trend-based discovery enabled. |

@@ -5,10 +5,31 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Version: `v0.2.4`
-- Commit: `d202756684063fd787699c0e7656b6a86037c37b`
+- Version: `v0.2.5`
+- Audit baseline commit: `12723f56b2b2f24e6c6b2009f38bae59899619df`
 - Fresh Debian VM proof: not run
-- Release status: v0.2.4 redaction/reply checkpoint is committed
+- Release status: Recovery and Installation Audit v1 is complete; the fresh
+  Debian VM proof remains the final release gate
+
+## Active Audit: Recovery and Installation Audit v1
+
+Confirmed recovery work found an ambiguous recommended installer, a
+Controlled-Mode code default beneath SAFE MODE documentation, unchecked web UI
+staging freshness, repo-local legacy state references, and duplicate legacy
+service registrations. The working fixes establish:
+
+- stable source installs on `personal-agent-api.service` and port `8765`;
+- explicit dev installs on `personal-agent-api-dev.service` and port `18765`;
+- SAFE MODE and Telegram-disabled service defaults;
+- canonical mutable state outside the checkout;
+- source/output fingerprint verification for staged web UI assets;
+- a read-only recovery/install audit and explicit preservation policy;
+- neutral `DISABLED_OPTIONAL` health across detailed Telegram, readiness,
+  runtime, CLI, and diagnostic surfaces when the optional adapter is off;
+- preserved `DEGRADED` reporting when Telegram is enabled but unhealthy.
+
+The fresh Debian VM proof remains intentionally deferred to the final release
+step.
 
 ## Active Phase: v0.2.5 Assistant Personality, Memory, and Capability UX Audit
 

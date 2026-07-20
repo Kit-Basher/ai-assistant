@@ -37,9 +37,9 @@ Distributed-install runtime root:
 - stable launcher command: `~/.local/share/personal-agent/bin/personal-agent-webui`
 - stable uninstall command: `~/.local/share/personal-agent/bin/personal-agent-uninstall`
 
-Recommended install path for a new user:
+Recommended install path from a source checkout:
 
-- run the bundled `install.sh` from the release bundle or packaged release
+- `bash scripts/install_local.sh`
 
 That one command:
 
@@ -48,9 +48,14 @@ That one command:
 - installs the stable desktop launcher
 - keeps the checkout independent from the running app
 
-If you are developing in the checkout, use:
+This command deterministically rebuilds `desktop/`, verifies the staged
+`agent/webui/dist` fingerprint, creates a release bundle, and installs the
+stable service, launcher, and port `8765`. It does not run the checkout as the
+daily-driver service.
 
-- `bash scripts/install_local.sh --desktop-launcher`
+If you are developing in the checkout, use the explicitly named dev installer:
+
+- `bash scripts/install_dev.sh --desktop-launcher`
 
 That checkout install:
 
@@ -62,7 +67,6 @@ That checkout install:
 - optionally installs the dev desktop launcher
 
 If you do not want the dev desktop launcher, omit `--desktop-launcher`.
-If you only want to validate web UI build dependencies, add `--check-webui-build`.
 
 If you downloaded a release bundle, use the bundled installer instead:
 
@@ -71,8 +75,7 @@ If you downloaded a release bundle, use the bundled installer instead:
 - the bundled installer uses the stable runtime root under
   `~/.local/share/personal-agent/runtime`
 
-If you are the maintainer on the local checkout and want to create the real
-stable runtime now, use:
+The lower-level maintainer promotion command remains:
 
 - `bash scripts/promote_local_stable.sh`
 
@@ -118,6 +121,23 @@ Canonical packaging/build path:
 - Debian/Ubuntu install from a built package:
   - `sudo apt install ./dist/personal-agent_<version>_amd64.deb`
 - canonical release gate: `python scripts/release_gate.py`
+- web build: `bash scripts/build_webui.sh`
+- web provenance check: `python scripts/webui_build_manifest.py verify`
+
+Install surface contract:
+
+- developer checkout: editable code, `personal-agent-api-dev.service`, port
+  `18765`, dev launcher; never the recommended end-user install
+- stable local install: versioned runtime under
+  `~/.local/share/personal-agent/runtime`, `personal-agent-api.service`, port
+  `8765`, stable launcher
+- release bundle: portable delivery of that same stable local runtime contract
+- Debian package: OS-managed delivery of that same stable service, state, port,
+  launcher, and SAFE MODE contract
+
+Only one stable delivery mechanism should own `personal-agent-api.service` on a
+machine. The release bundle and Debian package are alternatives, not two
+simultaneous installations.
 - fast pre-check before the heavier gate: `python scripts/release_smoke.py`
 - pre-VM readiness gate: `python scripts/prove_ready.py`
 - v0.2.1 sequential release-closure gate:
@@ -136,9 +156,9 @@ Canonical packaging/build path:
 
 1. Place the repo at `~/personal-agent`.
 2. If you want the stable daily-driver, run:
-   - run the bundled `install.sh` from the release bundle or packaged release
+   - `bash scripts/install_local.sh`
 3. If you want the editable checkout install for development, run:
-   - `bash scripts/install_local.sh --desktop-launcher`
+   - `bash scripts/install_dev.sh --desktop-launcher`
 4. Open the UI from the desktop menu or browse to `http://127.0.0.1:8765/`.
 5. Confirm the active copy:
    - `python -m agent split_status`
@@ -264,17 +284,22 @@ Setup is complete when onboarding state is `READY` and:
 
 ## Upgrade
 
+Stable source-checkout upgrade:
+
 1. `cd ~/personal-agent`
 2. `git pull --ff-only`
-3. `. .venv/bin/activate`
-4. `pip install -e .`
-5. `python -m agent doctor --fix`
-6. `systemctl --user daemon-reload`
-7. `systemctl --user restart personal-agent-api-dev.service`
-8. `python -m agent status`
-9. If this upgrade is a release candidate or a risky recovery, run:
+3. `bash scripts/install_local.sh`
+4. `curl -fsS http://127.0.0.1:8765/ready`
+5. `python -m agent status`
+6. If this upgrade is a release candidate or a risky recovery, run:
    - `python scripts/prove_daily_driver_product.py`
    - `python scripts/release_gate.py`
+
+Developer checkout refresh:
+
+1. `bash scripts/install_dev.sh --desktop-launcher`
+2. `systemctl --user restart personal-agent-api-dev.service`
+3. `curl -fsS http://127.0.0.1:18765/ready`
 
 `python -m agent doctor --fix` is the canonical safe upgrade helper. It creates
 missing local directories and migrates legacy repo-local runtime storage into

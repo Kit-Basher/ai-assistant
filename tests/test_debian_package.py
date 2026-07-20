@@ -217,7 +217,10 @@ class TestDebianPackage(unittest.TestCase):
                 args=["--repo-root", str(repo_root), "--outdir", str(Path(tmpdir) / "dist"), "--clean"],
             )
             self.assertNotEqual(0, proc.returncode)
-            self.assertIn("required packaging input missing", proc.stderr)
+            self.assertTrue(
+                "required packaging input missing" in proc.stderr or "web UI build manifest is missing" in proc.stderr,
+                proc.stderr,
+            )
 
 
 if __name__ == "__main__":

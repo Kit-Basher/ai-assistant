@@ -1,5 +1,25 @@
 # Release Ledger
 
+## Recovery and Installation Audit v1 (final)
+
+- Baseline: `v0.2.5` / `12723f5`.
+- Audit finalized: `2026-07-20`.
+- Confirmed the recommended checkout installer silently selected the dev
+  service, launcher, and port while stable verification used port `8765`.
+- Confirmed `AGENT_SAFE_MODE` defaulted off in a clean environment.
+- Confirmed artifact builders could package an existing untracked web build
+  without proving it matched `desktop/` source.
+- Confirmed the deprecated stable checkout unit still referenced repo-local
+  `llm_registry.json` and caused a restart loop after canonical migration.
+- Added stable/dev install separation, SAFE MODE service defaults, canonical
+  state paths, web build fingerprints, and read-only recovery verification.
+- Corrected Telegram health semantics so a deliberately disabled optional
+  adapter reports `DISABLED_OPTIONAL`, produces no recovery warning, and keeps
+  enabled-but-unhealthy transports classified as `DEGRADED`.
+- Final validation: focused recovery/install and Telegram/runtime coverage,
+  canonical release smoke, recovery audit, and diff checks passed.
+- Fresh Debian VM proof: deferred by scope.
+
 Date: 2026-06-15
 
 This ledger is the compact release-history index for the current Personal Agent

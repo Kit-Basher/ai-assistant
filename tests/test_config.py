@@ -174,6 +174,7 @@ class TestConfig(unittest.TestCase):
                 "TELEGRAM_BOT_TOKEN": "token",
                 "LLM_PROVIDER": "none",
                 "LLM_NOTIFICATIONS_ALLOW_SEND": "true",
+                "AGENT_SAFE_MODE": "0",
             },
             clear=False,
         ):
@@ -234,6 +235,7 @@ class TestConfig(unittest.TestCase):
                 "TELEGRAM_BOT_TOKEN": "token",
                 "LLM_PROVIDER": "none",
                 "LLM_SELF_HEAL_ALLOW_APPLY": "true",
+                "AGENT_SAFE_MODE": "0",
             },
             clear=False,
         ):
@@ -246,6 +248,7 @@ class TestConfig(unittest.TestCase):
             {
                 "TELEGRAM_BOT_TOKEN": "token",
                 "LLM_PROVIDER": "none",
+                "AGENT_SAFE_MODE": "0",
             },
             clear=False,
         ):
@@ -259,6 +262,7 @@ class TestConfig(unittest.TestCase):
             {
                 "TELEGRAM_BOT_TOKEN": "token",
                 "LLM_PROVIDER": "none",
+                "AGENT_SAFE_MODE": "0",
                 "LLM_SELF_HEAL_INTERVAL_S": "4321",
             },
             clear=False,
@@ -333,6 +337,7 @@ class TestConfig(unittest.TestCase):
             {
                 "TELEGRAM_BOT_TOKEN": "token",
                 "LLM_PROVIDER": "none",
+                "AGENT_SAFE_MODE": "0",
             },
             clear=False,
         ):

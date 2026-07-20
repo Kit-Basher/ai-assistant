@@ -1208,7 +1208,18 @@ def _run_systemctl_user(
 
 
 def _render_telegram_status(state: dict[str, Any]) -> str:
-    health_level = str(state.get("telegram_health_level") or ("HEALTHY" if bool(state.get("telegram_transport_healthy", False)) else "DEGRADED")).upper()
+    default_health_level = (
+        "DISABLED_OPTIONAL"
+        if not bool(state.get("enabled", False))
+        or str(state.get("effective_state") or "").strip().lower() == "disabled_optional"
+        else ("HEALTHY" if bool(state.get("telegram_transport_healthy", False)) else "DEGRADED")
+    )
+    health_level = str(state.get("telegram_health_level") or default_health_level).upper()
+    next_action = (
+        "No action needed."
+        if health_level == "DISABLED_OPTIONAL"
+        else str(state.get("next_action") or "No action needed.")
+    )
     lines = [
         f"Telegram status: {health_level}",
         f"enabled: {str(bool(state.get('enabled', False))).lower()}",
@@ -1231,7 +1242,7 @@ def _render_telegram_status(state: dict[str, Any]) -> str:
         f"lock_present: {str(bool(state.get('lock_present', False))).lower()}",
         f"duplicate_consumer_suspected: {str(bool(state.get('duplicate_consumer_suspected', state.get('duplicate_pollers', False)))).lower()}",
         f"effective_state: {str(state.get('effective_state') or 'unknown')}",
-        f"next_action: {str(state.get('next_action') or 'No action needed.')}",
+        f"next_action: {next_action}",
     ]
     return "\n".join(lines)
 

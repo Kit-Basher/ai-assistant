@@ -85,6 +85,39 @@ class TestTelegramRuntimeState(unittest.TestCase):
         self.assertFalse(bool(state["enabled"]))
         self.assertEqual("default", state["config_source"])
         self.assertEqual("disabled_optional", state["effective_state"])
+        self.assertEqual("DISABLED_OPTIONAL", state["telegram_health_level"])
+        self.assertEqual("No action needed.", state["next_action"])
+
+    def test_disabled_with_saved_token_remains_neutral(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            secret_path = home / ".local" / "share" / "personal-agent" / "secrets.enc.json"
+            secret_path.parent.mkdir(parents=True, exist_ok=True)
+            SecretStore(path=str(secret_path)).set_secret("telegram:bot_token", "123456:abcdef")
+            state = get_telegram_runtime_state(
+                home=home,
+                env={"AGENT_SECRET_STORE_PATH": str(secret_path)},
+                run=self._run_stub(installed=True, active=False, enabled=False),
+            )
+        self.assertTrue(bool(state["token_configured"]))
+        self.assertEqual("disabled_optional", state["effective_state"])
+        self.assertEqual("DISABLED_OPTIONAL", state["telegram_health_level"])
+        self.assertEqual("No action needed.", state["next_action"])
+
+    def test_enabled_with_saved_token_but_stopped_is_degraded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            secret_path = home / ".local" / "share" / "personal-agent" / "secrets.enc.json"
+            secret_path.parent.mkdir(parents=True, exist_ok=True)
+            SecretStore(path=str(secret_path)).set_secret("telegram:bot_token", "123456:abcdef")
+            write_telegram_enablement(True, home=home, env={})
+            state = get_telegram_runtime_state(
+                home=home,
+                env={"AGENT_SECRET_STORE_PATH": str(secret_path)},
+                run=self._run_stub(installed=True, active=False, enabled=True),
+            )
+        self.assertEqual("enabled_stopped", state["effective_state"])
+        self.assertEqual("DEGRADED", state["telegram_health_level"])
 
     def test_enabled_token_missing_reports_misconfigured(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

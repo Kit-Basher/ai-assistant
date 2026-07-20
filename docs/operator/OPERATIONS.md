@@ -16,6 +16,21 @@ Checkout/dev service:
 The stable service is the default local desktop app. The dev service is only
 for repo work and must not compete with the stable launcher.
 
+Runtime identity matrix:
+
+| Purpose | Service | URL | Code root |
+| --- | --- | --- | --- |
+| Stable daily driver | `personal-agent-api.service` | `http://127.0.0.1:8765/` | `~/.local/share/personal-agent/runtime/current` or `/usr/lib/personal-agent/runtime/current` |
+| Developer checkout | `personal-agent-api-dev.service` | `http://127.0.0.1:18765/` | `~/personal-agent` |
+
+Do not enable both merely as fallback copies. Run the dev service only during
+checkout work. Telegram is a separate optional transport and remains disabled
+unless explicitly enabled.
+
+SAFE MODE is the clean-install baseline. Verify `control_mode.mode` is `safe`
+on `/ready`; a systemd drop-in is allowed as defense in depth but must not be
+required to turn a clean runtime from Controlled Mode into SAFE MODE.
+
 ## Quick Health Cadence
 
 ### After startup or deploy

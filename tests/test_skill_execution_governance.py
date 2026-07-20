@@ -338,7 +338,15 @@ class TestSkillExecutionGovernance(unittest.TestCase):
         pending = truth.list_pending_governance_requests()
         skill_status = truth.get_skill_governance_status("scheduled_sync")
 
-        self.assertIn("telegram", adapters["active_adapter_ids"])
+        self.assertIn(
+            "telegram",
+            {
+                str(row.get("adapter_id") or "").strip()
+                for row in adapters["managed_adapters"]
+                if isinstance(row, dict)
+            },
+        )
+        self.assertNotIn("telegram", adapters["active_adapter_ids"])
         self.assertIn(
             "runtime_scheduler",
             {

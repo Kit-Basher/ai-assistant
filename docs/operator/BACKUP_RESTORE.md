@@ -11,6 +11,35 @@ Back up these paths before upgrades, risky changes, or recovery work:
 - `~/.local/share/personal-agent`
 - `~/.config/systemd/user`
 
+Also preserve the source checkout or a release artifact, but do not treat a
+repo-local `memory/agent.db` or `llm_registry.json` as live canonical state.
+The canonical database and registry are:
+
+- `~/.local/share/personal-agent/agent.db`
+- `~/.local/share/personal-agent/llm_registry.json`
+
+Recovery directories and archives are evidence until a human explicitly
+retires them. Install, doctor, backup, and cleanup flows must not delete or
+overwrite preserved recovery material outside their own versioned runtime and
+temporary staging roots.
+
+## Read-Only Recovery Audit
+
+Before changing a recovered installation, run:
+
+```bash
+python scripts/recovery_install_audit.py \
+  --expect-artifact ~/personal-agent-old-feb-2026-07-20 \
+  --expect-artifact ~/personal-agent-state-recovery \
+  --expect-artifact ~/personal-agent-migration-test \
+  --expect-artifact ~/personal-agent-recovery-2026-07-20.tar.gz \
+  --expect-artifact ~/personal-agent/.venv-before-canonical-move
+```
+
+This command is read-only. It verifies canonical path presence, SQLite
+integrity, schema version, registry presence, expected recovery artifacts, and
+reports repo-local legacy state as a preserve-and-migrate warning.
+
 If you want logs for support, include:
 
 - `~/.local/share/personal-agent/agent.jsonl`
@@ -87,6 +116,11 @@ A restore is successful when:
 - `/state` is sane
 - `/packs/state` matches the expected pack inventory
 - `python -m agent version` reports the expected build/version
+- `python scripts/recovery_install_audit.py` reports no failures
+- the running unit resolves to the intended stable or dev code root and only
+  one API service is enabled for daily use
+- `/ready` reports SAFE MODE unless Controlled Mode was explicitly confirmed
+- `/telegram/status` reports disabled unless Telegram was explicitly enabled
 
 ## Pre-VM Proof
 

@@ -108,7 +108,11 @@ from agent.search.safe_web_search import SafeWebSearchClient, SafeWebSearchConfi
 from agent.services.managed_local_services import ManagedLocalServiceDetector, ManagedLocalServiceExecutor
 from agent.model_scout import build_model_scout
 from agent.telegram_runner import TelegramRunner
-from agent.telegram_runtime_state import get_telegram_runtime_state, telegram_control_env
+from agent.telegram_runtime_state import (
+    classify_telegram_health_level,
+    get_telegram_runtime_state,
+    telegram_control_env,
+)
 from agent.audit_log import AuditLog, redact as redact_audit_value
 from agent.actions.managed_action_recovery import ManagedActionJournal
 from agent.actions.persistent_journal import PersistentManagedActionJournalStore
@@ -5596,22 +5600,17 @@ class AgentRuntime:
             or transport_health.get("last_reply_error_class")
             or runner_status.get("last_error")
         )
-        if duplicate_consumer_suspected or (bool(runtime_state.get("token_configured", False)) and not polling_active):
-            telegram_health_level = "DEGRADED"
-        elif outbound_seen and polling_active and handler_registered and not recent_error:
-            telegram_health_level = "HEALTHY"
-        elif outbound_seen:
-            telegram_health_level = "REPLYING"
-        elif dispatch_seen:
-            telegram_health_level = "DISPATCHING"
-        elif inbound_seen:
-            telegram_health_level = "RECEIVING"
-        elif polling_active:
-            telegram_health_level = "POLLING"
-        elif bool(runtime_state.get("token_configured", False)):
-            telegram_health_level = "CONFIGURED"
-        else:
-            telegram_health_level = "UNVERIFIED"
+        telegram_health_level = classify_telegram_health_level(
+            enabled=bool(runtime_state.get("enabled", False)),
+            token_configured=bool(runtime_state.get("token_configured", False)),
+            polling_active=polling_active,
+            handler_registered=handler_registered,
+            inbound_seen=inbound_seen,
+            dispatch_seen=dispatch_seen,
+            outbound_seen=outbound_seen,
+            duplicate_consumer_suspected=duplicate_consumer_suspected,
+            recent_error=recent_error,
+        )
         telegram_transport_healthy = bool(
             runtime_state.get("token_configured", False)
             and polling_active
@@ -6037,6 +6036,8 @@ class AgentRuntime:
                 "enabled": bool(observability.get("telegram_enabled", False)),
                 "state": str(observability.get("telegram_state") or "unknown"),
                 "effective_state": str(telegram.get("effective_state") or "unknown"),
+                "telegram_health_level": str(telegram.get("telegram_health_level") or "UNVERIFIED"),
+                "next_action": str(telegram.get("next_action") or "No action needed."),
                 "embedded_state": str(telegram.get("embedded_state") or "").strip() or None,
                 "last_error": str(telegram.get("last_error") or "").strip() or None,
             },

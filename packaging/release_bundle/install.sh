@@ -133,6 +133,8 @@ Environment=AGENT_SKILLS_PATH=$current_root/skills
 Environment=AGENT_WEBUI_DIST_PATH=$current_root/agent/webui/dist
 Environment=PERSONAL_AGENT_RUNTIME_ROOT=$current_root
 Environment=PERSONAL_AGENT_INSTANCE=stable
+Environment=AGENT_SAFE_MODE=1
+Environment=TELEGRAM_ENABLED=0
 StandardOutput=journal
 StandardError=journal
 

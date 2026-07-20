@@ -117,6 +117,11 @@ because they overlap current docs.
 
 ## Current Next Work
 
+0. Run Recovery and Installation Audit v2 as the fresh Debian VM acceptance
+   gate: install the stable package on a state-free VM, verify SAFE MODE,
+   Telegram-disabled neutrality, desktop launch, canonical state, reboot,
+   backup/restore, upgrade, and rollback behavior.
+
 1. v0.2.5 Assistant Personality, Memory, and Capability UX Audit is the active
    patch track. It fixes user-facing capability wording, memory classification,
    memory recall/forget behavior, and clarification quality.

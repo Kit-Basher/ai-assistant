@@ -117,7 +117,7 @@ class TestReleaseBundle(unittest.TestCase):
                 args=["--repo-root", str(repo_root), "--outdir", str(Path(tmpdir) / "dist"), "--clean"],
             )
             self.assertNotEqual(0, proc.returncode)
-            self.assertIn("agent/webui/dist/index.html", proc.stderr)
+            self.assertIn("web UI", proc.stderr)
 
     def test_build_release_bundle_creates_archive_and_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

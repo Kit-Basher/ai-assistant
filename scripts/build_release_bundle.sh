@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/.." && pwd)"
 outdir="dist"
 override_repo_root=""
 clean=0
@@ -56,6 +57,8 @@ version="$(tr -d ' \n' < "$repo_root/VERSION")"
 [ -n "$version" ] || die "VERSION file is missing or empty"
 git_commit="$(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || true)"
 build_time="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+python3 "$script_dir/webui_build_manifest.py" verify --repo-root "$repo_root" >/dev/null
 
 bundle_name="personal-agent-linux-x86_64-v${version}"
 bundle_dir="$outdir/$bundle_name"

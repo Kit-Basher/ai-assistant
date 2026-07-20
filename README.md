@@ -280,7 +280,7 @@ That stable install:
 
 Developer checkout install:
 1. Clone the repo to `~/personal-agent`.
-2. Run `bash scripts/install_local.sh --desktop-launcher`.
+2. Run `bash scripts/install_dev.sh --desktop-launcher`.
 3. Use the checkout-backed dev service and launcher for repo work only.
 
 That checkout install:

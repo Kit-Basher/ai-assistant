@@ -13,6 +13,7 @@ from agent.secret_store import SecretStore
 
 
 TELEGRAM_SERVICE_NAME = "personal-agent-telegram.service"
+TELEGRAM_HEALTH_DISABLED_OPTIONAL = "DISABLED_OPTIONAL"
 _APPROVED_SYSTEMCTL_USER_ACTIONS = {
     ("--version",),
     ("cat", TELEGRAM_SERVICE_NAME),
@@ -28,6 +29,36 @@ _SECRET_ARG_RE = re.compile(r"(?i)(token|password|api[_-]?key|secret)=\S+")
 
 def _truthy(value: Any) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def classify_telegram_health_level(
+    *,
+    enabled: bool,
+    token_configured: bool,
+    polling_active: bool,
+    handler_registered: bool = False,
+    inbound_seen: bool = False,
+    dispatch_seen: bool = False,
+    outbound_seen: bool = False,
+    duplicate_consumer_suspected: bool = False,
+    recent_error: bool = False,
+) -> str:
+    """Classify transport health without treating an intentional opt-out as failure."""
+    if not enabled:
+        if polling_active or duplicate_consumer_suspected:
+            return "DEGRADED"
+        return TELEGRAM_HEALTH_DISABLED_OPTIONAL
+    if duplicate_consumer_suspected or recent_error or not token_configured or not polling_active:
+        return "DEGRADED"
+    if outbound_seen and handler_registered:
+        return "HEALTHY"
+    if outbound_seen:
+        return "REPLYING"
+    if dispatch_seen:
+        return "DISPATCHING"
+    if inbound_seen:
+        return "RECEIVING"
+    return "POLLING"
 
 
 def _safe_int(value: Any) -> int | None:
@@ -432,7 +463,7 @@ def get_telegram_runtime_state(
 
     if not enabled:
         effective_state = "disabled_optional"
-        next_action = "Run: python -m agent telegram_enable"
+        next_action = "No action needed."
         ready_state = "disabled_optional"
     elif not service_installed:
         effective_state = "enabled_misconfigured"
@@ -466,14 +497,13 @@ def get_telegram_runtime_state(
     polling_active = bool(service_active)
     handler_registered = bool(service_installed)
     duplicate_consumer_suspected = bool(duplicate_pollers)
-    if duplicate_consumer_suspected or (token_configured and not polling_active):
-        telegram_health_level = "DEGRADED"
-    elif polling_active:
-        telegram_health_level = "POLLING"
-    elif token_configured:
-        telegram_health_level = "CONFIGURED"
-    else:
-        telegram_health_level = "UNVERIFIED"
+    telegram_health_level = classify_telegram_health_level(
+        enabled=enabled,
+        token_configured=token_configured,
+        polling_active=polling_active,
+        handler_registered=handler_registered,
+        duplicate_consumer_suspected=duplicate_consumer_suspected,
+    )
     return {
         "enabled": enabled,
         "configured": token_configured,
@@ -1097,6 +1127,8 @@ def _persist_telegram_managed_action_journal(
 
 __all__ = [
     "TELEGRAM_SERVICE_NAME",
+    "TELEGRAM_HEALTH_DISABLED_OPTIONAL",
+    "classify_telegram_health_level",
     "clear_stale_telegram_locks",
     "get_telegram_runtime_state",
     "inspect_telegram_pollers",

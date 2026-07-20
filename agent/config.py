@@ -810,7 +810,7 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
         raise RuntimeError("LLM_AUTOPILOT_BOOTSTRAP_ALLOW_APPLY must be true/false when set.")
     llm_autopilot_ledger_path = os.getenv("LLM_AUTOPILOT_LEDGER_PATH", "").strip() or None
     llm_autopilot_ledger_max_items = int(os.getenv("LLM_AUTOPILOT_LEDGER_MAX_ITEMS", "400") or 400)
-    safe_mode_enabled = os.getenv("AGENT_SAFE_MODE", "0").strip().lower() in {
+    safe_mode_enabled = os.getenv("AGENT_SAFE_MODE", "1").strip().lower() in {
         "1",
         "true",
         "yes",

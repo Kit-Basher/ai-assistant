@@ -45,7 +45,7 @@ Desktop launcher:
 - local maintainer stable install:
   - run `bash scripts/promote_local_stable.sh`
 - checkout/dev install:
-  - `bash scripts/install_local.sh --desktop-launcher`
+  - `bash scripts/install_dev.sh --desktop-launcher`
 - distributed install:
   - run the bundled `install.sh`
 - Debian install:

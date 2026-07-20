@@ -67,7 +67,7 @@ or unpack the release archive and `cd` into it.
 Install:
 
 ```bash
-bash scripts/install_local.sh --desktop-launcher
+bash scripts/install_local.sh
 ```
 
 For a release archive, use the archive's bundled `install.sh` instead.

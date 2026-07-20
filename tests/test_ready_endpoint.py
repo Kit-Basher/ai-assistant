@@ -208,6 +208,90 @@ class TestReadyEndpoint(unittest.TestCase):
         self.assertEqual([], payload["telegram"]["recent_messages"])
         self.assertTrue(str(payload.get("message") or "").strip())
 
+    def test_disabled_optional_with_saved_token_is_neutral_across_status_surfaces(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        self._make_chat_healthy(runtime)
+        disabled_state = {
+            "enabled": False,
+            "token_configured": True,
+            "token_source": "secret_store",
+            "secret_store_state": "ok",
+            "secret_store_valid": True,
+            "ready_state": "disabled_optional",
+            "effective_state": "disabled_optional",
+            "config_source": "default",
+            "config_source_path": None,
+            "service_installed": False,
+            "service_active": False,
+            "service_enabled": False,
+            "lock_present": False,
+            "lock_live": False,
+            "lock_stale": False,
+            "lock_path": None,
+            "lock_pid": None,
+            "duplicate_pollers": False,
+            "poller_inspection_available": True,
+            "poller_count": 0,
+            "next_action": "No action needed.",
+        }
+        with patch("agent.api_server.get_telegram_runtime_state", return_value=disabled_state):
+            detailed_handler = _HandlerForTest(runtime, "/telegram/status")
+            detailed_handler.do_GET()
+            detailed = json.loads(detailed_handler.body.decode("utf-8"))
+            ready_handler = _HandlerForTest(runtime, "/ready")
+            ready_handler.do_GET()
+            ready = json.loads(ready_handler.body.decode("utf-8"))
+            runtime_handler = _HandlerForTest(runtime, "/runtime")
+            runtime_handler.do_GET()
+            runtime_payload = json.loads(runtime_handler.body.decode("utf-8"))
+
+        self.assertEqual("DISABLED_OPTIONAL", detailed["telegram_health_level"])
+        self.assertEqual("disabled_optional", detailed["effective_state"])
+        self.assertEqual("No action needed.", detailed["next_action"])
+        self.assertIsNone(detailed["last_error_code"])
+        self.assertEqual("READY", ready["runtime_mode"])
+        self.assertIsNone(ready["telegram"]["warning"])
+        self.assertEqual("No action needed.", ready["telegram"]["next_action"])
+        self.assertEqual([], ready["surface_warnings"])
+        self.assertIsNone(ready["recovery"]["mode"])
+        self.assertEqual("disabled_optional", runtime_payload["telegram"]["state"])
+        self.assertEqual("DISABLED_OPTIONAL", runtime_payload["telegram"]["telegram_health_level"])
+        self.assertEqual("No action needed.", runtime_payload["telegram"]["next_action"])
+        self.assertIsNone(runtime_payload["telegram"]["last_error"])
+
+    def test_enabled_but_stopped_telegram_remains_degraded_in_detailed_status(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path, telegram_enabled=True))
+        enabled_stopped = {
+            "enabled": True,
+            "token_configured": True,
+            "token_source": "secret_store",
+            "secret_store_state": "ok",
+            "secret_store_valid": True,
+            "ready_state": "stopped",
+            "effective_state": "enabled_stopped",
+            "config_source": "config",
+            "config_source_path": None,
+            "service_installed": True,
+            "service_active": False,
+            "service_enabled": True,
+            "lock_present": False,
+            "lock_live": False,
+            "lock_stale": False,
+            "lock_path": None,
+            "lock_pid": None,
+            "duplicate_pollers": False,
+            "poller_inspection_available": True,
+            "poller_count": 0,
+            "next_action": "Run: python -m agent telegram_enable",
+        }
+        with patch("agent.api_server.get_telegram_runtime_state", return_value=enabled_stopped):
+            handler = _HandlerForTest(runtime, "/telegram/status")
+            handler.do_GET()
+        payload = json.loads(handler.body.decode("utf-8"))
+        self.assertEqual("DEGRADED", payload["telegram_health_level"])
+        self.assertEqual("enabled_stopped", payload["effective_state"])
+        self.assertIn("telegram_enable", payload["next_action"])
+
     def test_ready_missing_token_enabled_reports_disabled_missing_token(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path, telegram_enabled=True))
         with patch(

@@ -22,6 +22,7 @@ def _config(registry_path: str, db_path: str, **overrides: object):
         llm_registry_path=registry_path,
         llm_automation_enabled=False,
         telegram_enabled=False,
+        safe_mode_enabled=False,
     )
     return replace(base, **overrides)
 

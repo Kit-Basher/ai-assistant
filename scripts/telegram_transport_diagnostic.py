@@ -41,7 +41,8 @@ def _normalized_state(state: dict[str, object]) -> dict[str, object]:
     )
     normalized.setdefault("runtime_reachable", state.get("runtime_reachable"))
     normalized.setdefault("telegram_transport_healthy", bool(state.get("telegram_transport_healthy", False)))
-    normalized.setdefault("telegram_health_level", str(state.get("telegram_health_level") or "UNVERIFIED"))
+    default_health_level = "DISABLED_OPTIONAL" if not bool(state.get("enabled", False)) else "UNVERIFIED"
+    normalized.setdefault("telegram_health_level", str(state.get("telegram_health_level") or default_health_level))
     normalized.setdefault("live_reply_verified", bool(state.get("live_reply_verified", False)))
     return normalized
 
@@ -55,6 +56,7 @@ def main() -> int:
     live = _api_status()
     state = _normalized_state(live if live else get_telegram_runtime_state(env=telegram_control_env()))
     configured = bool(state.get("configured", state.get("token_configured", False)))
+    enabled = bool(state.get("enabled", False))
     healthy = bool(state.get("telegram_transport_healthy", False))
     checks = [
         ("status payload available", bool(state), "api" if live else "local"),
@@ -64,7 +66,7 @@ def main() -> int:
         ("polling status present", "polling_active" in state, str(state.get("polling_active"))),
         ("duplicate consumer status present", "duplicate_consumer_suspected" in state or "duplicate_pollers" in state, str(state.get("duplicate_consumer_suspected", state.get("duplicate_pollers")))),
         ("runtime reachability classified", "runtime_reachable" in state or bool(live), str(state.get("runtime_reachable"))),
-        ("health level classified", str(state.get("telegram_health_level") or "") in {"CONFIGURED", "POLLING", "RECEIVING", "DISPATCHING", "REPLYING", "HEALTHY", "DEGRADED", "UNVERIFIED"}, str(state.get("telegram_health_level"))),
+        ("health level classified", str(state.get("telegram_health_level") or "") in {"DISABLED_OPTIONAL", "CONFIGURED", "POLLING", "RECEIVING", "DISPATCHING", "REPLYING", "HEALTHY", "DEGRADED", "UNVERIFIED"}, str(state.get("telegram_health_level"))),
         ("reply trace fields present", "last_reply_success_at" in state and "last_reply_attempt_at" in state, f"last_reply_success_at={state.get('last_reply_success_at')}"),
     ]
     failed = 0
@@ -73,7 +75,7 @@ def main() -> int:
     for name, ok, evidence in checks:
         print(f"{'PASS' if ok else 'FAIL'}: {name} - {evidence}")
         failed += 0 if ok else 1
-    if configured and not healthy:
+    if enabled and configured and not healthy:
         warn += 1
         print(f"WARN: Telegram is configured but transport is not proven healthy. level={state.get('telegram_health_level')}")
         print("Suggested checks: poller active, webhook disabled, no duplicate getUpdates consumer, runtime reachable.")

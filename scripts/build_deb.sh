@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/.." && pwd)"
 outdir="dist"
 override_repo_root=""
 arch="$(dpkg-architecture -qDEB_HOST_ARCH 2>/dev/null || printf '%s' amd64)"
@@ -64,6 +65,8 @@ outdir="$(cd "$outdir" && pwd)"
 
 version="$(tr -d ' \n' < "$repo_root/VERSION")"
 [ -n "$version" ] || die "VERSION file is missing or empty"
+
+python3 "$script_dir/webui_build_manifest.py" verify --repo-root "$repo_root" >/dev/null
 
 package_name="personal-agent"
 package_version="$version"

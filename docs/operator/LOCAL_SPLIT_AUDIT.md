@@ -4,7 +4,7 @@ This note records the current split between the repo-backed dev install and the 
 
 ## Install Stories
 
-- Repo-backed dev install: `bash scripts/install_local.sh --desktop-launcher`
+- Repo-backed dev install: `bash scripts/install_dev.sh --desktop-launcher`
 - Stable bundled install: the bundled `install.sh` from a release bundle, or the packaged release path
 
 ## What Each Path Installs

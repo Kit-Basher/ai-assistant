@@ -5,7 +5,8 @@
 Use the stable install for everyday use.
 
 - install path: bundled `install.sh` from a release bundle or packaged release
-- local maintainer command: `bash scripts/promote_local_stable.sh`
+- source-checkout install: `bash scripts/install_local.sh`
+- lower-level maintainer command: `bash scripts/promote_local_stable.sh`
 - service: `personal-agent-api.service`
 - launcher: `personal-agent-webui`
 - runtime instance marker: `stable`
@@ -15,7 +16,7 @@ Use the stable install for everyday use.
 
 Use the dev install for checkout work.
 
-- install path: `bash scripts/install_local.sh --desktop-launcher`
+- install path: `bash scripts/install_dev.sh --desktop-launcher`
 - service: `personal-agent-api-dev.service`
 - launcher: `personal-agent-webui-dev`
 - runtime instance marker: `dev`

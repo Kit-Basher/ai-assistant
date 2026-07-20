@@ -22,6 +22,7 @@ def _config(registry_path: str, db_path: str):
         llm_health_state_path=os.path.join(os.path.dirname(db_path), "llm_health_state.json"),
         llm_automation_enabled=False,
         telegram_enabled=False,
+        safe_mode_enabled=False,
     )
 
 

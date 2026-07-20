@@ -36,9 +36,12 @@ the project intent document, project intent wins.
 - Canonical operator/runtime path:
   - repo checkout: `~/personal-agent`
   - user service: `personal-agent-api.service`
+  - loopback URL: `http://127.0.0.1:8765/`
   - mutable state: `~/.local/share/personal-agent`
   - operator config/policy: `~/.config/personal-agent`
-  - repo install/update path: `pip install -e .`
+  - stable source-checkout install/update path: `bash scripts/install_local.sh`
+  - explicit developer path: `bash scripts/install_dev.sh`,
+    `personal-agent-api-dev.service`, port `18765`
   - release artifact build path: `python scripts/build_dist.py --outdir dist --clean`
   - first-run/recovery commands: `python -m agent setup`, `python -m agent doctor --fix`
   - diagnostics path: `python -m agent doctor`, `python -m agent doctor --collect-diagnostics`
@@ -49,8 +52,28 @@ the project intent document, project intent wins.
     paths; legacy root/system packaging is out of scope
 - Legacy root/system-service wrapper scripts are retired and fail closed.
 
+## 3A. Install And State Contract
+
+- `scripts/install_local.sh` is the recommended source-checkout install. It
+  builds and fingerprints the web UI, creates a versioned release bundle, and
+  installs the stable service on port `8765`.
+- `scripts/install_dev.sh` is developer-only and runs editable checkout code on
+  port `18765` under a dev-named service and launcher.
+- A release bundle and a Debian package are alternative delivery formats for
+  the same stable runtime contract; they must not create competing stable
+  services.
+- Mutable database, registry, secrets, logs, usage, audit, and runtime policy
+  state live only under `~/.local/share/personal-agent` or
+  `~/.config/personal-agent`. Repository paths are source/build inputs, never
+  canonical live state.
+- UI source is tracked under `desktop/`. Runtime assets are generated under
+  `agent/webui/dist/`. Artifact builders require a manifest that fingerprints
+  both source and output and fail closed when either side is stale or modified.
+
 ## 4. Mode Model
 - SAFE MODE is the baseline unless explicitly overridden.
+- `AGENT_SAFE_MODE` defaults to enabled in code and is pinned to `1` by stable,
+  dev, release-bundle, and Debian service definitions.
 - Controlled Mode is explicit override only.
 - Mode changes happen through the loopback-only, confirm-gated
   `/llm/control_mode` surface.
