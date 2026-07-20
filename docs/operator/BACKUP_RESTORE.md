@@ -18,6 +18,14 @@ The canonical database and registry are:
 - `~/.local/share/personal-agent/agent.db`
 - `~/.local/share/personal-agent/llm_registry.json`
 
+The canonical confirmation ledger is:
+
+- `~/.local/share/personal-agent/confirmation_transactions.sqlite3`
+
+Internal-writer receipts use bounded `*.internal-writer.sqlite3` files under
+the same canonical state root. Backing up the whole state directory includes
+all of them.
+
 Recovery directories and archives are evidence until a human explicitly
 retires them. Install, doctor, backup, and cleanup flows must not delete or
 overwrite preserved recovery material outside their own versioned runtime and
@@ -73,7 +81,16 @@ For Backup v1 artifacts created by the assistant, prefer the chat flow:
 
 Restore Executor v1 restores only supported non-secret Backup v1 state. It does
 not restore raw secrets, logs, arbitrary files, model caches, runtime releases,
-or executable pack source.
+or executable pack source. It does preserve authorization history: Backup v1
+uses SQLite online snapshots for the confirmation ledger and internal-writer
+receipts, and restore merges them append-only. Historical reserved operations
+restore as failed; historical executing operations restore as indeterminate,
+so uncertain work cannot be retried automatically.
+
+Do not copy only a SQLite main file while the service is running. Either back
+up the whole stopped state directory or use Backup v1, whose SQLite backup API
+includes committed WAL state in a standalone database. WAL/SHM files are not
+independent backup artifacts.
 
 Executor Authorization Migration v1 binds restore execution to
 `restore.execute`. Confirmation uses Universal Mutation Plan metadata, central

@@ -21,11 +21,21 @@
       "check": "orchestrator_calls_route_inference",
       "evidence": "agent/orchestrator.py",
       "ok": true
+    },
+    {
+      "check": "durable_confirmation_transaction_boundary",
+      "evidence": "agent/confirmation_transactions.py",
+      "ok": true
+    },
+    {
+      "check": "internal_writer_registry_enforced",
+      "evidence": "agent/internal_writer_authority.py",
+      "ok": true
     }
   ],
   "schema": "personal-agent.mutation-surface-inventory.v2",
   "scope": "public API mutations plus assistant, Telegram, CLI, skill-pack, executor, and background entry points",
-  "source_commit": "audit-v2b-working-tree-on-7afbe8502f67d3c720311b7299521075e12d4229",
+  "source_commit": "audit-v2c-working-tree-on-a59292274df04fde3b9a3d48f90b6cd7c92b71c4",
   "status_definitions": {
     "central_authorized": "central capability schema, policy, Universal Mutation Plan, confirmation, and Executor Registry",
     "legacy_unmigrated": "public or reachable mutation not fully migrated to the canonical authorization stack",

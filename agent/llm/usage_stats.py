@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from agent.llm.types import Message
+from agent.capability_policy import stable_fingerprint
+from agent.internal_writer_authority import perform_registered_internal_write
 
 
 @dataclass(frozen=True)
@@ -62,7 +64,17 @@ class UsageStatsStore:
                 "completion_tokens": estimate.completion_tokens,
                 "samples": estimate.samples,
             }
-        self._path.write_text(json.dumps(payload, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
+        state_hash = stable_fingerprint(payload)
+        perform_registered_internal_write(
+            writer_id="llm_usage_stats",
+            operation="record_usage",
+            resource_type="usage_telemetry",
+            target_scope="state:usage_stats",
+            arguments={"state_hash": state_hash, "series_count": len(payload)},
+            callback=lambda: self._path.write_text(json.dumps(payload, ensure_ascii=True, indent=2) + "\n", encoding="utf-8"),
+            journal_path=self._path.with_name(f"{self._path.name}.internal-writer.sqlite3"),
+            operation_id=f"usage:{state_hash}",
+        )
 
     def get(self, task_type: str, provider_id: str, model_id: str) -> UsageEstimate | None:
         return self._entries.get(self._key(task_type, provider_id, model_id))

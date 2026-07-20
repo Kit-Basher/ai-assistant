@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 import time
 from datetime import date, datetime, timezone
 from urllib import error as url_error
@@ -12,6 +13,11 @@ from zoneinfo import ZoneInfo
 from agent.daily_brief import should_send_daily_brief
 from memory.db import MemoryDB
 from agent.config import resolved_default_db_path
+from agent.internal_writer_authority import (
+    InternalWriterFactory,
+    InternalWriterJournal,
+    execute_internal_write,
+)
 
 
 _TRUE_VALUES = {"on", "true", "1", "yes"}
@@ -307,20 +313,41 @@ def run_once(now_utc: datetime | None = None) -> int:
         nudge = _choose_nudge(open_tasks, open_loops)
         text = _build_brief_markdown(local_date, open_tasks, due_soon_tasks, open_loops, nudge)
 
-        for attempt in (1, 2):
-            try:
-                _send_telegram_message(token, str(chat_id), text)
-                db.set_preference("daily_brief_last_sent_date", decision.local_date)
-                _log(f"sent: local_date={decision.local_date}")
+        def _deliver_once() -> bool:
+            for attempt in (1, 2):
+                try:
+                    _send_telegram_message(token, str(chat_id), text)
+                    db.set_preference("daily_brief_last_sent_date", decision.local_date)
+                    return True
+                except Exception:
+                    if attempt == 1:
+                        time.sleep(1.0)
+                        continue
+                    raise
+            return False
+
+        authority = InternalWriterFactory(trigger="scheduler").issue(
+            "scheduled_daily_brief",
+            operation_id=f"daily-brief:{decision.local_date}",
+            runtime_mode="safe",
+        )
+        try:
+            execute_internal_write(
+                authority=authority,
+                operation="deliver_brief",
+                resource_type="scheduled_brief_delivery",
+                target_scope="transport:telegram_configured_destination",
+                arguments={"record_id": decision.local_date, "size_bytes": len(text.encode("utf-8"))},
+                callback=_deliver_once,
+                journal=InternalWriterJournal(Path(db_path).expanduser().resolve().parent / "internal_writer_journal.sqlite3"),
+            )
+        except ValueError as exc:
+            if str(exc) == "internal_writer_duplicate_operation":
+                _log(f"skip: duplicate operation local_date={decision.local_date}")
                 return 0
-            except Exception as exc:
-                if attempt == 1:
-                    _log(f"send attempt 1 failed: {exc}; retrying")
-                    time.sleep(1.0)
-                    continue
-                _log(f"send failed: {exc}")
-                return 1
-        return 1
+            raise
+        _log(f"sent: local_date={decision.local_date}")
+        return 0
     except Exception as exc:
         _log(f"error: {exc}")
         return 1

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import subprocess
 import urllib.error
 import urllib.request
@@ -12,8 +13,8 @@ from typing import Any
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8765"
-MAX_BACKUP_ARTIFACT_BYTES = 2 * 1024 * 1024
-MAX_BACKUP_FILE_BYTES = 256 * 1024
+MAX_BACKUP_ARTIFACT_BYTES = 16 * 1024 * 1024
+MAX_BACKUP_FILE_BYTES = 8 * 1024 * 1024
 
 EXPECTED_FILES = {
     "manifest.json",
@@ -26,6 +27,7 @@ EXPECTED_FILES = {
     "diagnostics_summary.json",
     "support_bundle_style_summary.json",
     "backup_summary.json",
+    "confirmation_transactions.sqlite3",
 }
 
 
@@ -179,6 +181,23 @@ def run(base_url: str, timeout: float) -> list[Check]:
             and manifest.get("live_restore") in {"restore_not_enabled", "restore_v1_allowlisted_preferences_only"}
             and not missing
             else _fail("manifest exists and lists expected bounded files", f"missing={missing}; manifest={json.dumps(manifest, sort_keys=True)[:1200]}", "inspect manifest.json")
+        )
+        confirmation_snapshot = artifact_path / "confirmation_transactions.sqlite3"
+        confirmation_ok = False
+        if confirmation_snapshot.is_file() and not confirmation_snapshot.is_symlink():
+            try:
+                with sqlite3.connect(f"file:{confirmation_snapshot}?mode=ro", uri=True) as connection:
+                    integrity = connection.execute("PRAGMA integrity_check").fetchone()
+                    table = connection.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'confirmation_transactions'"
+                    ).fetchone()
+                confirmation_ok = bool(integrity and integrity[0] == "ok" and table)
+            except sqlite3.Error:
+                confirmation_ok = False
+        checks.append(
+            _pass("durable confirmation snapshot is standalone and valid", "integrity=ok", "inspect confirmation snapshot")
+            if confirmation_ok
+            else _fail("durable confirmation snapshot is standalone and valid", "missing or invalid", "inspect confirmation snapshot")
         )
         missing_files = sorted(name for name in EXPECTED_FILES if not (artifact_path / name).is_file())
         checks.append(

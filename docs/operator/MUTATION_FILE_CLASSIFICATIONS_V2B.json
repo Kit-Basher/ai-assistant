@@ -13,7 +13,8 @@
     "executor",
     "confirmation_requirements",
     "rollback_scope",
-    "audit_evidence"
+    "audit_evidence",
+    "contract_identity"
   ],
   "classifications": [
     {
@@ -28,7 +29,8 @@
       "executor": "registered capability-bound executor",
       "confirmation_requirements": "scope-bound and single-use when mutating",
       "rollback_scope": "declared by plan/executor receipt",
-      "audit_evidence": "manual review of api_server.py: implements or invokes the canonical authorization boundary"
+      "audit_evidence": "manual review of api_server.py: implements or invokes the canonical authorization boundary",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/audit_log.py",
@@ -42,7 +44,8 @@
       "executor": "fixed module-owned writer",
       "confirmation_requirements": "no user confirmation; scheduler/service identity required",
       "rollback_scope": "module-owned record/file only",
-      "audit_evidence": "manual review of audit_log.py: writes are module-owned bookkeeping and are not a public executor choice"
+      "audit_evidence": "manual review of audit_log.py: writes are module-owned bookkeeping and are not a public executor choice; v2C disposition=trusted_bookkeeping, contract_identity=audit_log",
+      "contract_identity": "audit_log"
     },
     {
       "path": "agent/cli.py",
@@ -56,11 +59,12 @@
       "executor": "legacy fixed domain function",
       "confirmation_requirements": "varies; must be replaced by scoped UMP confirmation",
       "rollback_scope": "domain-specific journal or manual recovery",
-      "audit_evidence": "manual review of cli.py: contains a reachable domain mutation outside the complete central executor path"
+      "audit_evidence": "manual review of cli.py: contains a reachable domain mutation outside the complete central executor path",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/control_plane.py",
-      "disposition": "internal_only",
+      "disposition": "supported_pending_migration",
       "capability": "internal.state.persist",
       "entry_point": "bounded runtime service callback",
       "actor": "declared Personal Agent runtime/scheduler",
@@ -70,7 +74,8 @@
       "executor": "fixed module-owned writer",
       "confirmation_requirements": "no user confirmation; scheduler/service identity required",
       "rollback_scope": "module-owned record/file only",
-      "audit_evidence": "manual review of control_plane.py: writes are module-owned bookkeeping and are not a public executor choice"
+      "audit_evidence": "manual review of control_plane.py: writes are module-owned bookkeeping and are not a public executor choice; v2C disposition=operator_triggered_legacy, contract_identity=control_plane",
+      "contract_identity": "control_plane"
     },
     {
       "path": "agent/diagnostics.py",
@@ -84,7 +89,8 @@
       "executor": "none",
       "confirmation_requirements": "none",
       "rollback_scope": "none",
-      "audit_evidence": "manual review of diagnostics.py: matched calls do not change managed state"
+      "audit_evidence": "manual review of diagnostics.py: matched calls do not change managed state",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/doctor.py",
@@ -98,7 +104,8 @@
       "executor": "legacy fixed domain function",
       "confirmation_requirements": "varies; must be replaced by scoped UMP confirmation",
       "rollback_scope": "domain-specific journal or manual recovery",
-      "audit_evidence": "manual review of doctor.py: contains a reachable domain mutation outside the complete central executor path"
+      "audit_evidence": "manual review of doctor.py: contains a reachable domain mutation outside the complete central executor path",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/executor_registry.py",
@@ -112,7 +119,8 @@
       "executor": "registered capability-bound executor",
       "confirmation_requirements": "scope-bound and single-use when mutating",
       "rollback_scope": "declared by plan/executor receipt",
-      "audit_evidence": "manual review of executor_registry.py: implements or invokes the canonical authorization boundary"
+      "audit_evidence": "manual review of executor_registry.py: implements or invokes the canonical authorization boundary",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/friction/next_action.py",
@@ -126,7 +134,8 @@
       "executor": "none",
       "confirmation_requirements": "none",
       "rollback_scope": "none",
-      "audit_evidence": "manual review of next_action.py: matched calls do not change managed state"
+      "audit_evidence": "manual review of next_action.py: matched calls do not change managed state",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/host_lifecycle.py",
@@ -140,7 +149,8 @@
       "executor": "registered capability-bound executor",
       "confirmation_requirements": "scope-bound and single-use when mutating",
       "rollback_scope": "declared by plan/executor receipt",
-      "audit_evidence": "manual review of host_lifecycle.py: implements or invokes the canonical authorization boundary"
+      "audit_evidence": "manual review of host_lifecycle.py: implements or invokes the canonical authorization boundary",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/intent_router.py",
@@ -154,7 +164,8 @@
       "executor": "none",
       "confirmation_requirements": "none",
       "rollback_scope": "none",
-      "audit_evidence": "manual review of intent_router.py: matched calls do not change managed state"
+      "audit_evidence": "manual review of intent_router.py: matched calls do not change managed state",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/intent/thread_integrity.py",
@@ -168,7 +179,8 @@
       "executor": "none",
       "confirmation_requirements": "none",
       "rollback_scope": "none",
-      "audit_evidence": "manual review of thread_integrity.py: matched calls do not change managed state"
+      "audit_evidence": "manual review of thread_integrity.py: matched calls do not change managed state",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/llm/action_ledger.py",
@@ -182,7 +194,8 @@
       "executor": "fixed module-owned writer",
       "confirmation_requirements": "no user confirmation; scheduler/service identity required",
       "rollback_scope": "module-owned record/file only",
-      "audit_evidence": "manual review of action_ledger.py: writes are module-owned bookkeeping and are not a public executor choice"
+      "audit_evidence": "manual review of action_ledger.py: writes are module-owned bookkeeping and are not a public executor choice; v2C disposition=trusted_bookkeeping, contract_identity=llm_action_ledger",
+      "contract_identity": "llm_action_ledger"
     },
     {
       "path": "agent/llm/autopilot_safety.py",
@@ -196,7 +209,8 @@
       "executor": "fixed module-owned writer",
       "confirmation_requirements": "no user confirmation; scheduler/service identity required",
       "rollback_scope": "module-owned record/file only",
-      "audit_evidence": "manual review of autopilot_safety.py: writes are module-owned bookkeeping and are not a public executor choice"
+      "audit_evidence": "manual review of autopilot_safety.py: writes are module-owned bookkeeping and are not a public executor choice; v2C disposition=scheduled_maintenance, contract_identity=llm_autopilot_safety",
+      "contract_identity": "llm_autopilot_safety"
     },
     {
       "path": "agent/llm/catalog.py",
@@ -210,7 +224,8 @@
       "executor": "fixed module-owned writer",
       "confirmation_requirements": "no user confirmation; scheduler/service identity required",
       "rollback_scope": "module-owned record/file only",
-      "audit_evidence": "manual review of catalog.py: writes are module-owned bookkeeping and are not a public executor choice"
+      "audit_evidence": "manual review of catalog.py: writes are module-owned bookkeeping and are not a public executor choice; v2C disposition=trusted_bookkeeping, contract_identity=llm_catalog",
+      "contract_identity": "llm_catalog"
     },
     {
       "path": "agent/llm/health.py",
@@ -224,7 +239,8 @@
       "executor": "fixed module-owned writer",
       "confirmation_requirements": "no user confirmation; scheduler/service identity required",
       "rollback_scope": "module-owned record/file only",
-      "audit_evidence": "manual review of health.py: writes are module-owned bookkeeping and are not a public executor choice"
+      "audit_evidence": "manual review of health.py: writes are module-owned bookkeeping and are not a public executor choice; v2C disposition=trusted_bookkeeping, contract_identity=llm_health",
+      "contract_identity": "llm_health"
     },
     {
       "path": "agent/llm/install_executor.py",
@@ -238,11 +254,12 @@
       "executor": "legacy fixed domain function",
       "confirmation_requirements": "varies; must be replaced by scoped UMP confirmation",
       "rollback_scope": "domain-specific journal or manual recovery",
-      "audit_evidence": "manual review of install_executor.py: contains a reachable domain mutation outside the complete central executor path"
+      "audit_evidence": "manual review of install_executor.py: contains a reachable domain mutation outside the complete central executor path",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/llm/model_discovery_policy.py",
-      "disposition": "internal_only",
+      "disposition": "supported_pending_migration",
       "capability": "internal.state.persist",
       "entry_point": "bounded runtime service callback",
       "actor": "declared Personal Agent runtime/scheduler",
@@ -252,7 +269,8 @@
       "executor": "fixed module-owned writer",
       "confirmation_requirements": "no user confirmation; scheduler/service identity required",
       "rollback_scope": "module-owned record/file only",
-      "audit_evidence": "manual review of model_discovery_policy.py: writes are module-owned bookkeeping and are not a public executor choice"
+      "audit_evidence": "manual review of model_discovery_policy.py: writes are module-owned bookkeeping and are not a public executor choice; v2C disposition=mixed_internal_and_public_pending, contract_identity=llm_model_discovery_policy",
+      "contract_identity": "llm_model_discovery_policy"
     },
     {
       "path": "agent/llm/model_manager.py",
@@ -266,11 +284,12 @@
       "executor": "legacy fixed domain function",
       "confirmation_requirements": "varies; must be replaced by scoped UMP confirmation",
       "rollback_scope": "domain-specific journal or manual recovery",
-      "audit_evidence": "manual review of model_manager.py: contains a reachable domain mutation outside the complete central executor path"
+      "audit_evidence": "manual review of model_manager.py: contains a reachable domain mutation outside the complete central executor path",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/llm/notifications.py",
-      "disposition": "internal_only",
+      "disposition": "supported_pending_migration",
       "capability": "internal.state.persist",
       "entry_point": "bounded runtime service callback",
       "actor": "declared Personal Agent runtime/scheduler",
@@ -280,7 +299,8 @@
       "executor": "fixed module-owned writer",
       "confirmation_requirements": "no user confirmation; scheduler/service identity required",
       "rollback_scope": "module-owned record/file only",
-      "audit_evidence": "manual review of notifications.py: writes are module-owned bookkeeping and are not a public executor choice"
+      "audit_evidence": "manual review of notifications.py: writes are module-owned bookkeeping and are not a public executor choice; v2C disposition=mixed_internal_and_public_pending, contract_identity=llm_notifications",
+      "contract_identity": "llm_notifications"
     },
     {
       "path": "agent/llm/probes.py",
@@ -294,7 +314,8 @@
       "executor": "none",
       "confirmation_requirements": "none",
       "rollback_scope": "none",
-      "audit_evidence": "manual review of probes.py: matched calls do not change managed state"
+      "audit_evidence": "manual review of probes.py: matched calls do not change managed state",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/llm/providers/openai_compat.py",
@@ -308,11 +329,12 @@
       "executor": "none",
       "confirmation_requirements": "none",
       "rollback_scope": "none",
-      "audit_evidence": "manual review of openai_compat.py: matched calls do not change managed state"
+      "audit_evidence": "manual review of openai_compat.py: matched calls do not change managed state",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/llm/registry_txn.py",
-      "disposition": "internal_only",
+      "disposition": "supported_pending_migration",
       "capability": "internal.state.persist",
       "entry_point": "bounded runtime service callback",
       "actor": "declared Personal Agent runtime/scheduler",
@@ -322,11 +344,12 @@
       "executor": "fixed module-owned writer",
       "confirmation_requirements": "no user confirmation; scheduler/service identity required",
       "rollback_scope": "module-owned record/file only",
-      "audit_evidence": "manual review of registry_txn.py: writes are module-owned bookkeeping and are not a public executor choice"
+      "audit_evidence": "manual review of registry_txn.py: writes are module-owned bookkeeping and are not a public executor choice; v2C disposition=operator_triggered_legacy, contract_identity=llm_registry_txn",
+      "contract_identity": "llm_registry_txn"
     },
     {
       "path": "agent/llm/registry.py",
-      "disposition": "internal_only",
+      "disposition": "supported_pending_migration",
       "capability": "internal.state.persist",
       "entry_point": "bounded runtime service callback",
       "actor": "declared Personal Agent runtime/scheduler",
@@ -336,7 +359,8 @@
       "executor": "fixed module-owned writer",
       "confirmation_requirements": "no user confirmation; scheduler/service identity required",
       "rollback_scope": "module-owned record/file only",
-      "audit_evidence": "manual review of registry.py: writes are module-owned bookkeeping and are not a public executor choice"
+      "audit_evidence": "manual review of registry.py: writes are module-owned bookkeeping and are not a public executor choice; v2C disposition=operator_triggered_legacy, contract_identity=llm_registry",
+      "contract_identity": "llm_registry"
     },
     {
       "path": "agent/llm/router.py",
@@ -350,7 +374,8 @@
       "executor": "legacy fixed domain function",
       "confirmation_requirements": "varies; must be replaced by scoped UMP confirmation",
       "rollback_scope": "domain-specific journal or manual recovery",
-      "audit_evidence": "manual review of router.py: contains a reachable domain mutation outside the complete central executor path"
+      "audit_evidence": "manual review of router.py: contains a reachable domain mutation outside the complete central executor path",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/llm/support.py",
@@ -364,7 +389,8 @@
       "executor": "none",
       "confirmation_requirements": "none",
       "rollback_scope": "none",
-      "audit_evidence": "manual review of support.py: matched calls do not change managed state"
+      "audit_evidence": "manual review of support.py: matched calls do not change managed state",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/llm/usage_stats.py",
@@ -378,7 +404,8 @@
       "executor": "fixed module-owned writer",
       "confirmation_requirements": "no user confirmation; scheduler/service identity required",
       "rollback_scope": "module-owned record/file only",
-      "audit_evidence": "manual review of usage_stats.py: writes are module-owned bookkeeping and are not a public executor choice"
+      "audit_evidence": "manual review of usage_stats.py: writes are module-owned bookkeeping and are not a public executor choice; v2C disposition=trusted_bookkeeping, contract_identity=llm_usage_stats",
+      "contract_identity": "llm_usage_stats"
     },
     {
       "path": "agent/logging_utils.py",
@@ -392,7 +419,8 @@
       "executor": "fixed module-owned writer",
       "confirmation_requirements": "no user confirmation; scheduler/service identity required",
       "rollback_scope": "module-owned record/file only",
-      "audit_evidence": "manual review of logging_utils.py: writes are module-owned bookkeeping and are not a public executor choice"
+      "audit_evidence": "manual review of logging_utils.py: writes are module-owned bookkeeping and are not a public executor choice; v2C disposition=trusted_bookkeeping, contract_identity=logging_utils",
+      "contract_identity": "logging_utils"
     },
     {
       "path": "agent/memory_v2/storage.py",
@@ -406,21 +434,23 @@
       "executor": "legacy fixed domain function",
       "confirmation_requirements": "varies; must be replaced by scoped UMP confirmation",
       "rollback_scope": "domain-specific journal or manual recovery",
-      "audit_evidence": "manual review of storage.py: contains a reachable domain mutation outside the complete central executor path"
+      "audit_evidence": "manual review of storage.py: contains a reachable domain mutation outside the complete central executor path",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/model_scout.py",
-      "disposition": "internal_only",
-      "capability": "internal.state.persist",
-      "entry_point": "bounded runtime service callback",
-      "actor": "declared Personal Agent runtime/scheduler",
-      "target_resources": "module-owned state file, database table, ledger, or outbound scheduled record",
-      "mutation_type": "bounded internal bookkeeping",
-      "policy_path": "internal-writer contract required; never a public authorization substitute",
-      "executor": "fixed module-owned writer",
-      "confirmation_requirements": "no user confirmation; scheduler/service identity required",
-      "rollback_scope": "module-owned record/file only",
-      "audit_evidence": "manual review of model_scout.py: writes are module-owned bookkeeping and are not a public executor choice"
+      "disposition": "supported_pending_migration",
+      "capability": "internal.model_scout.state plus pending user model-scout mutations",
+      "entry_point": "scheduled scout and legacy user suggestion-status methods",
+      "actor": "trusted scheduler or local user/operator",
+      "target_resources": "model scout runs, baselines, suggestions, and status",
+      "mutation_type": "mixed scheduled bookkeeping and supported public mutation",
+      "policy_path": "scheduled entry uses internal-writer authority; public status changes remain legacy pending",
+      "executor": "fixed scheduled writer or legacy model-scout store method",
+      "confirmation_requirements": "durable scheduler operation identity internally; public mutation requires later central migration",
+      "rollback_scope": "model-scout database or JSON state",
+      "audit_evidence": "manual review found scheduled persistence and user-triggered dismiss/install status writes; v2C disposition=mixed_internal_and_public_pending, contract_identity=model_scout",
+      "contract_identity": "model_scout"
     },
     {
       "path": "agent/model_watch_catalog.py",
@@ -434,11 +464,12 @@
       "executor": "fixed module-owned writer",
       "confirmation_requirements": "no user confirmation; scheduler/service identity required",
       "rollback_scope": "module-owned record/file only",
-      "audit_evidence": "manual review of model_watch_catalog.py: writes are module-owned bookkeeping and are not a public executor choice"
+      "audit_evidence": "manual review of model_watch_catalog.py: writes are module-owned bookkeeping and are not a public executor choice; v2C disposition=trusted_bookkeeping, contract_identity=model_watch_catalog",
+      "contract_identity": "model_watch_catalog"
     },
     {
       "path": "agent/model_watch_hf.py",
-      "disposition": "internal_only",
+      "disposition": "supported_pending_migration",
       "capability": "internal.state.persist",
       "entry_point": "bounded runtime service callback",
       "actor": "declared Personal Agent runtime/scheduler",
@@ -448,11 +479,12 @@
       "executor": "fixed module-owned writer",
       "confirmation_requirements": "no user confirmation; scheduler/service identity required",
       "rollback_scope": "module-owned record/file only",
-      "audit_evidence": "manual review of model_watch_hf.py: writes are module-owned bookkeeping and are not a public executor choice"
+      "audit_evidence": "manual review of model_watch_hf.py: writes are module-owned bookkeeping and are not a public executor choice; v2C disposition=mixed_internal_and_public_pending, contract_identity=model_watch_hf",
+      "contract_identity": "model_watch_hf"
     },
     {
       "path": "agent/model_watch.py",
-      "disposition": "internal_only",
+      "disposition": "supported_pending_migration",
       "capability": "internal.state.persist",
       "entry_point": "bounded runtime service callback",
       "actor": "declared Personal Agent runtime/scheduler",
@@ -462,7 +494,8 @@
       "executor": "fixed module-owned writer",
       "confirmation_requirements": "no user confirmation; scheduler/service identity required",
       "rollback_scope": "module-owned record/file only",
-      "audit_evidence": "manual review of model_watch.py: writes are module-owned bookkeeping and are not a public executor choice"
+      "audit_evidence": "manual review of model_watch.py: writes are module-owned bookkeeping and are not a public executor choice; v2C disposition=mixed_internal_and_public_pending, contract_identity=model_watch",
+      "contract_identity": "model_watch"
     },
     {
       "path": "agent/modelops/discovery.py",
@@ -476,7 +509,8 @@
       "executor": "none",
       "confirmation_requirements": "none",
       "rollback_scope": "none",
-      "audit_evidence": "manual review of discovery.py: matched calls do not change managed state"
+      "audit_evidence": "manual review of discovery.py: matched calls do not change managed state",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/modelops/safe_runner.py",
@@ -490,7 +524,8 @@
       "executor": "legacy fixed domain function",
       "confirmation_requirements": "varies; must be replaced by scoped UMP confirmation",
       "rollback_scope": "domain-specific journal or manual recovery",
-      "audit_evidence": "manual review of safe_runner.py: contains a reachable domain mutation outside the complete central executor path"
+      "audit_evidence": "manual review of safe_runner.py: contains a reachable domain mutation outside the complete central executor path",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/modelops/seen_state.py",
@@ -504,7 +539,8 @@
       "executor": "fixed module-owned writer",
       "confirmation_requirements": "no user confirmation; scheduler/service identity required",
       "rollback_scope": "module-owned record/file only",
-      "audit_evidence": "manual review of seen_state.py: writes are module-owned bookkeeping and are not a public executor choice"
+      "audit_evidence": "manual review of seen_state.py: writes are module-owned bookkeeping and are not a public executor choice; v2C disposition=trusted_bookkeeping, contract_identity=modelops_seen_state",
+      "contract_identity": "modelops_seen_state"
     },
     {
       "path": "agent/mutation_plan.py",
@@ -518,7 +554,8 @@
       "executor": "registered capability-bound executor",
       "confirmation_requirements": "scope-bound and single-use when mutating",
       "rollback_scope": "declared by plan/executor receipt",
-      "audit_evidence": "manual review of mutation_plan.py: implements or invokes the canonical authorization boundary"
+      "audit_evidence": "manual review of mutation_plan.py: implements or invokes the canonical authorization boundary",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/onboarding_contract.py",
@@ -532,7 +569,8 @@
       "executor": "none",
       "confirmation_requirements": "none",
       "rollback_scope": "none",
-      "audit_evidence": "manual review of onboarding_contract.py: matched calls do not change managed state"
+      "audit_evidence": "manual review of onboarding_contract.py: matched calls do not change managed state",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/orchestrator.py",
@@ -546,7 +584,8 @@
       "executor": "registered capability-bound executor",
       "confirmation_requirements": "scope-bound and single-use when mutating",
       "rollback_scope": "declared by plan/executor receipt",
-      "audit_evidence": "manual review of orchestrator.py: implements or invokes the canonical authorization boundary"
+      "audit_evidence": "manual review of orchestrator.py: implements or invokes the canonical authorization boundary",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/packs/capability_recommendation.py",
@@ -560,7 +599,8 @@
       "executor": "none",
       "confirmation_requirements": "none",
       "rollback_scope": "none",
-      "audit_evidence": "manual review of capability_recommendation.py: matched calls do not change managed state"
+      "audit_evidence": "manual review of capability_recommendation.py: matched calls do not change managed state",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/packs/external_ingestion.py",
@@ -574,11 +614,12 @@
       "executor": "legacy fixed domain function",
       "confirmation_requirements": "varies; must be replaced by scoped UMP confirmation",
       "rollback_scope": "domain-specific journal or manual recovery",
-      "audit_evidence": "manual review of external_ingestion.py: contains a reachable domain mutation outside the complete central executor path"
+      "audit_evidence": "manual review of external_ingestion.py: contains a reachable domain mutation outside the complete central executor path",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/packs/managed_adapters.py",
-      "disposition": "internal_only",
+      "disposition": "supported_pending_migration",
       "capability": "internal.state.persist",
       "entry_point": "bounded runtime service callback",
       "actor": "declared Personal Agent runtime/scheduler",
@@ -588,7 +629,8 @@
       "executor": "fixed module-owned writer",
       "confirmation_requirements": "no user confirmation; scheduler/service identity required",
       "rollback_scope": "module-owned record/file only",
-      "audit_evidence": "manual review of managed_adapters.py: writes are module-owned bookkeeping and are not a public executor choice"
+      "audit_evidence": "manual review of managed_adapters.py: writes are module-owned bookkeeping and are not a public executor choice; v2C disposition=operator_triggered_legacy, contract_identity=packs_managed_adapters",
+      "contract_identity": "packs_managed_adapters"
     },
     {
       "path": "agent/packs/registry_discovery.py",
@@ -602,7 +644,8 @@
       "executor": "none",
       "confirmation_requirements": "none",
       "rollback_scope": "none",
-      "audit_evidence": "manual review of registry_discovery.py: matched calls do not change managed state"
+      "audit_evidence": "manual review of registry_discovery.py: matched calls do not change managed state",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/packs/remote_fetch.py",
@@ -616,7 +659,8 @@
       "executor": "legacy fixed domain function",
       "confirmation_requirements": "varies; must be replaced by scoped UMP confirmation",
       "rollback_scope": "domain-specific journal or manual recovery",
-      "audit_evidence": "manual review of remote_fetch.py: contains a reachable domain mutation outside the complete central executor path"
+      "audit_evidence": "manual review of remote_fetch.py: contains a reachable domain mutation outside the complete central executor path",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/packs/scaffolding.py",
@@ -630,7 +674,8 @@
       "executor": "legacy fixed domain function",
       "confirmation_requirements": "varies; must be replaced by scoped UMP confirmation",
       "rollback_scope": "domain-specific journal or manual recovery",
-      "audit_evidence": "manual review of scaffolding.py: contains a reachable domain mutation outside the complete central executor path"
+      "audit_evidence": "manual review of scaffolding.py: contains a reachable domain mutation outside the complete central executor path",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/packs/store.py",
@@ -644,7 +689,8 @@
       "executor": "legacy fixed domain function",
       "confirmation_requirements": "varies; must be replaced by scoped UMP confirmation",
       "rollback_scope": "domain-specific journal or manual recovery",
-      "audit_evidence": "manual review of store.py: contains a reachable domain mutation outside the complete central executor path"
+      "audit_evidence": "manual review of store.py: contains a reachable domain mutation outside the complete central executor path",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/perception/collector.py",
@@ -658,11 +704,12 @@
       "executor": "none",
       "confirmation_requirements": "none",
       "rollback_scope": "none",
-      "audit_evidence": "manual review of collector.py: matched calls do not change managed state"
+      "audit_evidence": "manual review of collector.py: matched calls do not change managed state",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/permissions.py",
-      "disposition": "internal_only",
+      "disposition": "supported_pending_migration",
       "capability": "internal.state.persist",
       "entry_point": "bounded runtime service callback",
       "actor": "declared Personal Agent runtime/scheduler",
@@ -672,7 +719,8 @@
       "executor": "fixed module-owned writer",
       "confirmation_requirements": "no user confirmation; scheduler/service identity required",
       "rollback_scope": "module-owned record/file only",
-      "audit_evidence": "manual review of permissions.py: writes are module-owned bookkeeping and are not a public executor choice"
+      "audit_evidence": "manual review of permissions.py: writes are module-owned bookkeeping and are not a public executor choice; v2C disposition=operator_triggered_legacy, contract_identity=permissions",
+      "contract_identity": "permissions"
     },
     {
       "path": "agent/policy.py",
@@ -686,11 +734,12 @@
       "executor": "none",
       "confirmation_requirements": "none",
       "rollback_scope": "none",
-      "audit_evidence": "manual review of policy.py: matched calls do not change managed state"
+      "audit_evidence": "manual review of policy.py: matched calls do not change managed state",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/primary_uninstall_policy.py",
-      "disposition": "internal_only",
+      "disposition": "central_authorized",
       "capability": "internal.state.persist",
       "entry_point": "bounded runtime service callback",
       "actor": "declared Personal Agent runtime/scheduler",
@@ -700,7 +749,8 @@
       "executor": "fixed module-owned writer",
       "confirmation_requirements": "no user confirmation; scheduler/service identity required",
       "rollback_scope": "module-owned record/file only",
-      "audit_evidence": "manual review of primary_uninstall_policy.py: writes are module-owned bookkeeping and are not a public executor choice"
+      "audit_evidence": "manual review of primary_uninstall_policy.py: writes are module-owned bookkeeping and are not a public executor choice; v2C disposition=operator_triggered_central, contract_identity=primary_uninstall_policy",
+      "contract_identity": "primary_uninstall_policy"
     },
     {
       "path": "agent/recovery_contract.py",
@@ -714,7 +764,8 @@
       "executor": "none",
       "confirmation_requirements": "none",
       "rollback_scope": "none",
-      "audit_evidence": "manual review of recovery_contract.py: matched calls do not change managed state"
+      "audit_evidence": "manual review of recovery_contract.py: matched calls do not change managed state",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/runtime_contract.py",
@@ -728,7 +779,8 @@
       "executor": "none",
       "confirmation_requirements": "none",
       "rollback_scope": "none",
-      "audit_evidence": "manual review of runtime_contract.py: matched calls do not change managed state"
+      "audit_evidence": "manual review of runtime_contract.py: matched calls do not change managed state",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/runtime_status.py",
@@ -742,7 +794,8 @@
       "executor": "none",
       "confirmation_requirements": "none",
       "rollback_scope": "none",
-      "audit_evidence": "manual review of runtime_status.py: matched calls do not change managed state"
+      "audit_evidence": "manual review of runtime_status.py: matched calls do not change managed state",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/runtime_truth_service.py",
@@ -756,7 +809,8 @@
       "executor": "none",
       "confirmation_requirements": "none",
       "rollback_scope": "none",
-      "audit_evidence": "manual review of runtime_truth_service.py: matched calls do not change managed state"
+      "audit_evidence": "manual review of runtime_truth_service.py: matched calls do not change managed state",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/scheduled_daily_brief.py",
@@ -770,7 +824,8 @@
       "executor": "fixed module-owned writer",
       "confirmation_requirements": "no user confirmation; scheduler/service identity required",
       "rollback_scope": "module-owned record/file only",
-      "audit_evidence": "manual review of scheduled_daily_brief.py: writes are module-owned bookkeeping and are not a public executor choice"
+      "audit_evidence": "manual review of scheduled_daily_brief.py: writes are module-owned bookkeeping and are not a public executor choice; v2C disposition=scheduled_maintenance, contract_identity=scheduled_daily_brief",
+      "contract_identity": "scheduled_daily_brief"
     },
     {
       "path": "agent/scheduled_model_scout.py",
@@ -784,7 +839,8 @@
       "executor": "fixed module-owned writer",
       "confirmation_requirements": "no user confirmation; scheduler/service identity required",
       "rollback_scope": "module-owned record/file only",
-      "audit_evidence": "manual review of scheduled_model_scout.py: writes are module-owned bookkeeping and are not a public executor choice"
+      "audit_evidence": "manual review of scheduled_model_scout.py: writes are module-owned bookkeeping and are not a public executor choice; v2C disposition=scheduled_maintenance, contract_identity=scheduled_model_scout",
+      "contract_identity": "scheduled_model_scout"
     },
     {
       "path": "agent/secret_store.py",
@@ -798,7 +854,8 @@
       "executor": "legacy fixed domain function",
       "confirmation_requirements": "varies; must be replaced by scoped UMP confirmation",
       "rollback_scope": "domain-specific journal or manual recovery",
-      "audit_evidence": "manual review of secret_store.py: contains a reachable domain mutation outside the complete central executor path"
+      "audit_evidence": "manual review of secret_store.py: contains a reachable domain mutation outside the complete central executor path",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/secrets.py",
@@ -812,7 +869,8 @@
       "executor": "legacy fixed domain function",
       "confirmation_requirements": "varies; must be replaced by scoped UMP confirmation",
       "rollback_scope": "domain-specific journal or manual recovery",
-      "audit_evidence": "manual review of secrets.py: contains a reachable domain mutation outside the complete central executor path"
+      "audit_evidence": "manual review of secrets.py: contains a reachable domain mutation outside the complete central executor path",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/security/redaction.py",
@@ -826,7 +884,8 @@
       "executor": "none",
       "confirmation_requirements": "none",
       "rollback_scope": "none",
-      "audit_evidence": "manual review of redaction.py: matched calls do not change managed state"
+      "audit_evidence": "manual review of redaction.py: matched calls do not change managed state",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/semantic_memory/storage.py",
@@ -840,7 +899,8 @@
       "executor": "legacy fixed domain function",
       "confirmation_requirements": "varies; must be replaced by scoped UMP confirmation",
       "rollback_scope": "domain-specific journal or manual recovery",
-      "audit_evidence": "manual review of storage.py: contains a reachable domain mutation outside the complete central executor path"
+      "audit_evidence": "manual review of storage.py: contains a reachable domain mutation outside the complete central executor path",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/services/managed_local_services.py",
@@ -854,7 +914,8 @@
       "executor": "registered capability-bound executor",
       "confirmation_requirements": "scope-bound and single-use when mutating",
       "rollback_scope": "declared by plan/executor receipt",
-      "audit_evidence": "manual review of managed_local_services.py: implements or invokes the canonical authorization boundary"
+      "audit_evidence": "manual review of managed_local_services.py: implements or invokes the canonical authorization boundary",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/setup_chat_flow.py",
@@ -868,7 +929,8 @@
       "executor": "legacy fixed domain function",
       "confirmation_requirements": "varies; must be replaced by scoped UMP confirmation",
       "rollback_scope": "domain-specific journal or manual recovery",
-      "audit_evidence": "manual review of setup_chat_flow.py: contains a reachable domain mutation outside the complete central executor path"
+      "audit_evidence": "manual review of setup_chat_flow.py: contains a reachable domain mutation outside the complete central executor path",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/setup_wizard.py",
@@ -882,7 +944,8 @@
       "executor": "legacy fixed domain function",
       "confirmation_requirements": "varies; must be replaced by scoped UMP confirmation",
       "rollback_scope": "domain-specific journal or manual recovery",
-      "audit_evidence": "manual review of setup_wizard.py: contains a reachable domain mutation outside the complete central executor path"
+      "audit_evidence": "manual review of setup_wizard.py: contains a reachable domain mutation outside the complete central executor path",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/shell_skill.py",
@@ -896,11 +959,12 @@
       "executor": "registered capability-bound executor",
       "confirmation_requirements": "scope-bound and single-use when mutating",
       "rollback_scope": "declared by plan/executor receipt",
-      "audit_evidence": "manual review of shell_skill.py: implements or invokes the canonical authorization boundary"
+      "audit_evidence": "manual review of shell_skill.py: implements or invokes the canonical authorization boundary",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/skill_governance.py",
-      "disposition": "internal_only",
+      "disposition": "read_only",
       "capability": "internal.state.persist",
       "entry_point": "bounded runtime service callback",
       "actor": "declared Personal Agent runtime/scheduler",
@@ -910,7 +974,8 @@
       "executor": "fixed module-owned writer",
       "confirmation_requirements": "no user confirmation; scheduler/service identity required",
       "rollback_scope": "module-owned record/file only",
-      "audit_evidence": "manual review of skill_governance.py: writes are module-owned bookkeeping and are not a public executor choice"
+      "audit_evidence": "manual review of skill_governance.py: writes are module-owned bookkeeping and are not a public executor choice; v2C disposition=read_only, contract_identity=skill_governance",
+      "contract_identity": "skill_governance"
     },
     {
       "path": "agent/skill_pack_permissions.py",
@@ -924,7 +989,8 @@
       "executor": "registered capability-bound executor",
       "confirmation_requirements": "scope-bound and single-use when mutating",
       "rollback_scope": "declared by plan/executor receipt",
-      "audit_evidence": "manual review of skill_pack_permissions.py: implements or invokes the canonical authorization boundary"
+      "audit_evidence": "manual review of skill_pack_permissions.py: implements or invokes the canonical authorization boundary",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/skills/system_health_analyzer.py",
@@ -938,7 +1004,8 @@
       "executor": "none",
       "confirmation_requirements": "none",
       "rollback_scope": "none",
-      "audit_evidence": "manual review of system_health_analyzer.py: matched calls do not change managed state"
+      "audit_evidence": "manual review of system_health_analyzer.py: matched calls do not change managed state",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/skills/system_health.py",
@@ -952,7 +1019,8 @@
       "executor": "none",
       "confirmation_requirements": "none",
       "rollback_scope": "none",
-      "audit_evidence": "manual review of system_health.py: matched calls do not change managed state"
+      "audit_evidence": "manual review of system_health.py: matched calls do not change managed state",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/startup_checks.py",
@@ -966,7 +1034,8 @@
       "executor": "none",
       "confirmation_requirements": "none",
       "rollback_scope": "none",
-      "audit_evidence": "manual review of startup_checks.py: matched calls do not change managed state"
+      "audit_evidence": "manual review of startup_checks.py: matched calls do not change managed state",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/telegram_bridge.py",
@@ -980,11 +1049,12 @@
       "executor": "none",
       "confirmation_requirements": "none",
       "rollback_scope": "none",
-      "audit_evidence": "manual review of telegram_bridge.py: matched calls do not change managed state"
+      "audit_evidence": "manual review of telegram_bridge.py: matched calls do not change managed state",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/telegram_runtime_state.py",
-      "disposition": "internal_only",
+      "disposition": "supported_pending_migration",
       "capability": "internal.state.persist",
       "entry_point": "bounded runtime service callback",
       "actor": "declared Personal Agent runtime/scheduler",
@@ -994,7 +1064,8 @@
       "executor": "fixed module-owned writer",
       "confirmation_requirements": "no user confirmation; scheduler/service identity required",
       "rollback_scope": "module-owned record/file only",
-      "audit_evidence": "manual review of telegram_runtime_state.py: writes are module-owned bookkeeping and are not a public executor choice"
+      "audit_evidence": "manual review of telegram_runtime_state.py: writes are module-owned bookkeeping and are not a public executor choice; v2C disposition=operator_triggered_legacy, contract_identity=telegram_runtime_state",
+      "contract_identity": "telegram_runtime_state"
     },
     {
       "path": "agent/ux/llm_fixit_wizard.py",
@@ -1008,7 +1079,8 @@
       "executor": "none",
       "confirmation_requirements": "none",
       "rollback_scope": "none",
-      "audit_evidence": "manual review of llm_fixit_wizard.py: matched calls do not change managed state"
+      "audit_evidence": "manual review of llm_fixit_wizard.py: matched calls do not change managed state",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "agent/version.py",
@@ -1022,7 +1094,8 @@
       "executor": "none",
       "confirmation_requirements": "none",
       "rollback_scope": "none",
-      "audit_evidence": "manual review of version.py: matched calls do not change managed state"
+      "audit_evidence": "manual review of version.py: matched calls do not change managed state",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/active_host_enablement_smoke.py",
@@ -1036,7 +1109,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of active_host_enablement_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of active_host_enablement_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/assistant_interaction_barrage.py",
@@ -1050,7 +1124,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of assistant_interaction_barrage.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of assistant_interaction_barrage.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/assistant_real_world_smoke.py",
@@ -1064,7 +1139,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of assistant_real_world_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of assistant_real_world_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/assistant_viability_smoke.py",
@@ -1078,7 +1154,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of assistant_viability_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of assistant_viability_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/backup_restore_proof.py",
@@ -1092,7 +1169,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of backup_restore_proof.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of backup_restore_proof.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/backup_v1_smoke.py",
@@ -1106,7 +1184,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of backup_v1_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of backup_v1_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/browser_ui_survival_smoke.py",
@@ -1120,7 +1199,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of browser_ui_survival_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of browser_ui_survival_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/build_dist.py",
@@ -1134,7 +1214,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of build_dist.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of build_dist.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/bypass_behavior_smoke.py",
@@ -1148,7 +1229,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of bypass_behavior_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of bypass_behavior_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/capability_policy_smoke.py",
@@ -1162,7 +1244,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of capability_policy_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of capability_policy_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/clean_checkout_debian_package_smoke.py",
@@ -1176,7 +1259,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of clean_checkout_debian_package_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of clean_checkout_debian_package_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/clean_checkout_reproducibility_smoke.py",
@@ -1190,7 +1274,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of clean_checkout_reproducibility_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of clean_checkout_reproducibility_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/cleanup_execution_smoke.py",
@@ -1204,7 +1289,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of cleanup_execution_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of cleanup_execution_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/cleanup_preview_smoke.py",
@@ -1218,7 +1304,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of cleanup_preview_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of cleanup_preview_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/communications_migration_smoke.py",
@@ -1232,7 +1319,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of communications_migration_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of communications_migration_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/daily_driver_maturity_audit.py",
@@ -1246,7 +1334,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of daily_driver_maturity_audit.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of daily_driver_maturity_audit.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/daily_driver_smoke.py",
@@ -1260,7 +1349,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of daily_driver_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of daily_driver_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/discovery_quality_smoke.py",
@@ -1274,7 +1364,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of discovery_quality_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of discovery_quality_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/executor_authorization_migration_smoke.py",
@@ -1288,7 +1379,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of executor_authorization_migration_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of executor_authorization_migration_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/executor_registry_smoke.py",
@@ -1302,7 +1394,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of executor_registry_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of executor_registry_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/external_pack_safety_smoke.py",
@@ -1316,7 +1409,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of external_pack_safety_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of external_pack_safety_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/files_git_service_migration_smoke.py",
@@ -1330,7 +1424,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of files_git_service_migration_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of files_git_service_migration_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/final_release_audit.py",
@@ -1344,7 +1439,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of final_release_audit.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of final_release_audit.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/first_run_smoke.py",
@@ -1358,7 +1454,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of first_run_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of first_run_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/full_adversarial_authorization_proof.py",
@@ -1372,7 +1469,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of full_adversarial_authorization_proof.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of full_adversarial_authorization_proof.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/full_pytest_closure_smoke.py",
@@ -1386,7 +1484,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of full_pytest_closure_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of full_pytest_closure_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/full_pytest_failure_triage.py",
@@ -1400,7 +1499,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of full_pytest_failure_triage.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of full_pytest_failure_triage.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/generic_mutation_bypass_smoke.py",
@@ -1414,7 +1514,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of generic_mutation_bypass_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of generic_mutation_bypass_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/hardware_discovery_smoke.py",
@@ -1428,7 +1529,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of hardware_discovery_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of hardware_discovery_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/host_lifecycle_runner_smoke.py",
@@ -1442,7 +1544,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of host_lifecycle_runner_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of host_lifecycle_runner_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/host_lifecycle_systemd_smoke.py",
@@ -1456,7 +1559,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of host_lifecycle_systemd_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of host_lifecycle_systemd_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/installed_product_abuse.py",
@@ -1470,7 +1574,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of installed_product_abuse.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of installed_product_abuse.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/live_model_switch_smoke.py",
@@ -1484,7 +1589,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of live_model_switch_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of live_model_switch_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/live_product_smoke.py",
@@ -1498,7 +1604,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of live_product_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of live_product_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/llm_behavior_eval.py",
@@ -1512,7 +1619,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of llm_behavior_eval.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of llm_behavior_eval.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/memory_lifecycle_smoke.py",
@@ -1526,7 +1634,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of memory_lifecycle_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of memory_lifecycle_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/normal_user_acceptance_smoke.py",
@@ -1540,7 +1649,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of normal_user_acceptance_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of normal_user_acceptance_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/operator_lifecycle_smoke.py",
@@ -1554,7 +1664,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of operator_lifecycle_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of operator_lifecycle_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/pack_route_smoke.py",
@@ -1568,7 +1679,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of pack_route_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of pack_route_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/perf_smoke.py",
@@ -1582,7 +1694,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of perf_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of perf_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/plan_mode_v2_smoke.py",
@@ -1596,7 +1709,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of plan_mode_v2_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of plan_mode_v2_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/primary_uninstall_enablement_smoke.py",
@@ -1610,7 +1724,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of primary_uninstall_enablement_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of primary_uninstall_enablement_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/primary_uninstall_policy_smoke.py",
@@ -1624,7 +1739,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of primary_uninstall_policy_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of primary_uninstall_policy_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/primary_update_enablement_smoke.py",
@@ -1638,7 +1754,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of primary_update_enablement_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of primary_update_enablement_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/prove_core_workflows.py",
@@ -1652,7 +1769,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of prove_core_workflows.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of prove_core_workflows.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/prove_daily_driver_product.py",
@@ -1666,7 +1784,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of prove_daily_driver_product.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of prove_daily_driver_product.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/prove_pre_vm_complete.py",
@@ -1680,7 +1799,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of prove_pre_vm_complete.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of prove_pre_vm_complete.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/prove_ready.py",
@@ -1694,7 +1814,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of prove_ready.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of prove_ready.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/rc1_latency_closure_smoke.py",
@@ -1708,7 +1829,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of rc1_latency_closure_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of rc1_latency_closure_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/real_use_journey_smoke.py",
@@ -1722,7 +1844,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of real_use_journey_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of real_use_journey_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/redact_support_context.py",
@@ -1736,7 +1859,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of redact_support_context.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of redact_support_context.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/reference_pack_workflow_smoke.py",
@@ -1750,7 +1874,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of reference_pack_workflow_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of reference_pack_workflow_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/release_artifact_smoke.py",
@@ -1764,7 +1889,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of release_artifact_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of release_artifact_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/release_gate.py",
@@ -1778,7 +1904,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of release_gate.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of release_gate.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/release_smoke.py",
@@ -1792,7 +1919,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of release_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of release_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/release_validation_extended.py",
@@ -1806,7 +1934,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of release_validation_extended.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of release_validation_extended.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/restart_memory_smoke.py",
@@ -1820,7 +1949,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of restart_memory_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of restart_memory_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/restart_survival_smoke.py",
@@ -1834,7 +1964,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of restart_survival_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of restart_survival_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/restore_execution_smoke.py",
@@ -1848,7 +1979,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of restore_execution_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of restore_execution_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/restore_validator_smoke.py",
@@ -1862,7 +1994,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of restore_validator_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of restore_validator_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/runtime_latency_investigation.py",
@@ -1876,7 +2009,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of runtime_latency_investigation.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of runtime_latency_investigation.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/skill_pack_permission_boundary_smoke.py",
@@ -1890,7 +2024,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of skill_pack_permission_boundary_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of skill_pack_permission_boundary_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/skipped_test_debt_closure_smoke.py",
@@ -1904,7 +2039,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of skipped_test_debt_closure_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of skipped_test_debt_closure_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/split_smoke.py",
@@ -1918,7 +2054,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of split_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of split_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/support_bundle_v2_smoke.py",
@@ -1932,7 +2069,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of support_bundle_v2_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of support_bundle_v2_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/telegram_bridge_smoke.py",
@@ -1946,7 +2084,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of telegram_bridge_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of telegram_bridge_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/telegram_smoke.py",
@@ -1960,7 +2099,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of telegram_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of telegram_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/telegram_transport_diagnostic.py",
@@ -1974,7 +2114,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of telegram_transport_diagnostic.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of telegram_transport_diagnostic.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/uninstall_execution_smoke.py",
@@ -1988,7 +2129,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of uninstall_execution_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of uninstall_execution_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/universal_plan_mode_audit.py",
@@ -2002,7 +2144,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of universal_plan_mode_audit.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of universal_plan_mode_audit.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/universal_plan_mode_smoke.py",
@@ -2016,7 +2159,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of universal_plan_mode_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of universal_plan_mode_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/update_execution_smoke.py",
@@ -2030,7 +2174,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of update_execution_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of update_execution_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/upgrade_compatibility_smoke.py",
@@ -2044,7 +2189,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of upgrade_compatibility_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of upgrade_compatibility_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/v0_2_1_release_closure.py",
@@ -2058,7 +2204,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of v0_2_1_release_closure.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of v0_2_1_release_closure.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/version_consistency_smoke.py",
@@ -2072,7 +2219,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of version_consistency_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of version_consistency_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/vm_proof_smoke.py",
@@ -2086,7 +2234,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of vm_proof_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of vm_proof_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/webui_build_manifest.py",
@@ -2100,7 +2249,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of webui_build_manifest.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of webui_build_manifest.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     },
     {
       "path": "scripts/webui_robustness_smoke.py",
@@ -2114,7 +2264,8 @@
       "executor": "script-owned fixed test/build operations",
       "confirmation_requirements": "explicit command invocation; live-target scripts documented as opt-in",
       "rollback_scope": "temporary directory cleanup or script-documented restoration",
-      "audit_evidence": "manual review of webui_robustness_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface"
+      "audit_evidence": "manual review of webui_robustness_smoke.py: standalone proof/build tool, not a Web/Telegram/assistant mutation surface",
+      "contract_identity": "not_applicable"
     }
   ]
 }

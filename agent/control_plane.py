@@ -15,6 +15,8 @@ import threading
 from typing import Any
 import urllib.parse
 
+from agent.internal_writer_authority import reject_public_internal_authority_claim
+
 from agent.config import Config, code_root_path, load_config
 
 
@@ -702,6 +704,9 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
             self._last_json_error = "invalid_json_body"
             return {}
         if isinstance(parsed, dict):
+            if reject_public_internal_authority_claim(parsed):
+                self._last_json_error = "internal_writer_authority_claim_rejected"
+                return {}
             return parsed
         self._last_json_error = "invalid_json_body"
         return {}
@@ -717,6 +722,13 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
         return self._read_json()
 
     def _json_request_error_response(self, *, path: str, json_error: str) -> tuple[int, dict[str, Any]]:
+        if json_error == "internal_writer_authority_claim_rejected":
+            return 400, {
+                "ok": False,
+                "error": "internal_writer_authority_claim_rejected",
+                "message": "Serialized requests cannot claim trusted internal-writer authority.",
+                "path": path,
+            }
         if json_error == "content_type_not_json":
             return 400, {
                 "ok": False,

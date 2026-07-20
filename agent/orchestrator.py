@@ -682,7 +682,13 @@ class Orchestrator:
         self._managed_action_journal_store = PersistentManagedActionJournalStore(
             Path(db.db_path).expanduser().resolve().parent / "managed_actions.db"
         )
-        self._executor_registry = ExecutorRegistry(Path(db.db_path).expanduser().resolve().parent / "executor_registry_journal.jsonl")
+        state_root = Path(db.db_path).expanduser().resolve().parent
+        executor_journal = state_root / "executor_registry_journal.jsonl"
+        self._executor_registry = ExecutorRegistry(
+            executor_journal,
+            confirmation_store_path=state_root / "confirmation_transactions.sqlite3",
+            legacy_confirmation_store_paths=[executor_journal.with_name(f"{executor_journal.name}.confirmations.sqlite3")],
+        )
         self._mutation_plan_store = MutationPlanStore(Path(db.db_path).expanduser().resolve().parent / "mutation_plans_v1.json")
         self._executor_registry.register(
             ExecutorSpec(
@@ -16899,6 +16905,11 @@ class Orchestrator:
 
     def _backup_v1_sources_snapshot(self) -> dict[str, Any]:
         state_root = Path(self.db.db_path).expanduser().resolve().parent
+        internal_writer_receipts = sorted(
+            str(path.resolve())
+            for path in state_root.rglob("*.internal-writer.sqlite3")
+            if path.is_file() and not path.is_symlink()
+        )[:64]
         try:
             db_size = Path(self.db.db_path).expanduser().resolve().stat().st_size
         except OSError:
@@ -16946,6 +16957,12 @@ class Orchestrator:
                 "state_root": str(state_root),
                 "search_runtime_config": str(state_root / "search_runtime_config.json"),
                 "executor_journal": str(state_root / "executor_registry_journal.jsonl"),
+            },
+            "authority_state": {
+                "state_root": str(state_root),
+                "confirmation_transactions": str(state_root / "confirmation_transactions.sqlite3"),
+                "internal_writer_receipts": internal_writer_receipts,
+                "mode": "sqlite_online_backup",
             },
         }
 

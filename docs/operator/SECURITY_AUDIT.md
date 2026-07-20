@@ -182,3 +182,16 @@ and foreign-code execution remains denied.
 Universal authorization is not closed. Sixteen runtime files retain an
 explicit release-blocking migration disposition; the route inventory reports
 47 legacy mutations and seven legacy Plan/apply paths.
+
+## Audit v2C transactional and internal authority
+
+Validated confirmation is durably reserved with `BEGIN IMMEDIATE`, then marked
+executing before an executor can mutate. Terminal results are persisted before
+the append-only receipt. A crash before execution is fail-closed; a crash after
+the execution boundary is indeterminate and cannot be retried automatically.
+
+Internal writer authority is nonce-backed and in-process only, with exact
+writer/capability/operation/resource/target/trigger/mode binding and a durable
+redacted journal. Public structured boundaries reject claimed internal
+identities. This does not defend against malicious Python already in the
+process and is not process isolation.

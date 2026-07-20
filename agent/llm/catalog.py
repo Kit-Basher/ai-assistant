@@ -12,6 +12,8 @@ import urllib.request
 
 from agent.llm.capabilities import capability_list_from_inference, infer_capabilities_from_catalog
 from agent.llm.known_model_metadata import known_model_metadata
+from agent.capability_policy import stable_fingerprint
+from agent.internal_writer_authority import perform_registered_internal_write
 
 
 _CATALOG_SCHEMA_VERSION = 1
@@ -576,20 +578,33 @@ class CatalogStore:
         return normalized
 
     def _write(self, normalized: dict[str, Any]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_path = tempfile.mkstemp(prefix=f".{self.path.name}.", suffix=".tmp", dir=str(self.path.parent))
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(json.dumps(normalized, ensure_ascii=True, indent=2, sort_keys=True) + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(tmp_path, self.path)
-        finally:
+        def _replace() -> None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp_path = tempfile.mkstemp(prefix=f".{self.path.name}.", suffix=".tmp", dir=str(self.path.parent))
             try:
-                if os.path.exists(tmp_path):
-                    os.unlink(tmp_path)
-            except OSError:
-                pass
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    handle.write(json.dumps(normalized, ensure_ascii=True, indent=2, sort_keys=True) + "\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(tmp_path, self.path)
+            finally:
+                try:
+                    if os.path.exists(tmp_path):
+                        os.unlink(tmp_path)
+                except OSError:
+                    pass
+
+        state_hash = stable_fingerprint(normalized)
+        perform_registered_internal_write(
+            writer_id="llm_catalog",
+            operation="replace_catalog_cache",
+            resource_type="provider_catalog_cache",
+            target_scope="state:llm_catalog",
+            arguments={"state_hash": state_hash, "provider_count": len(normalized.get("providers") or {})},
+            callback=_replace,
+            journal_path=self.path.with_name(f"{self.path.name}.internal-writer.sqlite3"),
+            operation_id=f"catalog:{state_hash}",
+        )
 
     def save(self, state: dict[str, Any]) -> dict[str, Any]:
         normalized = self._normalize(state if isinstance(state, dict) else {})

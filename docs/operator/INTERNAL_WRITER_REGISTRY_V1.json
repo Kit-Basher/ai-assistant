@@ -1,0 +1,974 @@
+{
+  "schema": "personal-agent.internal-writer-registry.v1",
+  "source_checkpoint": "a59292274df04fde3b9a3d48f90b6cd7c92b71c4",
+  "threat_model": "Trusted in-process factories only; no protection is claimed against malicious Python already executing in the process.",
+  "writers": [
+    {
+      "writer_id": "audit_log",
+      "module": "agent.audit_log",
+      "disposition": "trusted_bookkeeping",
+      "capability_id": "internal.audit.append",
+      "allowed_operations": [
+        "append_event"
+      ],
+      "resource_types": [
+        "audit_event"
+      ],
+      "target_scopes": [
+        "state:audit_log"
+      ],
+      "allowed_triggers": [
+        "runtime"
+      ],
+      "argument_schema": {
+        "type": "object",
+        "additional_properties": false,
+        "max_properties": 16,
+        "max_string_bytes": 1024,
+        "max_collection_items": 100
+      },
+      "modes": [
+        "safe",
+        "controlled"
+      ],
+      "audit": {
+        "required": true,
+        "redacted": true,
+        "receipt_required": true
+      },
+      "retry": {
+        "policy": "at_most_once",
+        "durable_operation_id_required": true
+      },
+      "evidence": "agent/audit_log.py reviewed in Audit v2C"
+    },
+    {
+      "writer_id": "control_plane",
+      "module": "agent.control_plane",
+      "disposition": "operator_triggered_legacy",
+      "capability_id": "legacy.control_plane.write",
+      "allowed_operations": [
+        "put_document",
+        "append_event",
+        "task_mutation"
+      ],
+      "resource_types": [
+        "control_plane_document"
+      ],
+      "target_scopes": [
+        "state:control_plane"
+      ],
+      "allowed_triggers": [
+        "operator"
+      ],
+      "argument_schema": {
+        "type": "object",
+        "additional_properties": false,
+        "max_properties": 16,
+        "max_string_bytes": 1024,
+        "max_collection_items": 100
+      },
+      "modes": [
+        "controlled"
+      ],
+      "audit": {
+        "required": true,
+        "redacted": true,
+        "receipt_required": true
+      },
+      "retry": {
+        "policy": "no_automatic_retry",
+        "durable_operation_id_required": false
+      },
+      "evidence": "agent/control_plane.py reviewed in Audit v2C"
+    },
+    {
+      "writer_id": "llm_action_ledger",
+      "module": "agent.llm.action_ledger",
+      "disposition": "trusted_bookkeeping",
+      "capability_id": "internal.llm.action_ledger",
+      "allowed_operations": [
+        "append_action",
+        "prune"
+      ],
+      "resource_types": [
+        "action_ledger"
+      ],
+      "target_scopes": [
+        "state:llm_action_ledger"
+      ],
+      "allowed_triggers": [
+        "runtime",
+        "scheduler"
+      ],
+      "argument_schema": {
+        "type": "object",
+        "additional_properties": false,
+        "max_properties": 16,
+        "max_string_bytes": 1024,
+        "max_collection_items": 100
+      },
+      "modes": [
+        "safe",
+        "controlled"
+      ],
+      "audit": {
+        "required": true,
+        "redacted": true,
+        "receipt_required": true
+      },
+      "retry": {
+        "policy": "idempotent_operation_id",
+        "durable_operation_id_required": true
+      },
+      "evidence": "agent/llm/action_ledger.py reviewed in Audit v2C"
+    },
+    {
+      "writer_id": "llm_autopilot_safety",
+      "module": "agent.llm.autopilot_safety",
+      "disposition": "scheduled_maintenance",
+      "capability_id": "internal.llm.autopilot_safety",
+      "allowed_operations": [
+        "update_safety_state"
+      ],
+      "resource_types": [
+        "autopilot_safety_state"
+      ],
+      "target_scopes": [
+        "state:autopilot_safety"
+      ],
+      "allowed_triggers": [
+        "scheduler",
+        "runtime"
+      ],
+      "argument_schema": {
+        "type": "object",
+        "additional_properties": false,
+        "max_properties": 16,
+        "max_string_bytes": 1024,
+        "max_collection_items": 100
+      },
+      "modes": [
+        "safe",
+        "controlled"
+      ],
+      "audit": {
+        "required": true,
+        "redacted": true,
+        "receipt_required": true
+      },
+      "retry": {
+        "policy": "idempotent_operation_id",
+        "durable_operation_id_required": true
+      },
+      "evidence": "agent/llm/autopilot_safety.py reviewed in Audit v2C"
+    },
+    {
+      "writer_id": "llm_catalog",
+      "module": "agent.llm.catalog",
+      "disposition": "trusted_bookkeeping",
+      "capability_id": "internal.llm.catalog_cache",
+      "allowed_operations": [
+        "replace_catalog_cache"
+      ],
+      "resource_types": [
+        "provider_catalog_cache"
+      ],
+      "target_scopes": [
+        "state:llm_catalog"
+      ],
+      "allowed_triggers": [
+        "runtime",
+        "scheduler"
+      ],
+      "argument_schema": {
+        "type": "object",
+        "additional_properties": false,
+        "max_properties": 16,
+        "max_string_bytes": 1024,
+        "max_collection_items": 100
+      },
+      "modes": [
+        "safe",
+        "controlled"
+      ],
+      "audit": {
+        "required": true,
+        "redacted": true,
+        "receipt_required": true
+      },
+      "retry": {
+        "policy": "idempotent_replace",
+        "durable_operation_id_required": true
+      },
+      "evidence": "agent/llm/catalog.py reviewed in Audit v2C"
+    },
+    {
+      "writer_id": "llm_health",
+      "module": "agent.llm.health",
+      "disposition": "trusted_bookkeeping",
+      "capability_id": "internal.llm.health_state",
+      "allowed_operations": [
+        "record_probe",
+        "replace_health_state"
+      ],
+      "resource_types": [
+        "health_state"
+      ],
+      "target_scopes": [
+        "state:llm_health"
+      ],
+      "allowed_triggers": [
+        "runtime",
+        "scheduler"
+      ],
+      "argument_schema": {
+        "type": "object",
+        "additional_properties": false,
+        "max_properties": 16,
+        "max_string_bytes": 1024,
+        "max_collection_items": 100
+      },
+      "modes": [
+        "safe",
+        "controlled"
+      ],
+      "audit": {
+        "required": true,
+        "redacted": true,
+        "receipt_required": true
+      },
+      "retry": {
+        "policy": "idempotent_operation_id",
+        "durable_operation_id_required": true
+      },
+      "evidence": "agent/llm/health.py reviewed in Audit v2C"
+    },
+    {
+      "writer_id": "llm_model_discovery_policy",
+      "module": "agent.llm.model_discovery_policy",
+      "disposition": "mixed_internal_and_public_pending",
+      "capability_id": "internal.llm.discovery_policy_cache",
+      "allowed_operations": [
+        "persist_effective_policy"
+      ],
+      "resource_types": [
+        "model_discovery_policy"
+      ],
+      "target_scopes": [
+        "state:model_discovery_policy"
+      ],
+      "allowed_triggers": [
+        "runtime"
+      ],
+      "argument_schema": {
+        "type": "object",
+        "additional_properties": false,
+        "max_properties": 16,
+        "max_string_bytes": 1024,
+        "max_collection_items": 100
+      },
+      "modes": [
+        "safe",
+        "controlled"
+      ],
+      "audit": {
+        "required": true,
+        "redacted": true,
+        "receipt_required": true
+      },
+      "retry": {
+        "policy": "idempotent_replace",
+        "durable_operation_id_required": true
+      },
+      "evidence": "agent/llm/model_discovery_policy.py reviewed in Audit v2C"
+    },
+    {
+      "writer_id": "llm_notifications",
+      "module": "agent.llm.notifications",
+      "disposition": "mixed_internal_and_public_pending",
+      "capability_id": "internal.notification.bookkeeping",
+      "allowed_operations": [
+        "enqueue_internal",
+        "record_delivery"
+      ],
+      "resource_types": [
+        "notification_state"
+      ],
+      "target_scopes": [
+        "state:notifications"
+      ],
+      "allowed_triggers": [
+        "runtime",
+        "scheduler"
+      ],
+      "argument_schema": {
+        "type": "object",
+        "additional_properties": false,
+        "max_properties": 16,
+        "max_string_bytes": 1024,
+        "max_collection_items": 100
+      },
+      "modes": [
+        "safe",
+        "controlled"
+      ],
+      "audit": {
+        "required": true,
+        "redacted": true,
+        "receipt_required": true
+      },
+      "retry": {
+        "policy": "idempotent_operation_id",
+        "durable_operation_id_required": true
+      },
+      "evidence": "agent/llm/notifications.py reviewed in Audit v2C"
+    },
+    {
+      "writer_id": "llm_registry",
+      "module": "agent.llm.registry",
+      "disposition": "operator_triggered_legacy",
+      "capability_id": "legacy.provider.registry_write",
+      "allowed_operations": [
+        "save_registry"
+      ],
+      "resource_types": [
+        "provider_registry"
+      ],
+      "target_scopes": [
+        "config:llm_registry"
+      ],
+      "allowed_triggers": [
+        "operator"
+      ],
+      "argument_schema": {
+        "type": "object",
+        "additional_properties": false,
+        "max_properties": 16,
+        "max_string_bytes": 1024,
+        "max_collection_items": 100
+      },
+      "modes": [
+        "controlled"
+      ],
+      "audit": {
+        "required": true,
+        "redacted": true,
+        "receipt_required": true
+      },
+      "retry": {
+        "policy": "no_automatic_retry",
+        "durable_operation_id_required": false
+      },
+      "evidence": "agent/llm/registry.py reviewed in Audit v2C"
+    },
+    {
+      "writer_id": "llm_registry_txn",
+      "module": "agent.llm.registry_txn",
+      "disposition": "operator_triggered_legacy",
+      "capability_id": "legacy.provider.registry_transaction",
+      "allowed_operations": [
+        "snapshot",
+        "apply_with_rollback"
+      ],
+      "resource_types": [
+        "provider_registry",
+        "registry_snapshot"
+      ],
+      "target_scopes": [
+        "config:llm_registry",
+        "state:registry_snapshots"
+      ],
+      "allowed_triggers": [
+        "operator"
+      ],
+      "argument_schema": {
+        "type": "object",
+        "additional_properties": false,
+        "max_properties": 16,
+        "max_string_bytes": 1024,
+        "max_collection_items": 100
+      },
+      "modes": [
+        "controlled"
+      ],
+      "audit": {
+        "required": true,
+        "redacted": true,
+        "receipt_required": true
+      },
+      "retry": {
+        "policy": "no_automatic_retry",
+        "durable_operation_id_required": false
+      },
+      "evidence": "agent/llm/registry_txn.py reviewed in Audit v2C"
+    },
+    {
+      "writer_id": "llm_usage_stats",
+      "module": "agent.llm.usage_stats",
+      "disposition": "trusted_bookkeeping",
+      "capability_id": "internal.llm.usage_telemetry",
+      "allowed_operations": [
+        "record_usage"
+      ],
+      "resource_types": [
+        "usage_telemetry"
+      ],
+      "target_scopes": [
+        "state:usage_stats"
+      ],
+      "allowed_triggers": [
+        "runtime"
+      ],
+      "argument_schema": {
+        "type": "object",
+        "additional_properties": false,
+        "max_properties": 16,
+        "max_string_bytes": 1024,
+        "max_collection_items": 100
+      },
+      "modes": [
+        "safe",
+        "controlled"
+      ],
+      "audit": {
+        "required": true,
+        "redacted": true,
+        "receipt_required": true
+      },
+      "retry": {
+        "policy": "idempotent_operation_id",
+        "durable_operation_id_required": true
+      },
+      "evidence": "agent/llm/usage_stats.py reviewed in Audit v2C"
+    },
+    {
+      "writer_id": "logging_utils",
+      "module": "agent.logging_utils",
+      "disposition": "trusted_bookkeeping",
+      "capability_id": "internal.logging.append",
+      "allowed_operations": [
+        "append_log"
+      ],
+      "resource_types": [
+        "redacted_log"
+      ],
+      "target_scopes": [
+        "state:logs"
+      ],
+      "allowed_triggers": [
+        "runtime",
+        "scheduler"
+      ],
+      "argument_schema": {
+        "type": "object",
+        "additional_properties": false,
+        "max_properties": 16,
+        "max_string_bytes": 1024,
+        "max_collection_items": 100
+      },
+      "modes": [
+        "safe",
+        "controlled"
+      ],
+      "audit": {
+        "required": true,
+        "redacted": true,
+        "receipt_required": true
+      },
+      "retry": {
+        "policy": "at_most_once",
+        "durable_operation_id_required": true
+      },
+      "evidence": "agent/logging_utils.py reviewed in Audit v2C"
+    },
+    {
+      "writer_id": "model_scout",
+      "module": "agent.model_scout",
+      "disposition": "mixed_internal_and_public_pending",
+      "capability_id": "internal.model_scout.state",
+      "allowed_operations": [
+        "persist_scout_state"
+      ],
+      "resource_types": [
+        "model_scout_state"
+      ],
+      "target_scopes": [
+        "state:model_scout"
+      ],
+      "allowed_triggers": [
+        "scheduler",
+        "runtime"
+      ],
+      "argument_schema": {
+        "type": "object",
+        "additional_properties": false,
+        "max_properties": 16,
+        "max_string_bytes": 1024,
+        "max_collection_items": 100
+      },
+      "modes": [
+        "safe",
+        "controlled"
+      ],
+      "audit": {
+        "required": true,
+        "redacted": true,
+        "receipt_required": true
+      },
+      "retry": {
+        "policy": "idempotent_operation_id",
+        "durable_operation_id_required": true
+      },
+      "evidence": "agent/model_scout.py contains scheduled persistence plus user-triggered suggestion status changes; only the scheduler entry point is internally authorized, while public changes remain legacy pending"
+    },
+    {
+      "writer_id": "model_watch",
+      "module": "agent.model_watch",
+      "disposition": "mixed_internal_and_public_pending",
+      "capability_id": "internal.model_watch.state",
+      "allowed_operations": [
+        "persist_watch_state",
+        "persist_provider_catalog"
+      ],
+      "resource_types": [
+        "model_watch_state",
+        "provider_catalog_cache"
+      ],
+      "target_scopes": [
+        "state:model_watch"
+      ],
+      "allowed_triggers": [
+        "scheduler",
+        "runtime"
+      ],
+      "argument_schema": {
+        "type": "object",
+        "additional_properties": false,
+        "max_properties": 16,
+        "max_string_bytes": 1024,
+        "max_collection_items": 100
+      },
+      "modes": [
+        "safe",
+        "controlled"
+      ],
+      "audit": {
+        "required": true,
+        "redacted": true,
+        "receipt_required": true
+      },
+      "retry": {
+        "policy": "idempotent_operation_id",
+        "durable_operation_id_required": true
+      },
+      "evidence": "agent/model_watch.py reviewed in Audit v2C"
+    },
+    {
+      "writer_id": "model_watch_catalog",
+      "module": "agent.model_watch_catalog",
+      "disposition": "trusted_bookkeeping",
+      "capability_id": "internal.model_watch.catalog_cache",
+      "allowed_operations": [
+        "replace_snapshot"
+      ],
+      "resource_types": [
+        "model_watch_catalog"
+      ],
+      "target_scopes": [
+        "state:model_watch_catalog"
+      ],
+      "allowed_triggers": [
+        "scheduler",
+        "runtime"
+      ],
+      "argument_schema": {
+        "type": "object",
+        "additional_properties": false,
+        "max_properties": 16,
+        "max_string_bytes": 1024,
+        "max_collection_items": 100
+      },
+      "modes": [
+        "safe",
+        "controlled"
+      ],
+      "audit": {
+        "required": true,
+        "redacted": true,
+        "receipt_required": true
+      },
+      "retry": {
+        "policy": "idempotent_replace",
+        "durable_operation_id_required": true
+      },
+      "evidence": "agent/model_watch_catalog.py reviewed in Audit v2C"
+    },
+    {
+      "writer_id": "model_watch_hf",
+      "module": "agent.model_watch_hf",
+      "disposition": "mixed_internal_and_public_pending",
+      "capability_id": "internal.model_watch.hf_state",
+      "allowed_operations": [
+        "persist_scan_state"
+      ],
+      "resource_types": [
+        "hf_watch_state"
+      ],
+      "target_scopes": [
+        "state:model_watch_hf"
+      ],
+      "allowed_triggers": [
+        "scheduler",
+        "runtime"
+      ],
+      "argument_schema": {
+        "type": "object",
+        "additional_properties": false,
+        "max_properties": 16,
+        "max_string_bytes": 1024,
+        "max_collection_items": 100
+      },
+      "modes": [
+        "safe",
+        "controlled"
+      ],
+      "audit": {
+        "required": true,
+        "redacted": true,
+        "receipt_required": true
+      },
+      "retry": {
+        "policy": "idempotent_operation_id",
+        "durable_operation_id_required": true
+      },
+      "evidence": "agent/model_watch_hf.py reviewed in Audit v2C"
+    },
+    {
+      "writer_id": "modelops_seen_state",
+      "module": "agent.modelops.seen_state",
+      "disposition": "trusted_bookkeeping",
+      "capability_id": "internal.modelops.seen_cache",
+      "allowed_operations": [
+        "replace_seen_ids"
+      ],
+      "resource_types": [
+        "model_seen_cache"
+      ],
+      "target_scopes": [
+        "state:modelops_seen"
+      ],
+      "allowed_triggers": [
+        "runtime"
+      ],
+      "argument_schema": {
+        "type": "object",
+        "additional_properties": false,
+        "max_properties": 16,
+        "max_string_bytes": 1024,
+        "max_collection_items": 100
+      },
+      "modes": [
+        "safe",
+        "controlled"
+      ],
+      "audit": {
+        "required": true,
+        "redacted": true,
+        "receipt_required": true
+      },
+      "retry": {
+        "policy": "idempotent_replace",
+        "durable_operation_id_required": true
+      },
+      "evidence": "agent/modelops/seen_state.py reviewed in Audit v2C"
+    },
+    {
+      "writer_id": "packs_managed_adapters",
+      "module": "agent.packs.managed_adapters",
+      "disposition": "operator_triggered_legacy",
+      "capability_id": "legacy.pack.adapter_grant",
+      "allowed_operations": [
+        "record_grant",
+        "rollback_grant"
+      ],
+      "resource_types": [
+        "pack_adapter_grants"
+      ],
+      "target_scopes": [
+        "state:pack_adapter_grants"
+      ],
+      "allowed_triggers": [
+        "operator"
+      ],
+      "argument_schema": {
+        "type": "object",
+        "additional_properties": false,
+        "max_properties": 16,
+        "max_string_bytes": 1024,
+        "max_collection_items": 100
+      },
+      "modes": [
+        "controlled"
+      ],
+      "audit": {
+        "required": true,
+        "redacted": true,
+        "receipt_required": true
+      },
+      "retry": {
+        "policy": "no_automatic_retry",
+        "durable_operation_id_required": false
+      },
+      "evidence": "agent/packs/managed_adapters.py reviewed in Audit v2C"
+    },
+    {
+      "writer_id": "permissions",
+      "module": "agent.permissions",
+      "disposition": "operator_triggered_legacy",
+      "capability_id": "legacy.permissions.write",
+      "allowed_operations": [
+        "save_permissions"
+      ],
+      "resource_types": [
+        "permissions_document"
+      ],
+      "target_scopes": [
+        "config:permissions"
+      ],
+      "allowed_triggers": [
+        "operator"
+      ],
+      "argument_schema": {
+        "type": "object",
+        "additional_properties": false,
+        "max_properties": 16,
+        "max_string_bytes": 1024,
+        "max_collection_items": 100
+      },
+      "modes": [
+        "controlled"
+      ],
+      "audit": {
+        "required": true,
+        "redacted": true,
+        "receipt_required": true
+      },
+      "retry": {
+        "policy": "no_automatic_retry",
+        "durable_operation_id_required": false
+      },
+      "evidence": "agent/permissions.py reviewed in Audit v2C"
+    },
+    {
+      "writer_id": "primary_uninstall_policy",
+      "module": "agent.primary_uninstall_policy",
+      "disposition": "operator_triggered_central",
+      "capability_id": "system.uninstall.activation",
+      "allowed_operations": [
+        "enable_marker",
+        "disable_marker",
+        "consume_marker",
+        "repair_permissions"
+      ],
+      "resource_types": [
+        "uninstall_activation_marker",
+        "installation_identity"
+      ],
+      "target_scopes": [
+        "state:uninstall_policy"
+      ],
+      "allowed_triggers": [
+        "operator"
+      ],
+      "argument_schema": {
+        "type": "object",
+        "additional_properties": false,
+        "max_properties": 16,
+        "max_string_bytes": 1024,
+        "max_collection_items": 100
+      },
+      "modes": [
+        "controlled"
+      ],
+      "audit": {
+        "required": true,
+        "redacted": true,
+        "receipt_required": true
+      },
+      "retry": {
+        "policy": "no_automatic_retry",
+        "durable_operation_id_required": false
+      },
+      "evidence": "agent/primary_uninstall_policy.py reviewed in Audit v2C"
+    },
+    {
+      "writer_id": "scheduled_daily_brief",
+      "module": "agent.scheduled_daily_brief",
+      "disposition": "scheduled_maintenance",
+      "capability_id": "internal.schedule.daily_brief",
+      "allowed_operations": [
+        "deliver_brief",
+        "record_last_sent"
+      ],
+      "resource_types": [
+        "scheduled_brief_delivery",
+        "preference_state"
+      ],
+      "target_scopes": [
+        "state:daily_brief",
+        "transport:telegram_configured_destination"
+      ],
+      "allowed_triggers": [
+        "scheduler"
+      ],
+      "argument_schema": {
+        "type": "object",
+        "additional_properties": false,
+        "max_properties": 16,
+        "max_string_bytes": 1024,
+        "max_collection_items": 100
+      },
+      "modes": [
+        "safe",
+        "controlled"
+      ],
+      "audit": {
+        "required": true,
+        "redacted": true,
+        "receipt_required": true
+      },
+      "retry": {
+        "policy": "durable_operation_id",
+        "durable_operation_id_required": true
+      },
+      "evidence": "agent/scheduled_daily_brief.py reviewed in Audit v2C"
+    },
+    {
+      "writer_id": "scheduled_model_scout",
+      "module": "agent.scheduled_model_scout",
+      "disposition": "scheduled_maintenance",
+      "capability_id": "internal.schedule.model_scout",
+      "allowed_operations": [
+        "run_scout",
+        "deliver_scout_notice"
+      ],
+      "resource_types": [
+        "model_scout_state",
+        "scheduled_notification"
+      ],
+      "target_scopes": [
+        "state:model_scout",
+        "transport:telegram_configured_destination"
+      ],
+      "allowed_triggers": [
+        "scheduler"
+      ],
+      "argument_schema": {
+        "type": "object",
+        "additional_properties": false,
+        "max_properties": 16,
+        "max_string_bytes": 1024,
+        "max_collection_items": 100
+      },
+      "modes": [
+        "safe",
+        "controlled"
+      ],
+      "audit": {
+        "required": true,
+        "redacted": true,
+        "receipt_required": true
+      },
+      "retry": {
+        "policy": "durable_operation_id",
+        "durable_operation_id_required": true
+      },
+      "evidence": "agent/scheduled_model_scout.py reviewed in Audit v2C"
+    },
+    {
+      "writer_id": "skill_governance",
+      "module": "agent.skill_governance",
+      "disposition": "read_only",
+      "capability_id": "read.skill_governance.evaluate",
+      "allowed_operations": [
+        "evaluate"
+      ],
+      "resource_types": [
+        "skill_manifest"
+      ],
+      "target_scopes": [
+        "memory:governance_decision"
+      ],
+      "allowed_triggers": [
+        "runtime"
+      ],
+      "argument_schema": {
+        "type": "object",
+        "additional_properties": false,
+        "max_properties": 16,
+        "max_string_bytes": 1024,
+        "max_collection_items": 100
+      },
+      "modes": [
+        "safe",
+        "controlled"
+      ],
+      "audit": {
+        "required": true,
+        "redacted": true,
+        "receipt_required": false
+      },
+      "retry": {
+        "policy": "no_write",
+        "durable_operation_id_required": false
+      },
+      "evidence": "agent/skill_governance.py reviewed in Audit v2C"
+    },
+    {
+      "writer_id": "telegram_runtime_state",
+      "module": "agent.telegram_runtime_state",
+      "disposition": "operator_triggered_legacy",
+      "capability_id": "legacy.telegram.lifecycle",
+      "allowed_operations": [
+        "clear_lock",
+        "write_enablement",
+        "service_action",
+        "rollback"
+      ],
+      "resource_types": [
+        "telegram_dropin",
+        "telegram_lock",
+        "user_service"
+      ],
+      "target_scopes": [
+        "config:telegram_dropin",
+        "state:telegram_locks",
+        "service:telegram"
+      ],
+      "allowed_triggers": [
+        "operator"
+      ],
+      "argument_schema": {
+        "type": "object",
+        "additional_properties": false,
+        "max_properties": 16,
+        "max_string_bytes": 1024,
+        "max_collection_items": 100
+      },
+      "modes": [
+        "controlled"
+      ],
+      "audit": {
+        "required": true,
+        "redacted": true,
+        "receipt_required": true
+      },
+      "retry": {
+        "policy": "no_automatic_retry",
+        "durable_operation_id_required": false
+      },
+      "evidence": "agent/telegram_runtime_state.py reviewed in Audit v2C"
+    }
+  ]
+}

@@ -14,6 +14,7 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from agent.capability_policy import POLICY_SCHEMA_VERSION, stable_fingerprint
+from agent.internal_writer_authority import reject_public_internal_authority_claim
 from agent.mutation_plan import (
     MUTATION_PLAN_STATUS_PENDING,
     MutationPlanStore,
@@ -458,6 +459,8 @@ class SkillPackInvocationBroker:
         self._confirmation_lock = threading.RLock()
 
     def inspect(self, *, identity: SkillPackIdentity, manifest: dict[str, Any], permission_id: str, target: dict[str, Any]) -> dict[str, Any]:
+        if reject_public_internal_authority_claim(target):
+            return self._blocked(identity, permission_id, "internal_writer_authority_claim_rejected")
         allowed, reason, definition, _grant = self._authorize(identity=identity, manifest=manifest, permission_id=permission_id, target=target)
         if not allowed:
             return {"ok": False, "mutated": False, "reason_code": reason, "skill_pack": identity.to_dict(), "permission_id": permission_id}
@@ -482,6 +485,8 @@ class SkillPackInvocationBroker:
         This method deliberately never executes.  ``confirm_action`` is the
         only broker path that can dispatch a managed skill-pack mutation.
         """
+        if reject_public_internal_authority_claim({"target": target, "action": action_payload}):
+            return self._blocked(identity, permission_id, "internal_writer_authority_claim_rejected")
         allowed, reason, definition, grant = self._authorize(identity=identity, manifest=manifest, permission_id=permission_id, target=target)
         if not allowed:
             return {"ok": False, "mutated": False, "reason_code": reason, "skill_pack": identity.to_dict(), "permission_id": permission_id}

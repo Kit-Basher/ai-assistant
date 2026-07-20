@@ -297,3 +297,14 @@ dispatch. External packs still receive zero grants by default.
 Capability Policy is not yet the sole authority for all public mutations:
 47 legacy routes and seven legacy Plan/apply routes remain. Their per-file
 dispositions are recorded in `MUTATION_FILE_CLASSIFICATIONS_V2B.json`.
+
+## Audit v2C authority separation
+
+Public capability authorization and internal bookkeeping are separate
+contracts. Internal authority invokes only an allowlisted module callback and
+symbolic resource scope; it cannot carry a public executor or caller-selected
+capability. Operator-triggered and mixed writers were not relabelled internal.
+
+Durable confirmation reservation follows Plan/confirmation validation and the
+policy decision, and precedes executor entry. It does not migrate the 47 legacy
+or seven Plan-gated public groups.

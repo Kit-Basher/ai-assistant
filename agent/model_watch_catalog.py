@@ -8,6 +8,9 @@ import re
 import tempfile
 from typing import Any
 
+from .capability_policy import stable_fingerprint
+from .internal_writer_authority import perform_registered_internal_write
+
 
 CATALOG_SCHEMA_VERSION = 1
 _PARAMS_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*[bB]")
@@ -245,20 +248,33 @@ def snapshot_path_for_config(config: Any) -> Path:
 
 def write_snapshot_atomic(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
     normalized = normalize_snapshot(payload if isinstance(payload, dict) else {})
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(normalized, ensure_ascii=True, indent=2, sort_keys=True) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp_path, path)
-    finally:
+    def _write() -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
         try:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-        except OSError:
-            pass
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(normalized, ensure_ascii=True, indent=2, sort_keys=True) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_path, path)
+        finally:
+            try:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    snapshot_fingerprint = stable_fingerprint(normalized)
+    perform_registered_internal_write(
+        writer_id="model_watch_catalog",
+        operation="replace_snapshot",
+        resource_type="model_watch_catalog",
+        target_scope="state:model_watch_catalog",
+        arguments={"snapshot_hash": snapshot_fingerprint},
+        callback=_write,
+        journal_path=path.with_name(f"{path.name}.internal-writer.sqlite3"),
+        operation_id=f"model-watch-catalog:{snapshot_fingerprint}",
+    )
     return normalized
 
 

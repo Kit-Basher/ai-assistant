@@ -232,3 +232,14 @@ docs/product/PROJECT_INTENT.md
 Complete the remaining capability-family and internal-writer migrations before
 Audit 3. Audit 3 remains end-user behavior and UX; fresh-VM acceptance stays
 deferred.
+
+## Audit v2C authority checkpoint
+
+- Transaction model: `agent/confirmation_transactions.py`
+- Internal contract: `docs/operator/INTERNAL_WRITER_AUTHORITY_V1.md`
+- Machine registry: `docs/operator/INTERNAL_WRITER_REGISTRY_V1.json`
+- Concurrency proof: `scripts/transactional_confirmation_smoke.py`
+
+Audit v2D should migrate provider/model/configuration/secrets/setup public
+mutations. Audit 3 remains end-user behavior and UX; neither is the final
+fresh-VM acceptance step.

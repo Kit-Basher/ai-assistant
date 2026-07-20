@@ -300,3 +300,22 @@ in-process double use.
 
 This migrates one surface group; it does not convert remaining legacy
 API/domain writers into registered executors.
+
+## Audit v2C durable transaction boundary
+
+`ExecutorRegistry` owns a durable confirmation transaction database. It binds
+operation and confirmation keys to Plan ID/fingerprint, target fingerprint,
+capability, executor, actor, thread, session, and expiry. SQLite
+`BEGIN IMMEDIATE` serializes concurrent reserve/insert across processes.
+
+The sequence is `reserved -> executing -> succeeded|failed|indeterminate`.
+No terminal state is reusable. If terminal persistence fails after executor
+return, the row stays executing and later reconciliation treats it as
+indeterminate, preventing automatic duplication.
+
+The shipping runtime path is canonical rather than service-name-specific:
+`~/.local/share/personal-agent/confirmation_transactions.sqlite3`. Stable,
+dev, release-bundle, and Debian services all derive it from the same
+`AGENT_DB_PATH` parent. A legacy
+`executor_registry_journal.jsonl.confirmations.sqlite3` is imported with
+`INSERT OR IGNORE` and then remains non-authoritative.

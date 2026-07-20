@@ -39,6 +39,7 @@ REQUIRED_CLASSIFICATION_FIELDS = {
     "path", "disposition", "capability", "entry_point", "actor", "target_resources",
     "mutation_type", "policy_path", "executor", "confirmation_requirements",
     "rollback_scope", "audit_evidence",
+    "contract_identity",
 }
 
 SCRIPT_EXCLUSIONS = {

@@ -23,6 +23,7 @@ from .capability_policy import (
     capability_for_action_type,
     stable_fingerprint,
 )
+from .confirmation_transactions import ConfirmationTransactionStore
 from .host_lifecycle import (
     HOST_LIFECYCLE_OPERATION_SCHEMA_VERSION,
     HOST_LIFECYCLE_RUNNER_VERSION,
@@ -46,8 +47,8 @@ from .skill_pack_permissions import SkillGrantStore, build_skill_identity
 
 SUPPORT_BUNDLE_SCHEMA_VERSION = "support_bundle.v2"
 BACKUP_SCHEMA_VERSION = "backup.v1"
-BACKUP_MAX_TOTAL_BYTES = 2 * 1024 * 1024
-BACKUP_MAX_FILE_BYTES = 256 * 1024
+BACKUP_MAX_TOTAL_BYTES = 16 * 1024 * 1024
+BACKUP_MAX_FILE_BYTES = 8 * 1024 * 1024
 BACKUP_MAX_JOURNAL_ENTRIES = 8
 EXECUTOR_JOURNAL_MAX_RECORD_BYTES = 64 * 1024
 EXECUTOR_JOURNAL_MAX_STRING_BYTES = 1024
@@ -322,11 +323,21 @@ class MutationJournal:
 
 
 class ExecutorRegistry:
-    def __init__(self, journal_path: str | Path) -> None:
+    def __init__(
+        self,
+        journal_path: str | Path,
+        *,
+        confirmation_store_path: str | Path | None = None,
+        legacy_confirmation_store_paths: list[str | Path] | None = None,
+    ) -> None:
         self.journal = MutationJournal(journal_path)
+        journal_resolved = Path(journal_path).expanduser().resolve()
+        self.confirmation_transactions = ConfirmationTransactionStore(
+            confirmation_store_path or journal_resolved.with_name(f"{journal_resolved.name}.confirmations.sqlite3"),
+            legacy_paths=legacy_confirmation_store_paths,
+        )
         self._executors: dict[str, ExecutorSpec] = {}
         self._frozen = False
-        self._consumed_confirmations: set[str] = set()
 
     def register(self, spec: ExecutorSpec) -> None:
         if self._frozen:
@@ -369,6 +380,28 @@ class ExecutorRegistry:
         plan_fingerprint = str(plan.get("plan_fingerprint") or "").strip()
         target_fingerprint = str(plan.get("target_fingerprint") or "").strip()
         authorization_metadata: dict[str, Any] = {}
+        transaction_operation_key = ""
+        transaction_owner_id = ""
+
+        def _transaction_state(result: ExecutorResult) -> str:
+            error = str(result.error_code or "").lower()
+            if result.ok and result.mutated:
+                return "succeeded"
+            if result.mutated or any(marker in error for marker in ("partial", "uncertain", "indeterminate", "outcome_unknown")):
+                return "indeterminate"
+            return "failed"
+
+        def _persist_transaction_result(result: ExecutorResult) -> None:
+            if not transaction_operation_key or not transaction_owner_id:
+                return
+            persisted = self.confirmation_transactions.finish(
+                transaction_operation_key,
+                transaction_owner_id,
+                state=_transaction_state(result),
+                result=result.to_dict(),
+            )
+            if not persisted:
+                raise RuntimeError("confirmation_transaction_terminal_persist_failed")
 
         def _result(
             *,
@@ -409,6 +442,7 @@ class ExecutorRegistry:
                 confirmation_timestamp=str(authorization_metadata.get("confirmation_timestamp") or ""),
                 mutation_plan_schema_version=int(authorization_metadata.get("mutation_plan_schema_version") or MUTATION_PLAN_SCHEMA_VERSION),
             )
+            _persist_transaction_result(result)
             self.journal.append(
                 {
                     "journal_id": journal_id,
@@ -519,24 +553,6 @@ class ExecutorRegistry:
                     rollback_hint="No rollback needed because nothing changed.",
                 )
             confirmation_id = str((confirmation or {}).get("confirmation_id") or "").strip()
-            confirmation_key = stable_fingerprint(
-                {
-                    "confirmation_id": confirmation_id,
-                    "plan_id": mutation_plan.get("plan_id"),
-                    "plan_fingerprint": mutation_plan.get("plan_fingerprint"),
-                }
-            )
-            if confirmation_key in self._consumed_confirmations:
-                return _result(
-                    ok=False,
-                    mutated=False,
-                    executor_id=spec.executor_id,
-                    error_code="mutation_confirmation_replayed",
-                    user_message="I blocked execution because this confirmation was already consumed.",
-                    rollback_available=False,
-                    rollback_hint="No rollback needed because nothing changed.",
-                )
-            self._consumed_confirmations.add(confirmation_key)
             if not plan_fingerprint:
                 plan_fingerprint = str(mutation_plan.get("plan_fingerprint") or "")
                 plan["plan_fingerprint"] = plan_fingerprint
@@ -613,6 +629,41 @@ class ExecutorRegistry:
                     rollback_available=False,
                     rollback_hint="No rollback needed because nothing was changed.",
                     details={"authorization": decision.to_dict()},
+                )
+            reservation = self.confirmation_transactions.reserve(
+                plan=mutation_plan,
+                confirmation=confirmation or {},
+            )
+            if not reservation.allowed:
+                return _result(
+                    ok=False,
+                    mutated=False,
+                    executor_id=spec.executor_id,
+                    error_code=reservation.reason_code,
+                    user_message=(
+                        "I blocked execution because this confirmation is already in progress or consumed. "
+                        "An indeterminate result requires reconciliation before any new action."
+                    ),
+                    rollback_available=False,
+                    rollback_hint="Do not retry automatically; inspect the durable confirmation transaction.",
+                    details={"transaction_state": reservation.state},
+                )
+            transaction_operation_key = reservation.operation_key
+            transaction_owner_id = reservation.owner_id
+            if not self.confirmation_transactions.mark_executing(
+                transaction_operation_key,
+                transaction_owner_id,
+            ):
+                transaction_operation_key = ""
+                transaction_owner_id = ""
+                return _result(
+                    ok=False,
+                    mutated=False,
+                    executor_id=spec.executor_id,
+                    error_code="mutation_confirmation_reservation_lost",
+                    user_message="I blocked execution because the durable reservation could not enter execution.",
+                    rollback_available=False,
+                    rollback_hint="Inspect the durable confirmation transaction before retrying.",
                 )
         try:
             raw = spec.run(plan, action)
@@ -691,6 +742,7 @@ class ExecutorRegistry:
                 "mutation_plan_schema_version": int(authorization_metadata.get("mutation_plan_schema_version") or result.mutation_plan_schema_version),
             }
         )
+        _persist_transaction_result(result)
         self.journal.append(
             {
                 "journal_id": journal_id,
@@ -864,6 +916,64 @@ def _write_backup_json(path: Path, payload: dict[str, Any]) -> int:
         raise ValueError(f"backup_file_size_cap_exceeded:{path.name}:{len(encoded)}")
     path.write_bytes(encoded)
     return len(encoded)
+
+
+def _sqlite_backup_snapshot(source: Path, destination: Path, *, required_table: str) -> int:
+    if source.is_symlink() or not source.is_file():
+        raise ValueError(f"authority_state_source_invalid:{source.name}")
+    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with sqlite3.connect(f"file:{source}?mode=ro", uri=True, timeout=30.0) as source_db:
+        table = source_db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (required_table,),
+        ).fetchone()
+        if table is None:
+            raise ValueError(f"authority_state_table_missing:{required_table}")
+        with sqlite3.connect(str(destination), timeout=30.0) as backup_db:
+            source_db.backup(backup_db)
+            integrity = backup_db.execute("PRAGMA integrity_check").fetchone()
+            if integrity is None or str(integrity[0]).lower() != "ok":
+                raise ValueError("authority_state_snapshot_integrity_failed")
+    os.chmod(destination, 0o600)
+    size = destination.stat().st_size
+    if size > BACKUP_MAX_FILE_BYTES:
+        raise ValueError(f"backup_file_size_cap_exceeded:{destination.name}:{size}")
+    return size
+
+
+def _authority_state_backup_entries(backup_sources: dict[str, Any]) -> list[dict[str, str]]:
+    authority = backup_sources.get("authority_state") if isinstance(backup_sources.get("authority_state"), dict) else {}
+    raw_root = str(authority.get("state_root") or "").strip()
+    if not raw_root:
+        return []
+    state_root = Path(raw_root).expanduser().resolve()
+    confirmation = Path(str(authority.get("confirmation_transactions") or "")).expanduser().resolve()
+    raw_receipts = authority.get("internal_writer_receipts") if isinstance(authority.get("internal_writer_receipts"), list) else []
+    candidates: list[tuple[str, Path, str]] = [("confirmation", confirmation, "confirmation_transactions")]
+    for raw in raw_receipts[:64]:
+        candidate = Path(str(raw or "")).expanduser().resolve()
+        candidates.append(("internal_writer_receipt", candidate, "internal_writer_operations"))
+    entries: list[dict[str, str]] = []
+    for kind, source, table in candidates:
+        if not _is_contained(source, state_root) or source.is_symlink() or not source.is_file():
+            continue
+        relative = source.relative_to(state_root).as_posix()
+        if kind == "confirmation" and relative != "confirmation_transactions.sqlite3":
+            raise ValueError("confirmation_transaction_path_not_canonical")
+        if kind == "internal_writer_receipt" and not relative.endswith(".internal-writer.sqlite3"):
+            raise ValueError("internal_writer_receipt_path_invalid")
+        digest = hashlib.sha256(relative.encode("utf-8")).hexdigest()[:16]
+        backup_name = "confirmation_transactions.sqlite3" if kind == "confirmation" else f"internal_writer_receipt_{digest}.sqlite3"
+        entries.append(
+            {
+                "kind": kind,
+                "source": str(source),
+                "target_relative": relative,
+                "backup_name": backup_name,
+                "required_table": table,
+            }
+        )
+    return entries
 
 
 def _write_support_json(path: Path, payload: dict[str, Any]) -> int:
@@ -1210,6 +1320,23 @@ def _read_json_file(path: Path, *, max_bytes: int = BACKUP_MAX_FILE_BYTES) -> di
     return payload
 
 
+def _validate_authority_sqlite(path: Path, *, required_table: str, expected_sha256: str) -> None:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"authority_backup_invalid:{path.name}")
+    if hashlib.sha256(path.read_bytes()).hexdigest() != expected_sha256:
+        raise ValueError(f"authority_backup_hash_mismatch:{path.name}")
+    with sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30.0) as connection:
+        integrity = connection.execute("PRAGMA integrity_check").fetchone()
+        if integrity is None or str(integrity[0]).lower() != "ok":
+            raise ValueError(f"authority_backup_integrity_failed:{path.name}")
+        table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (required_table,),
+        ).fetchone()
+        if table is None:
+            raise ValueError(f"authority_backup_table_missing:{path.name}")
+
+
 def _backup_fingerprint(path: Path, included_files: list[str]) -> str:
     digest = hashlib.sha256()
     for name in sorted(included_files):
@@ -1240,6 +1367,39 @@ def _validate_restore_backup(path: Path) -> dict[str, Any]:
     if manifest.get("backup_schema_version") != BACKUP_SCHEMA_VERSION:
         return {"valid": False, "error_code": "unsupported_backup_schema", "schema_version": manifest.get("backup_schema_version")}
     included = [str(item) for item in manifest.get("included_files", []) if str(item).strip()] if isinstance(manifest.get("included_files"), list) else []
+    authority_rows = manifest.get("authority_state") if isinstance(manifest.get("authority_state"), list) else []
+    authority_by_name: dict[str, dict[str, Any]] = {}
+    for row in authority_rows:
+        if not isinstance(row, dict):
+            return {"valid": False, "error_code": "authority_manifest_row_invalid"}
+        name = str(row.get("backup_name") or "").strip()
+        target_relative = str(row.get("target_relative") or "").strip()
+        kind = str(row.get("kind") or "").strip()
+        required_table = str(row.get("required_table") or "").strip()
+        if (
+            not name.endswith(".sqlite3")
+            or "/" in name
+            or "\\" in name
+            or target_relative.startswith(("/", "."))
+            or ".." in Path(target_relative).parts
+            or kind not in {"confirmation", "internal_writer_receipt"}
+            or required_table not in {"confirmation_transactions", "internal_writer_operations"}
+        ):
+            return {"valid": False, "error_code": "authority_manifest_scope_invalid"}
+        if kind == "confirmation" and target_relative != "confirmation_transactions.sqlite3":
+            return {"valid": False, "error_code": "authority_confirmation_target_invalid"}
+        if kind == "internal_writer_receipt" and not target_relative.endswith(".internal-writer.sqlite3"):
+            return {"valid": False, "error_code": "authority_receipt_target_invalid"}
+        if name in authority_by_name:
+            return {"valid": False, "error_code": "authority_manifest_duplicate"}
+        authority_by_name[name] = row
+    if authority_rows and sum(1 for row in authority_rows if row.get("kind") == "confirmation") != 1:
+        return {"valid": False, "error_code": "authority_confirmation_snapshot_missing"}
+    missing_authority = sorted(
+        name for name in authority_by_name if name not in set(included) or not (path / name).is_file()
+    )
+    if missing_authority:
+        return {"valid": False, "error_code": "authority_snapshot_missing", "missing_files": missing_authority}
     required = {
         "backup_summary.json",
         "diagnostics_summary.json",
@@ -1270,7 +1430,15 @@ def _validate_restore_backup(path: Path) -> dict[str, Any]:
             total_size += size
             if size > BACKUP_MAX_FILE_BYTES:
                 return {"valid": False, "error_code": "backup_file_size_cap_exceeded", "file": name}
-            parsed_files[name] = _read_json_file(file_path)
+            if name in authority_by_name:
+                row = authority_by_name[name]
+                _validate_authority_sqlite(
+                    file_path,
+                    required_table=str(row.get("required_table") or ""),
+                    expected_sha256=str(row.get("sha256") or ""),
+                )
+            else:
+                parsed_files[name] = _read_json_file(file_path)
     except Exception as exc:  # noqa: BLE001
         return {"valid": False, "error_code": "backup_file_validation_failed", "exception": exc.__class__.__name__}
     if total_size > BACKUP_MAX_TOTAL_BYTES:
@@ -1304,6 +1472,7 @@ def _validate_restore_backup(path: Path) -> dict[str, Any]:
         "created_at": manifest.get("created_at"),
         "runtime_commit": manifest.get("runtime_commit"),
         "total_size_bytes": total_size,
+        "authority_state": [dict(row) for row in authority_rows],
     }
 
 
@@ -1409,6 +1578,97 @@ def _restore_from_snapshot(snapshot_root: Path, db_path: Path) -> bool:
         return False
 
 
+def _merge_authority_table(
+    *, source: Path, target: Path, table: str, columns: tuple[str, ...]
+) -> int:
+    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    created = not target.exists()
+    if created:
+        with sqlite3.connect(f"file:{source}?mode=ro", uri=True, timeout=30.0) as source_db:
+            with sqlite3.connect(str(target), timeout=30.0) as target_db:
+                source_db.backup(target_db)
+        os.chmod(target, 0o600)
+    with sqlite3.connect(f"file:{source}?mode=ro", uri=True, timeout=30.0) as source_db:
+        source_db.row_factory = sqlite3.Row
+        source_columns = {str(row[1]) for row in source_db.execute(f"PRAGMA table_info({table})")}
+        if not set(columns).issubset(source_columns):
+            raise ValueError(f"authority_restore_source_schema_invalid:{table}")
+        rows = source_db.execute(f"SELECT {','.join(columns)} FROM {table}").fetchall()
+    with sqlite3.connect(str(target), timeout=30.0, isolation_level=None) as target_db:
+        target_columns = {str(row[1]) for row in target_db.execute(f"PRAGMA table_info({table})")}
+        if not set(columns).issubset(target_columns):
+            raise ValueError(f"authority_restore_target_schema_invalid:{table}")
+        target_db.execute("BEGIN IMMEDIATE")
+        inserted = 0
+        try:
+            for source_row in rows:
+                values = dict(source_row)
+                source_state = str(values.get("state") or "")
+                if table == "confirmation_transactions" and values.get("state") in {"reserved", "executing"}:
+                    values["state"] = "failed" if values["state"] == "reserved" else "indeterminate"
+                    values["reconciliation_reason"] = "restored_uncertain_outcome"
+                    values["finished_at"] = utc_now_iso()
+                if table == "internal_writer_operations" and values.get("state") == "executing":
+                    values["state"] = "indeterminate"
+                    values["finished_at"] = utc_now_iso()
+                    values["receipt_json"] = json.dumps({"ok": False, "reason": "restored_uncertain_outcome"})
+                changed = int(target_db.execute(
+                    f"INSERT OR IGNORE INTO {table} ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",
+                    tuple(values[column] for column in columns),
+                ).rowcount)
+                inserted += changed
+                if changed == 0 and source_state in {"reserved", "executing"}:
+                    if table == "confirmation_transactions":
+                        target_db.execute(
+                            "UPDATE confirmation_transactions SET state = ?, finished_at = ?, reconciliation_reason = ? WHERE operation_key = ? AND state = ?",
+                            (values["state"], values["finished_at"], values["reconciliation_reason"], values["operation_key"], source_state),
+                        )
+                    elif table == "internal_writer_operations" and source_state == "executing":
+                        target_db.execute(
+                            "UPDATE internal_writer_operations SET state = 'indeterminate', finished_at = ?, receipt_json = ? WHERE operation_key = ? AND state = 'executing'",
+                            (values["finished_at"], values["receipt_json"], values["operation_key"]),
+                        )
+            target_db.execute("COMMIT")
+        except Exception:
+            target_db.execute("ROLLBACK")
+            raise
+    os.chmod(target, 0o600)
+    return max(inserted, 1 if created else 0)
+
+
+def _restore_authority_state(*, validation: dict[str, Any], backup_path: Path, state_root: Path) -> list[dict[str, Any]]:
+    confirmation_columns = (
+        "operation_key", "confirmation_key", "plan_id", "plan_fingerprint", "target_fingerprint",
+        "capability_id", "executor_id", "actor_id", "thread_id", "session_id", "expires_at",
+        "state", "owner_id", "reserved_at", "executing_at", "finished_at", "updated_epoch",
+        "result_json", "reconciliation_reason", "schema_version",
+    )
+    receipt_columns = (
+        "operation_key", "writer_id", "operation_id", "capability_id", "operation", "resource_type",
+        "target_scope", "trigger", "state", "started_at", "finished_at", "request_json", "receipt_json",
+    )
+    restored: list[dict[str, Any]] = []
+    rows = validation.get("authority_state") if isinstance(validation.get("authority_state"), list) else []
+    for row in rows:
+        source = (backup_path / str(row.get("backup_name") or "")).resolve()
+        target = (state_root / str(row.get("target_relative") or "")).resolve()
+        if not _is_contained(source, backup_path) or not _is_contained(target, state_root):
+            raise ValueError("authority_restore_path_escape")
+        kind = str(row.get("kind") or "")
+        if kind == "confirmation":
+            inserted = _merge_authority_table(
+                source=source, target=target, table="confirmation_transactions", columns=confirmation_columns
+            )
+        elif kind == "internal_writer_receipt":
+            inserted = _merge_authority_table(
+                source=source, target=target, table="internal_writer_operations", columns=receipt_columns
+            )
+        else:
+            raise ValueError("authority_restore_kind_invalid")
+        restored.append({"kind": kind, "target": str(target), "inserted_rows": inserted})
+    return restored
+
+
 def restore_backup_v1(plan: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
     context_failure = _trusted_context_failure(
         plan,
@@ -1444,6 +1704,7 @@ def restore_backup_v1(plan: dict[str, Any], action: dict[str, Any]) -> dict[str,
     snapshot_root: Path | None = None
     staging_root: Path | None = None
     resources: list[str] = []
+    authority_mutated = False
     try:
         validation = _validate_restore_backup(backup_path)
         if not validation.get("valid"):
@@ -1483,10 +1744,17 @@ def restore_backup_v1(plan: dict[str, Any], action: dict[str, Any]) -> dict[str,
         before = _current_preferences(db_path, sorted(target_values.keys()))
         snapshot_root = _make_restore_snapshot(state_root=state_root, db_path=db_path, before=before, plan_id=plan_id, backup_path=backup_path)
         resources.extend([str(snapshot_root / "manifest.json"), str(snapshot_root / "preferences_snapshot.json")])
+        restored_authority = _restore_authority_state(
+            validation=validation,
+            backup_path=backup_path,
+            state_root=state_root,
+        )
+        resources.extend(str(row["target"]) for row in restored_authority)
+        authority_mutated = any(int(row.get("inserted_rows") or 0) > 0 for row in restored_authority)
         if not target_values:
             return {
                 "ok": True,
-                "mutated": False,
+                "mutated": authority_mutated,
                 "executor_id": "operator.restore.v1",
                 "resources_touched": resources,
                 "rollback_available": True,
@@ -1497,13 +1765,14 @@ def restore_backup_v1(plan: dict[str, Any], action: dict[str, Any]) -> dict[str,
                     "snapshot_path": str(snapshot_root),
                     "staging_path": str(staging_root),
                     "restored_categories": [],
+                    "restored_authority_state": restored_authority,
                     "skipped_categories": ["secrets", "logs", "runtime metadata", "pack source text", "model caches"],
                 },
             }
         if before == target_values:
             return {
                 "ok": True,
-                "mutated": False,
+                "mutated": authority_mutated,
                 "executor_id": "operator.restore.v1",
                 "resources_touched": resources,
                 "rollback_available": True,
@@ -1515,6 +1784,7 @@ def restore_backup_v1(plan: dict[str, Any], action: dict[str, Any]) -> dict[str,
                     "staging_path": str(staging_root),
                     "restored_categories": [],
                     "preference_keys": sorted(target_values.keys()),
+                    "restored_authority_state": restored_authority,
                 },
             }
         _write_preferences(db_path, target_values)
@@ -1558,6 +1828,7 @@ def restore_backup_v1(plan: dict[str, Any], action: dict[str, Any]) -> dict[str,
                 "staging_path": str(staging_root),
                 "source_backup": str(backup_path),
                 "restored_categories": ["allowlisted_preferences"],
+                "restored_authority_state": restored_authority,
                 "preference_keys": sorted(target_values.keys()),
                 "skipped_categories": ["secrets", "logs", "runtime metadata", "pack source text", "model caches"],
             },
@@ -1566,12 +1837,12 @@ def restore_backup_v1(plan: dict[str, Any], action: dict[str, Any]) -> dict[str,
         rolled_back = _restore_from_snapshot(snapshot_root, db_path) if snapshot_root is not None else False
         return {
             "ok": False,
-            "mutated": False,
+            "mutated": authority_mutated,
             "executor_id": "operator.restore.v1",
             "resources_touched": resources,
             "rollback_available": snapshot_root is not None,
             "rollback_hint": f"Safety snapshot preserved at {snapshot_root}." if snapshot_root is not None else "No rollback needed because mutation did not start.",
-            "error_code": "restore_failed_rolled_back" if rolled_back else "restore_executor_exception",
+            "error_code": "restore_authority_partial_failure" if authority_mutated else "restore_failed_rolled_back" if rolled_back else "restore_executor_exception",
             "user_message": (
                 "Restore failed and I restored the previous supported state from the safety snapshot."
                 if rolled_back
@@ -3054,10 +3325,11 @@ def build_backup_manifest(
     excluded_files: list[str],
     file_sizes: dict[str, int] | None = None,
     total_size_bytes: int | None = None,
+    authority_state: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     version = diagnostics.get("version") if isinstance(diagnostics.get("version"), dict) else {}
     policy = (
-        "Backup v1 stores redacted JSON summaries only. Raw secret-store files, "
+        "Backup v1 stores redacted JSON summaries plus transaction/receipt SQLite snapshots. Raw secret-store files, "
         "tokens, API keys, passwords, raw logs, model caches, arbitrary home data, "
         "and unreviewed pack/source contents are excluded. No encryption is applied "
         "because raw secret material is not included; treat the backup as local-sensitive."
@@ -3072,6 +3344,7 @@ def build_backup_manifest(
             "excluded_files": excluded_files,
             "file_sizes": file_sizes or {},
             "total_size_bytes": total_size_bytes,
+            "authority_state": authority_state or [],
             "size_caps": {
                 "max_total_bytes": BACKUP_MAX_TOTAL_BYTES,
                 "max_file_bytes": BACKUP_MAX_FILE_BYTES,
@@ -3219,8 +3492,8 @@ def create_additive_backup(plan: dict[str, Any], action: dict[str, Any]) -> dict
             "max_journal_entries": BACKUP_MAX_JOURNAL_ENTRIES,
         },
     }
-
-    included_files = sorted([*files.keys(), "manifest.json"])
+    authority_entries = _authority_state_backup_entries(backup_sources)
+    included_files = sorted([*files.keys(), *(entry["backup_name"] for entry in authority_entries), "manifest.json"])
     file_sizes: dict[str, int] = {}
     try:
         total_size = 0
@@ -3230,6 +3503,28 @@ def create_additive_backup(plan: dict[str, Any], action: dict[str, Any]) -> dict
             total_size += size
             if total_size > BACKUP_MAX_TOTAL_BYTES:
                 raise ValueError(f"backup_total_size_cap_exceeded:{total_size}")
+        manifest_authority: list[dict[str, Any]] = []
+        for entry in authority_entries:
+            destination = root / entry["backup_name"]
+            size = _sqlite_backup_snapshot(
+                Path(entry["source"]),
+                destination,
+                required_table=entry["required_table"],
+            )
+            file_sizes[entry["backup_name"]] = size
+            total_size += size
+            if total_size > BACKUP_MAX_TOTAL_BYTES:
+                raise ValueError(f"backup_total_size_cap_exceeded:{total_size}")
+            manifest_authority.append(
+                {
+                    "kind": entry["kind"],
+                    "backup_name": entry["backup_name"],
+                    "target_relative": entry["target_relative"],
+                    "required_table": entry["required_table"],
+                    "sha256": hashlib.sha256(destination.read_bytes()).hexdigest(),
+                    "size_bytes": size,
+                }
+            )
         manifest = build_backup_manifest(
             root=root,
             diagnostics=diagnostics,
@@ -3237,6 +3532,7 @@ def create_additive_backup(plan: dict[str, Any], action: dict[str, Any]) -> dict
             excluded_files=excluded_files,
             file_sizes=file_sizes,
             total_size_bytes=total_size,
+            authority_state=manifest_authority,
         )
         manifest_text = json.dumps(support_bundle_redact(_bounded_backup_value(manifest)), indent=2, sort_keys=True, ensure_ascii=True) + "\n"
         manifest_size = len(manifest_text.encode("utf-8"))
@@ -3248,7 +3544,7 @@ def create_additive_backup(plan: dict[str, Any], action: dict[str, Any]) -> dict
         file_sizes["manifest.json"] = manifest_size
         total_size += manifest_size
     except Exception as exc:
-        resources = [str(path) for path in sorted(root.glob("*.json"))]
+        resources = [str(path) for path in sorted(root.iterdir()) if path.is_file()]
         return {
             "ok": False,
             "mutated": False,
@@ -3269,8 +3565,8 @@ def create_additive_backup(plan: dict[str, Any], action: dict[str, Any]) -> dict
         "rollback_available": True,
         "rollback_hint": f"Remove only the newly created backup directory: {root}",
         "user_message": (
-            f"Backup v1 created at {root}. It contains redacted summaries only. "
-            "Restore v1 can apply only allowlisted non-secret preferences."
+            f"Backup v1 created at {root}. It contains redacted summaries and durable authorization receipts. "
+            "Restore v1 can apply allowlisted preferences and merge authorization history without replaying operations."
         ),
         "details": {"artifact_path": str(root), "files": included_files, "manifest_path": str(root / "manifest.json")},
     }

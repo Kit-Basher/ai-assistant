@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -46,6 +47,8 @@ from agent.executor_registry import (
 )
 from agent.capability_policy import POLICY_SCHEMA_VERSION
 from agent.mutation_plan import build_mutation_confirmation, build_mutation_plan
+from agent.confirmation_transactions import ConfirmationTransactionStore
+from agent.internal_writer_authority import InternalWriterJournal
 
 
 def _plan(**overrides):
@@ -213,6 +216,118 @@ class ExecutorRegistryTests(unittest.TestCase):
         spec = ExecutorSpec(executor_id="test.executor", action_type="operator.support_bundle", status="enabled")
         registry.register(spec)
         self.assertEqual(spec, registry.lookup("operator.support_bundle"))
+
+    def test_backup_and_restore_preserve_transaction_and_internal_receipt_ledgers(self) -> None:
+        root = Path(self.tmpdir.name)
+        source_state = root / "source-state"
+        source_state.mkdir()
+        confirmation_path = source_state / "confirmation_transactions.sqlite3"
+        confirmation_store = ConfirmationTransactionStore(confirmation_path)
+        wal_keeper = sqlite3.connect(confirmation_path)
+        wal_keeper.execute("PRAGMA wal_autocheckpoint=0")
+        self.addCleanup(wal_keeper.close)
+        mutation_plan = build_mutation_plan(
+            plan_id="historical-operation",
+            capability_id="files.create",
+            executor_id="operator.file.create.v1",
+            expires_at_epoch=4_102_444_800,
+            actor_id="actor",
+            thread_id="thread",
+            session_id="session",
+            target_snapshot={"target": "fixture"},
+            mutation_inventory=[{"operation": "fixture"}],
+        )
+        confirmation = build_mutation_confirmation(mutation_plan, confirmation_id="historical-confirmation")
+        reserved = confirmation_store.reserve(plan=mutation_plan, confirmation=confirmation)
+        self.assertTrue(reserved.allowed)
+        self.assertTrue(confirmation_store.mark_executing(reserved.operation_key, reserved.owner_id))
+        self.assertTrue(confirmation_store.finish(reserved.operation_key, reserved.owner_id, state="succeeded", result={"ok": True}))
+        pending_plan = build_mutation_plan(
+            plan_id="historical-reserved",
+            capability_id="files.create",
+            executor_id="operator.file.create.v1",
+            expires_at_epoch=4_102_444_800,
+            actor_id="actor", thread_id="thread", session_id="session",
+            target_snapshot={"target": "reserved"}, mutation_inventory=[{"operation": "fixture"}],
+        )
+        pending_confirmation = build_mutation_confirmation(pending_plan, confirmation_id="historical-reserved-confirmation")
+        self.assertTrue(confirmation_store.reserve(plan=pending_plan, confirmation=pending_confirmation).allowed)
+        self.assertTrue(Path(f"{confirmation_path}-wal").is_file())
+
+        receipt_path = source_state / "audit.jsonl.internal-writer.sqlite3"
+        receipt_store = InternalWriterJournal(receipt_path)
+        self.assertTrue(receipt_store.reserve("internal-operation", {
+            "writer_id": "audit_log", "operation_id": "audit-one", "capability_id": "internal.audit.append",
+            "operation": "append_event", "resource_type": "audit_event", "target_scope": "state:audit_log",
+            "trigger": "runtime",
+        }))
+        receipt_store.finish("internal-operation", state="succeeded", receipt={"ok": True})
+        self.assertTrue(receipt_store.reserve("internal-uncertain", {
+            "writer_id": "audit_log", "operation_id": "audit-uncertain", "capability_id": "internal.audit.append",
+            "operation": "append_event", "resource_type": "audit_event", "target_scope": "state:audit_log",
+            "trigger": "runtime",
+        }))
+
+        backup_result = create_additive_backup(
+            _plan(action_type="operator.backup"),
+            _trusted_action(
+                {
+                    "pending_id": "confirm-test",
+                    "backup_root": str(source_state / "backups"),
+                    "backup_sources": {
+                        "authority_state": {
+                            "state_root": str(source_state),
+                            "confirmation_transactions": str(confirmation_path),
+                            "internal_writer_receipts": [str(receipt_path)],
+                        }
+                    },
+                },
+                capability_id="backup.create",
+                executor_id="operator.backup.v1",
+            ),
+        )
+        self.assertTrue(backup_result["ok"])
+        wal_keeper.close()
+        artifact = Path(backup_result["details"]["artifact_path"])
+        manifest = json.loads((artifact / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(2, len(manifest["authority_state"]))
+        for row in manifest["authority_state"]:
+            snapshot = artifact / row["backup_name"]
+            self.assertEqual(0o600, snapshot.stat().st_mode & 0o777)
+            self.assertTrue(snapshot.is_file())
+
+        target_state = root / "target-state"
+        target_state.mkdir()
+        target_db = self._restore_fixture_db(target_state, initial_value="unchanged")
+        restore_result = restore_backup_v1(
+            _plan(action_type="operator.restore"),
+            _trusted_action(
+                {
+                    "pending_id": "confirm-test",
+                    "state_root": str(target_state),
+                    "db_path": str(target_db),
+                    "backup_root": str(source_state / "backups"),
+                    "restore_backup_path": str(artifact),
+                },
+                capability_id="restore.execute",
+                executor_id="operator.restore.v1",
+            ),
+        )
+        self.assertTrue(restore_result["ok"])
+        with sqlite3.connect(target_state / "confirmation_transactions.sqlite3") as connection:
+            self.assertEqual("succeeded", connection.execute(
+                "SELECT state FROM confirmation_transactions WHERE plan_id = 'historical-operation'"
+            ).fetchone()[0])
+            self.assertEqual("failed", connection.execute(
+                "SELECT state FROM confirmation_transactions WHERE plan_id = 'historical-reserved'"
+            ).fetchone()[0])
+        with sqlite3.connect(target_state / receipt_path.name) as connection:
+            self.assertEqual("succeeded", connection.execute(
+                "SELECT state FROM internal_writer_operations WHERE operation_key = 'internal-operation'"
+            ).fetchone()[0])
+            self.assertEqual("indeterminate", connection.execute(
+                "SELECT state FROM internal_writer_operations WHERE operation_key = 'internal-uncertain'"
+            ).fetchone()[0])
 
     def test_host_lifecycle_record_validates_and_rejects_tamper(self) -> None:
         path = Path(self.tmpdir.name) / "host" / "operation.json"

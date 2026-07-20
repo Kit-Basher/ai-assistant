@@ -8,6 +8,9 @@ import re
 import tempfile
 from typing import Any
 
+from agent.internal_writer_authority import perform_registered_internal_write
+from agent.capability_policy import stable_fingerprint
+
 
 _SCHEMA_VERSION = 1
 _DEFAULT_MAX_RECENT_APPLY_IDS = 80
@@ -131,7 +134,18 @@ class AutopilotSafetyStateStore:
     def save(self, payload: dict[str, Any]) -> dict[str, Any]:
         normalized = self._normalize(payload if isinstance(payload, dict) else {})
         try:
-            _write_json_atomic(self.path, normalized)
+            state_hash = stable_fingerprint(normalized)
+            perform_registered_internal_write(
+                writer_id="llm_autopilot_safety",
+                operation="update_safety_state",
+                resource_type="autopilot_safety_state",
+                target_scope="state:autopilot_safety",
+                arguments={"state_hash": state_hash},
+                callback=lambda: _write_json_atomic(self.path, normalized),
+                journal_path=self.path.with_name(f"{self.path.name}.internal-writer.sqlite3"),
+                trigger="scheduler",
+                operation_id=f"autopilot-safety:{state_hash}",
+            )
         except OSError:
             # Keep runtime behavior deterministic even when the configured path is not writable.
             pass

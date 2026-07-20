@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.security.redaction import redact_value
+from agent.internal_writer_authority import perform_registered_internal_write
 
 
 def redact(value: Any) -> Any:
@@ -50,11 +51,23 @@ class AuditLog:
             "duration_ms": max(0, int(duration_ms or 0)),
         }
 
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.path, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=True) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+        def _append() -> None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=True) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+
+        perform_registered_internal_write(
+            writer_id="audit_log",
+            operation="append_event",
+            resource_type="audit_event",
+            target_scope="state:audit_log",
+            arguments={"event_type": record["action"], "timestamp": record["ts"]},
+            callback=_append,
+            journal_path=self.path.with_name(f"{self.path.name}.internal-writer.sqlite3"),
+            operation_id=f"audit:{record['ts']}",
+        )
 
     def recent(self, limit: int = 20) -> list[dict[str, Any]]:
         max_rows = max(1, int(limit))

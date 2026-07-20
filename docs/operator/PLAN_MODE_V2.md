@@ -142,3 +142,16 @@ or expired plans cannot execute.
 
 Seven historical API Plan/apply controllers remain outside the central
 Executor Registry, so Universal Plan Mode is not yet universal.
+
+## Audit v2C durable consumption
+
+Confirmation remains scoped to actor, thread, session, capability, executor,
+Plan fingerprint, target fingerprint, and expiry. After full Plan and
+confirmation validation and policy authorization, the Executor Registry
+atomically reserves a durable operation/confirmation key and enters
+`executing` before calling the executor. A terminal row is never reset.
+
+Stale `reserved` rows fail closed before execution. Stale `executing` rows
+become `indeterminate` and require reconciliation. `succeeded`, `failed`, and
+`indeterminate` all block replay. Existing pending Plans must pass the current
+schema and are never repaired by fabricating confirmation context.

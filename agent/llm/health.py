@@ -9,6 +9,9 @@ import tempfile
 import time
 from typing import Any, Callable
 
+from agent.capability_policy import stable_fingerprint
+from agent.internal_writer_authority import perform_registered_internal_write
+
 
 _HEALTH_SCHEMA_VERSION = 1
 _STATUS_ORDER = {"ok": 0, "degraded": 1, "down": 2, "unknown": 3}
@@ -84,20 +87,33 @@ class HealthStateStore:
 
     def save(self, state: dict[str, Any]) -> dict[str, Any]:
         normalized = self._normalize(state if isinstance(state, dict) else {})
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_path = tempfile.mkstemp(prefix=f".{self.path.name}.", suffix=".tmp", dir=str(self.path.parent))
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(json.dumps(normalized, ensure_ascii=True, indent=2, sort_keys=True) + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(tmp_path, self.path)
-        finally:
+        def _replace() -> None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp_path = tempfile.mkstemp(prefix=f".{self.path.name}.", suffix=".tmp", dir=str(self.path.parent))
             try:
-                if os.path.exists(tmp_path):
-                    os.unlink(tmp_path)
-            except OSError:
-                pass
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    handle.write(json.dumps(normalized, ensure_ascii=True, indent=2, sort_keys=True) + "\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(tmp_path, self.path)
+            finally:
+                try:
+                    if os.path.exists(tmp_path):
+                        os.unlink(tmp_path)
+                except OSError:
+                    pass
+
+        state_hash = stable_fingerprint(normalized)
+        perform_registered_internal_write(
+            writer_id="llm_health",
+            operation="replace_health_state",
+            resource_type="health_state",
+            target_scope="state:llm_health",
+            arguments={"state_hash": state_hash, "provider_count": len(normalized.get("providers") or {})},
+            callback=_replace,
+            journal_path=self.path.with_name(f"{self.path.name}.internal-writer.sqlite3"),
+            operation_id=f"health:{state_hash}",
+        )
         return normalized
 
     def _normalize(self, state: dict[str, Any]) -> dict[str, Any]:

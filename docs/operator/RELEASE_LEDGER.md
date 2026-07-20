@@ -378,3 +378,18 @@ proof as mandatory:
 - No release is authorized: 47 legacy mutations, seven legacy Plan/apply paths,
   and the internal-writer migration remain open. Universal authorization is
   not claimed.
+
+## 2026-07-20 — Architecture and Safety Audit v2C working checkpoint
+
+- Replaced process-local confirmation consumption with a WAL/FULL-synchronous
+  SQLite state machine and real multi-process contention proof.
+- Added a 24-entry writer registry, public authority-claim rejection, bounded
+  callback/resource checks, durable operation identities, and redacted
+  receipts. Eleven wholly internal writers are enforced; mixed/public writers
+  retain pending or legacy dispositions.
+- No release is authorized. The 47 legacy and seven Plan-gated public groups
+  are unchanged, and process isolation remains absent.
+- Final verification canonicalized the shared transaction database across all
+  service/install variants and extended Backup/Restore v1 to preserve durable
+  confirmation and internal-writer receipts without depending on copied
+  WAL/SHM files.

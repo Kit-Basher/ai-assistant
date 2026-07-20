@@ -51,4 +51,5 @@ sdist_include = [
 ]
 wheel_data_files = [
   ["systemd/personal-agent-api.service", "share/personal-agent/systemd/personal-agent-api.service"],
+  ["docs/operator/INTERNAL_WRITER_REGISTRY_V1.json", "share/personal-agent/INTERNAL_WRITER_REGISTRY_V1.json"],
 ]

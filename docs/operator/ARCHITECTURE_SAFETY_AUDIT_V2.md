@@ -121,3 +121,21 @@ This is not v2B closure: seven Plan-gated legacy surfaces and 47 legacy
 surfaces remain, and the 24 internal writers do not yet all use one enforced
 scheduler/service identity contract. Universal authorization cannot honestly
 be claimed.
+
+## Audit v2C addendum — 2026-07-20
+
+Cross-process confirmation consumption now uses a durable state machine rather
+than a process-local set. Four-process contention, replay after reopen, stale
+reservation, and crash-after-effect proofs favor at-most-once executor entry;
+uncertain outcomes are not retried.
+
+The 24 writer candidates now classify as eight trusted bookkeeping, three
+scheduled maintenance, five mixed internal/public pending, six operator
+legacy, one operator central, and one read-only. The eleven wholly internal
+writers contain enforced runtime boundaries. Mixed/public behavior is not
+granted internal authority.
+
+Counts remain 91 public surfaces, including 47 `legacy_unmigrated` and seven
+`plan_gated_legacy`. The 150-file inventory has 27
+`supported_pending_migration` files after correcting model-scout status writes.
+Universal authorization remains incomplete.

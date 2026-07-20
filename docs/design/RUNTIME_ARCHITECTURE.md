@@ -789,3 +789,16 @@ RuntimeTruthService, and SAFE MODE default are unchanged. Managed skill-pack
 writes now join the central Plan/confirmation/policy/registry path. Historical
 API/domain writers and internal scheduler bookkeeping remain separately
 inventoried and are not described as centrally migrated.
+
+## Transaction and internal-writer boundaries (Audit v2C)
+
+After canonical Plan/confirmation/policy validation, executor entry crosses a
+shared durable confirmation transaction. This changes consumption mechanics,
+not front-door ownership: Web and Telegram still converge on the same
+assistant/orchestration path and `route_inference()` remains the only inference
+orchestrator. RuntimeTruthService and the SAFE MODE default are unchanged.
+
+Trusted bookkeeping and scheduled maintenance use a separate registered
+internal-writer contract. It cannot select public executors and is not a
+substitute for migrating operator or user actions. Arbitrary in-process Python
+remains inside the trust boundary until OS/process isolation exists.

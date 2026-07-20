@@ -181,7 +181,7 @@ def build_inventory() -> dict[str, Any]:
         counts[item["status"]] = counts.get(item["status"], 0) + 1
     return {
         "schema": "personal-agent.mutation-surface-inventory.v2",
-        "source_commit": "audit-v2b-working-tree-on-7afbe8502f67d3c720311b7299521075e12d4229",
+        "source_commit": "audit-v2c-working-tree-on-a59292274df04fde3b9a3d48f90b6cd7c92b71c4",
         "scope": "public API mutations plus assistant, Telegram, CLI, skill-pack, executor, and background entry points",
         "status_definitions": {
             "central_authorized": "central capability schema, policy, Universal Mutation Plan, confirmation, and Executor Registry",
@@ -200,6 +200,8 @@ def architecture_checks() -> list[dict[str, Any]]:
     telegram = (ROOT / "agent" / "telegram_bridge.py").read_text(encoding="utf-8")
     api = API.read_text(encoding="utf-8")
     inference_defs = []
+    executor_registry = (ROOT / "agent" / "executor_registry.py").read_text(encoding="utf-8")
+    internal_authority = (ROOT / "agent" / "internal_writer_authority.py").read_text(encoding="utf-8")
     for path in (ROOT / "agent").rglob("*.py"):
         for match in re.finditer(r"^def route_inference\s*\(", path.read_text(encoding="utf-8"), re.MULTILINE):
             inference_defs.append(str(path.relative_to(ROOT)))
@@ -208,6 +210,8 @@ def architecture_checks() -> list[dict[str, Any]]:
         {"check": "telegram_forwards_to_orchestrator", "ok": "orchestrator.handle_message(" in telegram, "evidence": "agent/telegram_bridge.py"},
         {"check": "api_does_not_call_route_inference", "ok": "route_inference(" not in api, "evidence": "agent/api_server.py"},
         {"check": "orchestrator_calls_route_inference", "ok": "route_inference(" in orchestrator, "evidence": "agent/orchestrator.py"},
+        {"check": "durable_confirmation_transaction_boundary", "ok": "ConfirmationTransactionStore" in executor_registry, "evidence": "agent/confirmation_transactions.py"},
+        {"check": "internal_writer_registry_enforced", "ok": "internal_writer_unregistered" in internal_authority, "evidence": "agent/internal_writer_authority.py"},
     ]
 
 

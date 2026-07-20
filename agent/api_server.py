@@ -53,6 +53,7 @@ from agent.intent.llm_rerank import rerank_intents_with_llm
 from agent.intent.low_confidence import detect_low_confidence
 from agent.intent.thread_integrity import detect_thread_drift, normalize_text as normalize_thread_text
 from agent.logging_utils import log_event
+from agent.internal_writer_authority import reject_public_internal_authority_claim
 from agent.security.redaction import redact_text
 from agent.memory_authority import MEMORY_AUTHORITY_LABELS, build_memory_injection_diagnostics
 from agent.model_watch import (
@@ -24481,6 +24482,10 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 status_code, response = self._json_request_error_response(path=path, payload=payload, json_error=json_error)
                 self._send_json(status_code, response)
                 return
+            internal_claim = reject_public_internal_authority_claim(payload)
+            if internal_claim:
+                self._send_json(400, {"ok": False, "error": "internal_writer_authority_claim_rejected"})
+                return
             if path == "/search/query":
                 ok, body = self.runtime.search_query(payload)
                 self._send_json(200 if ok else 400, body)
@@ -25764,6 +25769,10 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if json_error is not None:
                 status_code, response = self._json_request_error_response(path=path, payload=payload, json_error=json_error)
                 self._send_json(status_code, response)
+                return
+            internal_claim = reject_public_internal_authority_claim(payload)
+            if internal_claim:
+                self._send_json(400, {"ok": False, "error": "internal_writer_authority_claim_rejected"})
                 return
 
             if path == "/pack_sources/policy":

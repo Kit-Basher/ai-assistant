@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 import os
+from pathlib import Path
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -11,6 +13,7 @@ from agent.config import load_config
 from agent.llm.router import LLMRouter
 from agent.model_scout import build_model_scout
 from agent.secret_store import SecretStore
+from agent.internal_writer_authority import InternalWriterFactory, InternalWriterJournal, execute_internal_write
 from memory.db import MemoryDB
 
 
@@ -77,12 +80,36 @@ def run_once() -> int:
         if notify_sender is None:
             _log("notify_skip reason=telegram_not_configured")
 
-        result = scout.run(
-            registry_document=router.registry.to_document(),
-            router_snapshot=router.doctor_snapshot(),
-            usage_stats_snapshot=router.usage_stats_snapshot(),
-            notify_sender=notify_sender,
+        def _run_scout_once() -> dict[str, object]:
+            return scout.run(
+                registry_document=router.registry.to_document(),
+                router_snapshot=router.doctor_snapshot(),
+                usage_stats_snapshot=router.usage_stats_snapshot(),
+                notify_sender=notify_sender,
+            )
+
+        interval = max(60, int(getattr(config, "model_scout_interval_seconds", 3600) or 3600))
+        operation_slot = int(time.time()) // interval
+        authority = InternalWriterFactory(trigger="scheduler").issue(
+            "scheduled_model_scout",
+            operation_id=f"model-scout:{operation_slot}",
+            runtime_mode="safe",
         )
+        try:
+            result = execute_internal_write(
+                authority=authority,
+                operation="run_scout",
+                resource_type="model_scout_state",
+                target_scope="state:model_scout",
+                arguments={"record_id": str(operation_slot)},
+                callback=_run_scout_once,
+                journal=InternalWriterJournal(Path(config.db_path).expanduser().resolve().parent / "internal_writer_journal.sqlite3"),
+            )
+        except ValueError as exc:
+            if str(exc) == "internal_writer_duplicate_operation":
+                _log(f"skip duplicate operation slot={operation_slot}")
+                return 0
+            raise
 
         if result.get("error"):
             _log(f"completed_with_error error={result['error']}")

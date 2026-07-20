@@ -8,6 +8,8 @@ from pathlib import Path
 import tempfile
 from typing import Any
 
+from agent.internal_writer_authority import perform_registered_internal_write
+
 
 _SCHEMA_VERSION = 2
 _DEFAULT_MAX_ITEMS = 400
@@ -143,7 +145,19 @@ class ActionLedgerStore:
         return normalized
 
     def _write(self, state: dict[str, Any]) -> None:
-        _write_json_atomic(self.path, state)
+        state_hash = hashlib.sha256(
+            json.dumps(state, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        perform_registered_internal_write(
+            writer_id="llm_action_ledger",
+            operation="append_action",
+            resource_type="action_ledger",
+            target_scope="state:llm_action_ledger",
+            arguments={"state_hash": state_hash, "entry_count": len(state.get("entries") or [])},
+            callback=lambda: _write_json_atomic(self.path, state),
+            journal_path=self.path.with_name(f"{self.path.name}.internal-writer.sqlite3"),
+            operation_id=f"ledger:{state_hash}",
+        )
 
     def save(self, state: dict[str, Any]) -> dict[str, Any]:
         normalized = self._normalize(state if isinstance(state, dict) else {})

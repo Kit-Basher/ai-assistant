@@ -790,3 +790,22 @@ Search is not a browser. It returns untrusted SearXNG metadata only.
 - Universal authorization is **not complete**: 47 `legacy_unmigrated`, seven
   `plan_gated_legacy`, and 16 runtime `supported_pending_migration`
   dispositions remain release blockers.
+
+## Architecture and Safety Audit v2C
+
+- Confirmed executor dispatch now reserves confirmation in a durable SQLite
+  ledger shared by API processes. Exactly one process can enter execution;
+  replay and concurrent delivery fail closed.
+- Stale pre-execution reservations become failed. Stale execution becomes
+  indeterminate and requires visible reconciliation; automatic retry cannot
+  repeat an uncertain mutation.
+- The 24 writer candidates now have honest dispositions: eleven wholly
+  internal writers are enforced, five are mixed, six remain operator legacy,
+  one is central, and one is read-only.
+- Public inventory remains 91 surfaces with 47 legacy and seven Plan-gated
+  legacy groups. Per-file pending migration is 27 after model-scout user status
+  changes were separated from scheduled bookkeeping.
+- Finalization fixed confirmation storage at
+  `~/.local/share/personal-agent/confirmation_transactions.sqlite3`, added
+  idempotent legacy-sidecar import, restrictive SQLite permissions, and Backup
+  v1 online snapshots/restore merges for transaction and internal receipts.
