@@ -3141,6 +3141,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Personal Agent doctor checks")
     parser.add_argument("--json", action="store_true", help="emit JSON output")
     parser.add_argument("--fix", action="store_true", help="apply deterministic safe fixes")
+    parser.add_argument("--apply-plan", default=None, help="authorized Universal Mutation Plan JSON for --fix")
+    parser.add_argument("--confirmation", default=None, help="scoped confirmation artifact JSON for --fix")
     parser.add_argument(
         "--collect-diagnostics",
         action="store_true",
@@ -3150,6 +3152,34 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--api-base-url", default=f"http://127.0.0.1:{runtime_port()}", help="local API base URL")
     parser.add_argument("--repo-root", default=None, help="override repo root")
     args = parser.parse_args(argv)
+
+    if args.fix:
+        from agent.secrets import _authorized_secret_request
+
+        payload: dict[str, object] = {
+            "operation": "llm.fix",
+            "actor_id": "local_cli",
+            "thread_id": "doctor",
+            "session_id": "cli",
+        }
+        if args.apply_plan or args.confirmation:
+            if not args.apply_plan or not args.confirmation:
+                print("both --apply-plan and --confirmation are required", file=sys.stderr, flush=True)
+                return 2
+            try:
+                plan_raw = json.loads(Path(args.apply_plan).read_text(encoding="utf-8"))
+                confirmation_raw = json.loads(Path(args.confirmation).read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                print(f"authorization artifact could not be read: {exc.__class__.__name__}", file=sys.stderr, flush=True)
+                return 2
+            payload["mutation_plan"] = plan_raw.get("plan") if isinstance(plan_raw, dict) and isinstance(plan_raw.get("plan"), dict) else plan_raw
+            payload["confirmation"] = confirmation_raw
+        ok_http, response = _authorized_secret_request(str(args.api_base_url), payload)
+        print(json.dumps(response, ensure_ascii=True, sort_keys=True, indent=2), flush=True)
+        if bool(response.get("requires_confirmation")):
+            print("No fix was applied. Confirm this Plan, then rerun with --apply-plan and --confirmation.", file=sys.stderr, flush=True)
+            return 3
+        return 0 if ok_http else 2
 
     report = run_doctor_report(
         repo_root=args.repo_root,

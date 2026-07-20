@@ -308,19 +308,18 @@ class TestStateMachineHardening(unittest.TestCase):
             first = _HandlerForTest(runtime, "/llm/fixit", {"confirm": True})
             first.do_POST()
 
-        self.assertEqual(200, first.status_code)
+        self.assertEqual(400, first.status_code)
         first_payload = json.loads(first.body.decode("utf-8"))
-        self.assertTrue(first_payload["ok"])
-        self.assertTrue(first_payload["did_work"])
-        self.assertFalse(bool(runtime._llm_fixit_store.state.get("active")))  # type: ignore[attr-defined]
-        self.assertEqual(confirm_token, runtime._llm_fixit_store.state.get("last_confirm_token"))  # type: ignore[attr-defined]
+        self.assertFalse(first_payload["ok"])
+        self.assertEqual("boolean_confirmation_not_authorization", first_payload.get("error"))
+        self.assertTrue(bool(runtime._llm_fixit_store.state.get("active")))  # type: ignore[attr-defined]
+        self.assertIsNone(runtime._llm_fixit_store.state.get("last_confirm_token"))  # type: ignore[attr-defined]
 
         second = _HandlerForTest(runtime, "/llm/fixit", {"confirm": True})
         second.do_POST()
-        self.assertEqual(200, second.status_code)
+        self.assertEqual(400, second.status_code)
         second_payload = json.loads(second.body.decode("utf-8"))
-        self.assertEqual("already_consumed", second_payload.get("status"))
-        self.assertIn("already used", str(second_payload.get("message") or "").lower())
+        self.assertEqual("boolean_confirmation_not_authorization", second_payload.get("error"))
 
     def test_invalid_transition_helpers_fail_cleanly_for_missing_and_stale_states(self) -> None:
         store = PackStore(self.db_path)

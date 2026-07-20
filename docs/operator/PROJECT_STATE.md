@@ -809,3 +809,23 @@ Search is not a browser. It returns untrusted SearXNG metadata only.
   `~/.local/share/personal-agent/confirmation_transactions.sqlite3`, added
   idempotent legacy-sidecar import, restrictive SQLite permissions, and Backup
   v1 online snapshots/restore merges for transaction and internal receipts.
+
+## Audit v2D working state (2026-07-20)
+
+Provider/model/configuration/secret/setup HTTP mutations now enter
+`ProviderModelAuthorizationService`: Universal Mutation Plan, durable scoped
+confirmation, Capability Policy, Executor Registry, bounded executor, durable
+result, and redacted receipt. Bare `confirm: true` is rejected. SAFE MODE
+blocks provider/model acquisition and routing changes; changing the mode itself
+still requires a scoped Plan. The 94-surface inventory retains 19 legacy
+surfaces outside this domain. Universal authorization remains incomplete.
+No public secret-delete/import/repair or bulk configuration-import/reset
+surface exists; those five functions are recorded as `unimplemented_denied`,
+while secret replacement uses the authorized set path.
+
+Final alias review also moved assistant model/default/temporary/acquisition and
+control-mode confirmations through this same service. Telegram recovery
+confirmation now enters `llm.fix` through the same boundary; Telegram cannot
+invoke the former direct fix helper. Ordinary read-only Telegram/assistant
+status remains immediate. These are transport aliases into the existing 36
+HTTP/CLI mutation surfaces, not parallel mutation surfaces or executors.

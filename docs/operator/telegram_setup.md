@@ -3,7 +3,9 @@
 ## Token source
 - Secret key: `telegram:bot_token`
 - Preferred workflow:
-  - `python -m agent.secrets set telegram:bot_token`
+  - `python -m agent.secrets set telegram:bot_token` previews an authorized
+    secret Plan; it never writes directly. Apply needs the exact Plan plus an
+    already valid scoped confirmation artifact.
   - `python -m agent.secrets get telegram:bot_token --redacted`
   - `systemctl --user restart personal-agent-telegram.service`
 

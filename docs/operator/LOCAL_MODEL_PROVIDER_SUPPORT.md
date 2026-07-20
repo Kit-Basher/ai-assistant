@@ -40,3 +40,8 @@ Current model acquisition/import rollback removes only owned generated files,
 such as Personal Agent-created Modelfiles or download markers. It does not
 delete unrelated Ollama models, Ollama cache data, user-provided GGUF files,
 user-provided Modelfiles, or broad filesystem directories.
+
+Public acquisition, pull, switch, default, registry, cleanup, and maintenance
+writes require a Universal Mutation Plan and durable scoped confirmation. SAFE
+MODE denies acquisition/removal/remote-switch equivalents while inventory,
+health, and advisory discovery remain available.

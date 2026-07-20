@@ -21,9 +21,40 @@ READ_ONLY_POST = {
     "/llm/health/run",
     "/llm/models/check",
     "/llm/models/recommend",
+    "/llm/models/proposals",
     "/providers/test",
     "/search/query",
     "/semantic/doctor",
+    "/telegram/test",
+}
+
+DOMAIN_CENTRAL_AUTHORIZED = {
+    "/providers",
+    "/bootstrap/run",
+    "/telegram/secret",
+    "/models/refresh",
+    "/defaults/rollback",
+    "/model_watch/run",
+    "/model_watch/refresh",
+    "/model_watch/hf/scan",
+    "/llm/models/policy",
+    "/llm/models/switch",
+    "/llm/models/switch_temporary",
+    "/llm/fixit",
+    "/llm/control_mode",
+    "/llm/autoconfig/apply",
+    "/llm/capabilities/reconcile/apply",
+    "/llm/cleanup/apply",
+    "/llm/hygiene/apply",
+    "/llm/self_heal/apply",
+    "/llm/support/remediate/execute",
+    "/llm/registry/rollback",
+    "/llm/autopilot/bootstrap",
+    "/llm/autopilot/undo",
+    "/llm/autopilot/unpause",
+    "/modelops/execute",
+    "/authorized/provider-model/preview",
+    "/authorized/provider-model/apply",
 }
 
 CENTRAL_PLAN_APPLY = {
@@ -47,12 +78,12 @@ PLAN_GATED_LEGACY = {
 }
 
 DYNAMIC_ROUTES = [
-    ("POST", "/providers/{provider_id}/secret", "legacy_unmigrated"),
-    ("POST", "/providers/{provider_id}/models", "legacy_unmigrated"),
+    ("POST", "/providers/{provider_id}/secret", "central_authorized"),
+    ("POST", "/providers/{provider_id}/models", "central_authorized"),
     ("POST", "/providers/{provider_id}/test", "read_only"),
-    ("POST", "/providers/ollama/pull", "legacy_unmigrated"),
-    ("POST", "/providers/{provider_id}/models/refresh", "internal_state_write"),
-    ("PUT", "/providers/{provider_id}", "legacy_unmigrated"),
+    ("POST", "/providers/ollama/pull", "central_authorized"),
+    ("POST", "/providers/{provider_id}/models/refresh", "central_authorized"),
+    ("PUT", "/providers/{provider_id}", "central_authorized"),
     ("PUT", "/pack_sources/{source_id}/policy", "legacy_unmigrated"),
     ("PUT", "/pack_sources/catalog/{catalog_id}", "legacy_unmigrated"),
 ]
@@ -77,6 +108,12 @@ NON_API_SURFACES = [
         "path": "AgentOrchestrator._call_skill (db:write/ops permissions)",
     },
     {
+        "surface": "cli.secret_set",
+        "kind": "cli_command",
+        "status": "central_authorized",
+        "path": "agent.secrets -> loopback authorized provider/model preview/apply API; no direct SecretStore write",
+    },
+    {
         "surface": "skill_pack.managed_adapter_invocation",
         "kind": "skill_pack",
         "status": "central_authorized",
@@ -89,10 +126,10 @@ NON_API_SURFACES = [
         "path": "Universal Mutation Plan + scope-bound confirmation + capability policy + trusted invocation context",
     },
     {
-        "surface": "background.model_watch_and_autopilot",
+        "surface": "background.model_watch_bookkeeping",
         "kind": "background_job",
-        "status": "legacy_unmigrated",
-        "path": "AgentRuntime model-watch/autopilot callbacks",
+        "status": "internal_state_write",
+        "path": "scheduled model-watch/scout bookkeeping only; public triggers are centrally authorized",
     },
     {
         "surface": "external_pack.foreign_code",
@@ -136,6 +173,12 @@ def classify(method: str, route: str) -> tuple[str, str, str]:
         status = dynamic[(method, route)]
     elif route in READ_ONLY_POST:
         status = "canonical_front_door" if route == "/chat" else "read_only"
+    elif route in DOMAIN_CENTRAL_AUTHORIZED:
+        status = "central_authorized"
+    elif (method, route) in {("PUT", "/config"), ("PUT", "/defaults")}:
+        status = "central_authorized"
+    elif route in {"/model", "/llm/model"} and method == "POST":
+        status = "removed"
     elif route.endswith("/plan"):
         status = "read_only_preview"
     elif route in CENTRAL_PLAN_APPLY:
@@ -155,6 +198,7 @@ def classify(method: str, route: str) -> tuple[str, str, str]:
         "read_only_preview": "domain preview controller",
         "plan_gated_legacy": "domain-specific Plan/apply controller; not central capability registry",
         "internal_state_write": "runtime internal state writer",
+        "removed": "removed compatibility mutation; method is denied",
         "legacy_unmigrated": "legacy runtime/controller mutation",
     }.get(status, status)
     return status, effect, authority
@@ -181,7 +225,7 @@ def build_inventory() -> dict[str, Any]:
         counts[item["status"]] = counts.get(item["status"], 0) + 1
     return {
         "schema": "personal-agent.mutation-surface-inventory.v2",
-        "source_commit": "audit-v2c-working-tree-on-a59292274df04fde3b9a3d48f90b6cd7c92b71c4",
+        "source_commit": "audit-v2d-working-tree-on-1521878e729aea5669a7adb67db711c2513ad718",
         "scope": "public API mutations plus assistant, Telegram, CLI, skill-pack, executor, and background entry points",
         "status_definitions": {
             "central_authorized": "central capability schema, policy, Universal Mutation Plan, confirmation, and Executor Registry",
@@ -189,6 +233,8 @@ def build_inventory() -> dict[str, Any]:
             "plan_gated_legacy": "domain Plan/apply exists but remains outside the central capability/executor authority",
             "legacy_unmigrated": "public or reachable mutation not fully migrated to the canonical authorization stack",
             "unimplemented_denied": "intentionally unavailable and fail-closed",
+            "internal_state_write": "bounded scheduled/runtime bookkeeping, not public authority",
+            "removed": "obsolete compatibility mutation denied or method-not-allowed",
         },
         "summary": counts,
         "surfaces": surfaces,
@@ -218,12 +264,21 @@ def architecture_checks() -> list[dict[str, Any]]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--write-inventory", action="store_true")
+    parser.add_argument("--check-inventory", action="store_true")
     args = parser.parse_args()
     inventory = build_inventory()
     checks = architecture_checks()
     payload = {**inventory, "architecture_checks": checks}
+    canonical = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    inventory_path = ROOT / "docs" / "operator" / "MUTATION_SURFACE_INVENTORY_V2.json"
+    if args.write_inventory:
+        inventory_path.write_text(canonical, encoding="utf-8")
+    if args.check_inventory and inventory_path.read_text(encoding="utf-8") != canonical:
+        print("mutation inventory differs from deterministic regeneration", file=sys.stderr)
+        return 1
     if args.json:
-        print(json.dumps(payload, indent=2, sort_keys=True))
+        print(canonical, end="")
     else:
         print("# Architecture and Safety Audit v2")
         for check in checks:

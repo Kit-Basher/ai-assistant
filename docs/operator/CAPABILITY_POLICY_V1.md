@@ -308,3 +308,8 @@ capability. Operator-triggered and mixed writers were not relabelled internal.
 Durable confirmation reservation follows Plan/confirmation validation and the
 policy decision, and precedes executor entry. It does not migrate the 47 legacy
 or seven Plan-gated public groups.
+
+Audit v2D adds implemented `provider.configure`, `provider.secret.manage`,
+`secret.manage`, `model.configure`, `model.acquire`, `model.maintain`,
+`runtime.policy.configure`, and `setup.repair`. Each is Plan-and-confirm,
+target-bound, runtime-revalidated, receipt-required, and bypass-forbidden.

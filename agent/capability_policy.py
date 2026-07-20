@@ -526,6 +526,50 @@ def _default_capabilities() -> list[CapabilityDefinition]:
         _capability("notification.inspect", "Inspect notification state", "read_only", "local_process", "reversible", "low", "allow"),
         _capability("skill_pack.inspect", "Inspect installed skill packs", "read_only", "local_process", "reversible", "low", "allow"),
         _capability("skill_pack.permissions.inspect", "Inspect skill-pack permissions", "read_only", "local_process", "reversible", "low", "allow"),
+        _capability("provider.inspect", "Inspect provider configuration", "read_only", "local_process", "reversible", "low", "allow"),
+        _capability("model.inspect", "Inspect model inventory and recommendations", "read_only", "local_process", "reversible", "low", "allow"),
+        _capability("setup.inspect", "Inspect setup and recovery state", "read_only", "local_host", "reversible", "low", "allow"),
+        _capability(
+            "provider.configure", "Change provider configuration", "mutating", "local_filesystem",
+            "conditionally_reversible", "high", "plan_and_confirm", receipt_required=True,
+            runtime_revalidation_required=True, target_binding_required=True, generic_bypass_forbidden=True,
+        ),
+        _capability(
+            "provider.secret.manage", "Change a provider secret", "mutating", "local_filesystem",
+            "conditionally_reversible", "high", "plan_and_confirm", receipt_required=True,
+            runtime_revalidation_required=True, target_binding_required=True, generic_bypass_forbidden=True,
+        ),
+        _capability(
+            "secret.manage", "Change a bounded application secret", "mutating", "local_filesystem",
+            "conditionally_reversible", "high", "plan_and_confirm", receipt_required=True,
+            runtime_revalidation_required=True, target_binding_required=True, generic_bypass_forbidden=True,
+        ),
+        _capability(
+            "model.configure", "Change model selection or routing", "mutating", "local_filesystem",
+            "reversible", "high", "plan_and_confirm", receipt_required=True,
+            runtime_revalidation_required=True, target_binding_required=True, generic_bypass_forbidden=True,
+        ),
+        _capability(
+            "model.acquire", "Acquire or install a model", "mutating", "external_service",
+            "conditionally_reversible", "high", "plan_and_confirm", receipt_required=True,
+            runtime_revalidation_required=True, target_binding_required=True, external_side_effect=True,
+            generic_bypass_forbidden=True,
+        ),
+        _capability(
+            "model.maintain", "Mutate model inventory or maintenance state", "mutating", "local_host",
+            "conditionally_reversible", "high", "plan_and_confirm", receipt_required=True,
+            runtime_revalidation_required=True, target_binding_required=True, generic_bypass_forbidden=True,
+        ),
+        _capability(
+            "runtime.policy.configure", "Change runtime provider/model policy", "mutating", "local_filesystem",
+            "reversible", "high", "plan_and_confirm", receipt_required=True,
+            runtime_revalidation_required=True, target_binding_required=True, generic_bypass_forbidden=True,
+        ),
+        _capability(
+            "setup.repair", "Apply a bounded setup or recovery repair", "mutating", "local_host",
+            "conditionally_reversible", "high", "plan_and_confirm", receipt_required=True,
+            runtime_revalidation_required=True, target_binding_required=True, generic_bypass_forbidden=True,
+        ),
         _capability(
             "system.package.install",
             "Install local package",

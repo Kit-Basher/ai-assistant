@@ -11,6 +11,7 @@ from agent.api_server import APIServerHandler, AgentRuntime
 from agent.config import Config
 from agent.filesystem_skill import FileSystemSkill
 from agent.model_watch_catalog import write_snapshot_atomic
+from agent.mutation_plan import build_mutation_confirmation
 from agent.shell_skill import ShellSkill
 
 
@@ -301,6 +302,32 @@ class TestPublishabilitySmoke(unittest.TestCase):
         self.assertEqual(200, handler.status_code, path)
         return handler.response_payload
 
+    def _authorized(
+        self,
+        runtime: AgentRuntime,
+        operation: str,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        preview = self._post(
+            runtime,
+            "/authorized/provider-model/preview",
+            {"operation": operation, **payload},
+        )
+        plan = preview.get("plan") if isinstance(preview.get("plan"), dict) else {}
+        return self._post(
+            runtime,
+            "/authorized/provider-model/apply",
+            {
+                "operation": operation,
+                **payload,
+                "mutation_plan": plan,
+                "confirmation": build_mutation_confirmation(
+                    plan,
+                    confirmation_id=f"publishability-{operation}-{plan.get('plan_id')}",
+                ),
+            },
+        )
+
     def _chat_meta(self, payload: dict[str, object]) -> dict[str, object]:
         meta = payload.get("meta")
         self.assertTrue(isinstance(meta, dict))
@@ -373,7 +400,7 @@ class TestPublishabilitySmoke(unittest.TestCase):
         self.assertFalse(bool(local_rec_meta.get("used_llm")))
         self.assertIn("Best local option:", str(local_rec.get("message") or ""))
 
-        controlled = self._post(runtime, "/llm/control_mode", {"mode": "controlled", "confirm": True})
+        controlled = self._authorized(runtime, "runtime.control_mode", {"mode": "controlled"})
         self.assertEqual("controlled", ((controlled.get("policy") or {}).get("mode")))
 
         coding_rec, coding_ms = self._chat(
@@ -413,7 +440,7 @@ class TestPublishabilitySmoke(unittest.TestCase):
         self.assertFalse(bool(cheap_meta.get("used_llm")))
         self.assertIn("Cheap cloud recommendation:", str(cheap_cloud.get("message") or ""))
 
-        baseline = self._post(runtime, "/llm/control_mode", {"mode": "baseline", "confirm": True})
+        baseline = self._authorized(runtime, "runtime.control_mode", {"mode": "baseline"})
         baseline_policy = baseline.get("policy") if isinstance(baseline.get("policy"), dict) else {}
         self.assertEqual("safe", baseline_policy.get("mode"))
         self.assertFalse(bool(baseline_policy.get("override_active")))
@@ -552,31 +579,16 @@ class TestPublishabilitySmoke(unittest.TestCase):
             "switch temporarily to ollama:qwen2.5:7b-instruct",
             user_id="smoke-mutate",
             thread_id="smoke-mutate-thread",
+            expected_status=400,
         )
         switch_preview_meta = self._chat_meta(switch_preview)
-        switch_preview_setup = switch_preview.get("setup") if isinstance(switch_preview.get("setup"), dict) else {}
         self.assertEqual("model_status", switch_preview_meta.get("route"))
         self.assertEqual(["model_controller"], switch_preview_meta.get("used_tools"))
         self.assertFalse(bool(switch_preview_meta.get("used_llm")))
-        self.assertTrue(bool(switch_preview_setup.get("requires_confirmation")))
+        self.assertEqual("safe_mode_mutation_blocked", switch_preview.get("error_kind"))
+        self.assertFalse(bool(switch_preview.get("mutated")))
 
-        safe_blocked_confirm, _ = self._chat(
-            runtime,
-            "yes",
-            user_id="smoke-mutate",
-            thread_id="smoke-mutate-thread",
-            expected_status=400,
-        )
-        safe_blocked_meta = self._chat_meta(safe_blocked_confirm)
-        self.assertEqual("model_status", safe_blocked_meta.get("route"))
-        self.assertEqual(["model_controller"], safe_blocked_meta.get("used_tools"))
-        self.assertFalse(bool(safe_blocked_meta.get("used_llm")))
-        self.assertEqual("safe_mode_blocked", safe_blocked_confirm.get("error_kind"))
-        safe_blocked_message = str(safe_blocked_confirm.get("message") or "")
-        self.assertIn("SAFE MODE is active", safe_blocked_message)
-        self.assertIn("Switch to Controlled Mode explicitly", safe_blocked_message)
-
-        controlled = self._post(runtime, "/llm/control_mode", {"mode": "controlled", "confirm": True})
+        controlled = self._authorized(runtime, "runtime.control_mode", {"mode": "controlled"})
         self.assertEqual("controlled", ((controlled.get("policy") or {}).get("mode")))
 
         switch_preview_controlled, _ = self._chat(
@@ -653,7 +665,7 @@ class TestPublishabilitySmoke(unittest.TestCase):
         self.assertFalse(bool(switch_back_meta.get("used_llm")))
         self.assertIn("Temporary chat model switched to ollama:qwen3.5:4b.", str(switch_back_confirm.get("message") or ""))
 
-        baseline = self._post(runtime, "/llm/control_mode", {"mode": "baseline", "confirm": True})
+        baseline = self._authorized(runtime, "runtime.control_mode", {"mode": "baseline"})
         baseline_policy = baseline.get("policy") if isinstance(baseline.get("policy"), dict) else {}
         self.assertEqual("safe", baseline_policy.get("mode"))
 
@@ -703,16 +715,27 @@ class TestPublishabilitySmoke(unittest.TestCase):
         self.assertTrue(kind_rows)
         self.assertTrue(all(isinstance(row, dict) and row.get("proposal_kind") == "candidate_good" for row in kind_rows))
 
+        policy_request = {
+            "model_id": "openrouter:openai/gpt-4.1-mini",
+            "status": "known_good",
+            "role_hints": ["coding"],
+            "notes": "Publishability smoke review.",
+            "justification": "Smoke suite operator write.",
+            "reviewed_at": "2026-04-01T00:00:00Z",
+        }
+        policy_preview = self._post(runtime, "/llm/models/policy", policy_request)
+        policy_plan = policy_preview.get("plan") if isinstance(policy_preview.get("plan"), dict) else {}
+        self.assertTrue(bool(policy_preview.get("requires_confirmation")))
         policy_write = self._post(
             runtime,
             "/llm/models/policy",
             {
-                "model_id": "openrouter:openai/gpt-4.1-mini",
-                "status": "known_good",
-                "role_hints": ["coding"],
-                "notes": "Publishability smoke review.",
-                "justification": "Smoke suite operator write.",
-                "reviewed_at": "2026-04-01T00:00:00Z",
+                **policy_request,
+                "mutation_plan": policy_plan,
+                "confirmation": build_mutation_confirmation(
+                    policy_plan,
+                    confirmation_id=f"publishability-policy-{policy_plan.get('plan_id')}",
+                ),
             },
         )
         policy_entry = ((policy_write.get("envelope") or {}).get("entry")) or {}

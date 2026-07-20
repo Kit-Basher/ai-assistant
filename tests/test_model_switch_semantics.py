@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from typing import Any
 
@@ -126,7 +127,12 @@ class TestModelSwitchSemantics(unittest.TestCase):
         self.assertIn("I will make ollama:deepseek-r1:7b the default chat model.", preview_text)
         self.assertEqual("ollama:qwen2.5:7b-instruct", self.runtime.llm_status().get("stored_chat_model"))
 
-        confirmed = self._chat("yes", thread_id="thread:default")
+        with patch.object(
+            self.runtime,
+            "test_provider",
+            return_value=(True, {"ok": True, "provider": "ollama", "model_id": "ollama:deepseek-r1:7b"}),
+        ):
+            confirmed = self._chat("yes", thread_id="thread:default")
         confirmed_text = self._text(confirmed)
         self.assertIn("Default chat model updated", confirmed_text)
         self.assertIn("Previous default: ollama:qwen2.5:7b-instruct", confirmed_text)

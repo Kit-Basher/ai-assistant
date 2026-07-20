@@ -393,3 +393,17 @@ proof as mandatory:
   service/install variants and extended Backup/Restore v1 to preserve durable
   confirmation and internal-writer receipts without depending on copied
   WAL/SHM files.
+
+## Audit v2D provider/model authorization migration (working tree)
+
+- Added central capabilities and executors for provider configuration, secrets,
+  model routing/acquisition/maintenance, runtime policy, and setup repair.
+- Converted compatibility HTTP routes and the secrets CLI to central Plan/apply;
+  boolean confirmation and direct CLI secret writes now fail closed.
+- Plans bind RuntimeTruthService state, registry/config fingerprints, normalized
+  requests, and opaque keyed secret versions. Nineteen global legacy surfaces
+  remain outside this domain. This is not a release checkpoint.
+- Final alias review removed direct assistant RuntimeTruth model/control setters
+  and the Telegram direct recovery helper. Confirmed assistant and Telegram
+  mutations now reuse the durable provider/model authorization service; missing
+  adapters and bare confirmations fail closed.

@@ -83,3 +83,10 @@ This prevents public serialized inputs and ordinary extension content from
 claiming authority. It does not sandbox malicious Python already executing in
 the trusted process. Foreign executable/plugin packs remain denied. Protection
 from arbitrary in-process code requires a process/OS isolation boundary.
+
+## Audit v2D mixed-writer split
+
+Manual watch, HF scan, proposal, policy, autopilot, and maintenance entry points
+are public mutations and use central authorization. Read-only discovery remains
+immediate. Scheduled catalog/health/scout/watch bookkeeping retains only bounded
+internal identities and cannot invoke the new public mutation executors.

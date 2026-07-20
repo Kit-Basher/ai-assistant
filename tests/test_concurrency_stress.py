@@ -246,7 +246,7 @@ class TestConcurrencyStress(unittest.TestCase):
         self.assertEqual(0, int(final_packs["summary"]["installed"]))
         self.assertFalse(any(row.get("pack_id") == canonical_id for row in self.runtime.pack_store.list_external_packs()))
 
-    def test_fixit_confirm_overlap_executes_once_and_replays_cleanly(self) -> None:
+    def test_fixit_boolean_confirm_overlap_fails_closed_without_execution(self) -> None:
         self.runtime.set_listening("127.0.0.1", 8765)
         now_epoch = int(time.time())
         plan = [
@@ -319,21 +319,17 @@ class TestConcurrencyStress(unittest.TestCase):
                 first = threading.Thread(target=confirm_worker, args=(results,), daemon=True)
                 second = threading.Thread(target=confirm_worker, args=(results,), daemon=True)
                 first.start()
-                self.assertTrue(execute_started.wait(3))
                 second.start()
-                time.sleep(0.1)
-                self.assertEqual(1, len(execute_calls))
                 allow_finish.set()
                 first.join(timeout=5)
                 second.join(timeout=5)
 
         self.assertFalse(errors, errors)
         self.assertEqual(2, len(results))
-        self.assertEqual(1, len(execute_calls))
-        statuses = {row.get("status") for row in results}
-        self.assertIn("already_consumed", statuses)
-        self.assertTrue(any(str(row.get("status") or "") != "already_consumed" for row in results))
-        self.assertFalse(bool(self.runtime._llm_fixit_store.state.get("active")))  # type: ignore[attr-defined]
+        self.assertFalse(execute_started.is_set())
+        self.assertEqual(0, len(execute_calls))
+        self.assertTrue(all(row.get("error") == "boolean_confirmation_not_authorization" for row in results))
+        self.assertTrue(bool(self.runtime._llm_fixit_store.state.get("active")))  # type: ignore[attr-defined]
 
     def test_registry_writes_remain_parseable_under_overlap(self) -> None:
         service = self.runtime._pack_registry_discovery()

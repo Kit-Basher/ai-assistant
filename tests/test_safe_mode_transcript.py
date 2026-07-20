@@ -1764,7 +1764,7 @@ class TestSafeModeTranscript(unittest.TestCase):
         )
         self.assertEqual("ollama:qwen3.5:4b", str(runtime.runtime_truth_service().current_chat_target_status().get("model") or "").strip())
         self.assertIn("without switching", test_text.lower())
-        self.assertIn("ollama:qwen2.5:7b-instruct", switched_text.lower())
+        self.assertIn("safe mode blocked this mutation", switched_text.lower())
         self.assertIn("ollama:qwen3.5:4b", after_switch_text.lower())
         self.assertIn("i do not have a recent trial model switch to roll back", rollback_text.lower())
         self.assertIn("ollama:qwen3.5:4b", rolled_back_text.lower())
@@ -2004,8 +2004,7 @@ class TestSafeModeTranscript(unittest.TestCase):
 
         self.assertEqual("model_status", temporary_meta.get("route"))
         self.assertFalse(bool(temporary_meta.get("used_llm", False)))
-        self.assertIn("I will switch chat temporarily to ollama:qwen2.5:7b-instruct.", temporary_text)
-        self.assertIn("Say yes to continue, or no to cancel.", temporary_text)
+        self.assertIn("SAFE MODE blocked this mutation.", temporary_text)
         self.assertEqual(
             "ollama:qwen3.5:4b",
             str(runtime.runtime_truth_service().current_chat_target_status().get("model") or "").strip(),
@@ -2021,8 +2020,7 @@ class TestSafeModeTranscript(unittest.TestCase):
         self.assertFalse(bool(temporary_for_default_meta.get("used_llm", False)))
         self.assertEqual("model_status", default_meta.get("route"))
         self.assertFalse(bool(default_meta.get("used_llm", False)))
-        self.assertIn("I will make ollama:deepseek-r1:7b the default chat model.", default_text)
-        self.assertIn("Say yes to continue, or no to cancel.", default_text)
+        self.assertIn("SAFE MODE blocked this mutation.", default_text)
         self.assertEqual("ollama:qwen2.5:7b-instruct", default_after_make_default)
         self.assertIn("ollama:qwen3.5:4b", active_after_default_text.lower())
         self.assertIn("do not have a recent trial model switch to roll back", switch_back_after_default_text.lower())
@@ -2393,13 +2391,13 @@ class TestSafeModeTranscript(unittest.TestCase):
 
         self.assertEqual("model_status", qwen_meta.get("route"))
         self.assertFalse(bool(qwen_meta.get("used_llm", False)))
-        self.assertIn("ollama:qwen2.5:7b-instruct", qwen_text.lower())
+        self.assertIn("safe mode blocked this mutation", qwen_text.lower())
         self.assertNotIn("deepseek", qwen_text.lower())
         self.assertIn("ollama:qwen3.5:4b", qwen_status_text.lower())
 
         self.assertEqual("model_status", deepseek_meta.get("route"))
         self.assertFalse(bool(deepseek_meta.get("used_llm", False)))
-        self.assertIn("ollama:deepseek-r1:7b", deepseek_text.lower())
+        self.assertIn("safe mode blocked this mutation", deepseek_text.lower())
         self.assertNotIn("what are you referring to", deepseek_text.lower())
         self.assertIn("ollama:qwen3.5:4b", deepseek_status_text.lower())
 

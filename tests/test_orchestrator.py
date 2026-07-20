@@ -12,6 +12,10 @@ from agent.filesystem_skill import FileSystemSkill
 from agent.knowledge_cache import facts_hash
 from agent.onboarding_flow import onboarding_completed_key
 from agent.orchestrator import Orchestrator, OrchestratorResponse
+from agent.mutation_plan import (
+    build_mutation_plan,
+    validate_mutation_confirmation,
+)
 from agent.policy import PLAN_MODE_SCHEMA_VERSION, build_canonical_plan, build_mutator_plan
 from skills.resource_governor import collector
 from agent.shell_skill import ShellSkill
@@ -243,6 +247,7 @@ class _ControlModeRuntimeAdapter(_FrontdoorRuntimeAdapter):
     def __init__(self, truth: "_FakeRuntimeTruthService") -> None:
         self._truth = truth
         self.control_mode_calls: list[dict[str, object]] = []
+        self._plans: dict[str, dict[str, object]] = {}
 
     def llm_control_mode_set(self, payload: dict[str, object]) -> tuple[bool, dict[str, object]]:
         request = dict(payload)
@@ -280,6 +285,81 @@ class _ControlModeRuntimeAdapter(_FrontdoorRuntimeAdapter):
     def llm_control_mode_status(self) -> dict[str, object]:
         return self._truth.model_controller_policy_status()
 
+    def route_provider_model_mutation(
+        self,
+        operation: str,
+        payload: dict[str, object],
+    ) -> tuple[bool, dict[str, object]]:
+        specs = {
+            "model.switch": ("model.configure", "model.switch.v1"),
+            "model.switch_temporary": ("model.configure", "model.switch_temporary.v1"),
+            "model.acquire": ("model.acquire", "model.acquire.v1"),
+            "runtime.control_mode": ("runtime.policy.configure", "runtime.control_mode.v1"),
+        }
+        spec = specs.get(operation)
+        if spec is None:
+            return False, {"ok": False, "error": "mutation_operation_unknown", "mutated": False}
+        if operation != "runtime.control_mode" and self._truth.safe_mode:
+            return False, {
+                "ok": False,
+                "error": "safe_mode_mutation_blocked",
+                "message": "SAFE MODE blocked this mutation.",
+                "mutated": False,
+            }
+        plan = payload.get("mutation_plan") if isinstance(payload.get("mutation_plan"), dict) else None
+        confirmation = payload.get("confirmation") if isinstance(payload.get("confirmation"), dict) else None
+        if plan is None and confirmation is None:
+            actor = str(payload.get("actor_id") or "")
+            thread = str(payload.get("thread_id") or "")
+            session = str(payload.get("session_id") or "")
+            request = {
+                key: value
+                for key, value in payload.items()
+                if key not in {"actor_id", "thread_id", "session_id"}
+            }
+            plan = build_mutation_plan(
+                plan_id=f"test-{operation}-{len(self.control_mode_calls) + len(self._plans) + 1}",
+                capability_id=spec[0],
+                executor_id=spec[1],
+                expires_at_epoch=int(time.time()) + 600,
+                actor_id=actor,
+                thread_id=thread,
+                session_id=session,
+                target_snapshot={"operation": operation, "request": request},
+                mutation_inventory=[{"operation": operation}],
+                preserved_resources=["unrelated runtime state"],
+                expected_side_effects=[operation],
+                recovery={"rollback_available": True},
+            )
+            plan.update({"action_type": operation, "target": operation, "executor_status": "enabled"})
+            self._plans[str(plan["plan_id"])] = {"plan": plan, "request": request, "consumed": False}
+            return True, {"ok": True, "requires_confirmation": True, "plan": plan, "mutated": False}
+        if plan is None or confirmation is None:
+            return False, {"ok": False, "error": "scoped_mutation_plan_and_confirmation_required", "mutated": False}
+        stored = self._plans.get(str(plan.get("plan_id") or ""))
+        if stored is None or stored.get("plan") != plan:
+            return False, {"ok": False, "error": "mutation_plan_unknown", "mutated": False}
+        if bool(stored.get("consumed")):
+            return False, {"ok": False, "error": "confirmation_consumed", "mutated": False}
+        try:
+            validate_mutation_confirmation(plan, confirmation)
+        except ValueError as exc:
+            return False, {"ok": False, "error": str(exc), "mutated": False}
+        stored["consumed"] = True
+        request = stored.get("request") if isinstance(stored.get("request"), dict) else {}
+        provider = str(request.get("provider") or "") or None
+        model = str(request.get("model_id") or request.get("model") or "")
+        if operation == "model.switch":
+            ok, body = self._truth.set_confirmed_chat_model_target(model, provider_id=provider)
+        elif operation == "model.switch_temporary":
+            ok, body = self._truth.set_temporary_chat_model_target(model, provider_id=provider)
+        elif operation == "model.acquire":
+            ok, body = self._truth.acquire_chat_model_target(model, provider_id=provider)
+        else:
+            ok, body = self.llm_control_mode_set({"mode": request.get("mode"), "confirm": True, "actor": "assistant"})
+        result = dict(body)
+        result.update({"ok": bool(ok), "mutated": bool(ok), "capability_id": spec[0], "executor_id": spec[1]})
+        return bool(ok), result
 
 class _FakeRuntimeTruthService:
     def __init__(self) -> None:
@@ -4856,6 +4936,8 @@ class TestOrchestrator(unittest.TestCase):
     def test_direct_model_switch_uses_exact_target_without_drift(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
         runtime_truth = _FakeRuntimeTruthService()
+        runtime_truth.safe_mode = False
+        adapter = _ControlModeRuntimeAdapter(runtime_truth)
         orchestrator = Orchestrator(
             db=self.db,
             skills_path=self.skills_path,
@@ -4864,6 +4946,7 @@ class TestOrchestrator(unittest.TestCase):
             llm_client=llm,
             runtime_truth_service=runtime_truth,
         )
+        orchestrator._chat_runtime_adapter = adapter
 
         with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
             response = orchestrator.handle_message("switch to qwen2.5:7b-instruct", "user1")
@@ -4873,7 +4956,7 @@ class TestOrchestrator(unittest.TestCase):
             "Temporary chat model switch preview: I will switch chat temporarily to ollama:qwen2.5:7b-instruct. This does not change your default model. Say yes to continue, or no to cancel.",
         ))
         self.assertIn("Plan Mode v2:", response.text)
-        self.assertIn("Action type: model_set_target.", response.text)
+        self.assertIn("Action type: model.switch_temporary.", response.text)
         self.assertIn("Allowed confirmations: yes, confirm.", response.text)
         self.assertNotIn(("set_confirmed_chat_model_target", {"model_id": "ollama:qwen2.5:7b-instruct", "provider_id": "ollama"}), runtime_truth.calls)
         self.assertNotIn(("set_default_chat_model", "ollama:qwen2.5:7b-instruct"), runtime_truth.calls)
@@ -4883,6 +4966,8 @@ class TestOrchestrator(unittest.TestCase):
     def test_direct_model_switch_records_previous_target_for_switch_back(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
         runtime_truth = _FakeRuntimeTruthService()
+        runtime_truth.safe_mode = False
+        adapter = _ControlModeRuntimeAdapter(runtime_truth)
         orchestrator = Orchestrator(
             db=self.db,
             skills_path=self.skills_path,
@@ -4891,6 +4976,7 @@ class TestOrchestrator(unittest.TestCase):
             llm_client=llm,
             runtime_truth_service=runtime_truth,
         )
+        orchestrator._chat_runtime_adapter = adapter
 
         with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
             first = orchestrator.handle_message("switch to qwen2.5:7b-instruct", "user1")
@@ -4908,6 +4994,7 @@ class TestOrchestrator(unittest.TestCase):
     def test_switch_to_unhealthy_model_reports_issue_and_offers_rollback(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
         runtime_truth = _FakeRuntimeTruthService()
+        runtime_truth.safe_mode = False
 
         def _unhealthy_switch(model_id: str, *, provider_id: str | None = None):  # type: ignore[no-untyped-def]
             runtime_truth.calls.append(
@@ -4926,6 +5013,7 @@ class TestOrchestrator(unittest.TestCase):
             }
 
         runtime_truth.set_confirmed_chat_model_target = _unhealthy_switch  # type: ignore[method-assign]
+        adapter = _ControlModeRuntimeAdapter(runtime_truth)
         orchestrator = Orchestrator(
             db=self.db,
             skills_path=self.skills_path,
@@ -4934,6 +5022,7 @@ class TestOrchestrator(unittest.TestCase):
             llm_client=llm,
             runtime_truth_service=runtime_truth,
         )
+        orchestrator._chat_runtime_adapter = adapter
 
         with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
             response = orchestrator.handle_message("switch to qwen2.5:7b-instruct", "user1")
@@ -6786,7 +6875,11 @@ class TestOrchestrator(unittest.TestCase):
         )
         orchestrator._pack_store = _FakePackStore()
         orchestrator._pack_registry_discovery = lambda: discovery  # type: ignore[assignment]
-        before_files = sorted(str(path.relative_to(self.tmpdir.name)) for path in Path(self.tmpdir.name).rglob("*"))
+        before_files = sorted(
+            str(path.relative_to(self.tmpdir.name))
+            for path in Path(self.tmpdir.name).rglob("*")
+            if not path.name.endswith(("-wal", "-shm"))
+        )
 
         first = orchestrator.handle_message(
             "Look through my YouTube history and find the video about neurons differentiating during animal infancy.",
@@ -6830,7 +6923,11 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual([], discovery.preview_calls)
         self.assertEqual([], install_calls)
         self.assertEqual(0, len(llm.chat_calls))
-        after_files = sorted(str(path.relative_to(self.tmpdir.name)) for path in Path(self.tmpdir.name).rglob("*"))
+        after_files = sorted(
+            str(path.relative_to(self.tmpdir.name))
+            for path in Path(self.tmpdir.name).rglob("*")
+            if not path.name.endswith(("-wal", "-shm"))
+        )
         self.assertEqual(before_files, after_files)
 
     def test_second_yes_after_scaffold_preview_creates_review_only_candidate(self) -> None:
@@ -8676,7 +8773,7 @@ Workflow:
             with self.subTest(prompt=prompt):
                 self.assertIsNone(Orchestrator._parse_control_mode_intent(prompt))
 
-    def test_switch_to_controlled_mode_executes_control_action_without_llm(self) -> None:
+    def test_switch_to_controlled_mode_requires_canonical_confirmation(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
         runtime_truth = _FakeRuntimeTruthService()
         adapter = _ControlModeRuntimeAdapter(runtime_truth)
@@ -8691,7 +8788,9 @@ Workflow:
         orchestrator._chat_runtime_adapter = adapter
 
         with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
-            response = orchestrator.handle_message("switch to controlled mode", "user1")
+            preview = orchestrator.handle_message("switch to controlled mode", "user1")
+            self.assertEqual([], adapter.control_mode_calls)
+            response = orchestrator.handle_message("yes", "user1")
 
         payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
         self.assertEqual("action_tool", response.data["route"])
@@ -8703,15 +8802,10 @@ Workflow:
         )
         self.assertFalse(runtime_truth.safe_mode)
         self.assertEqual("explicit_override", runtime_truth.mode_source)
-        self.assertEqual("model_controller_policy", payload.get("type"))
-        self.assertEqual("control_mode_set", payload.get("action"))
-        self.assertIn("Mode: Controlled Mode.", response.text)
-        self.assertIn(
-            "Status: Controlled Mode is active because you explicitly turned it on.",
-            response.text,
-        )
+        self.assertEqual("provider_model_authorization_result", payload.get("type"))
+        self.assertEqual("runtime.control_mode", payload.get("operation"))
 
-    def test_natural_controlled_mode_variant_executes_control_action_without_llm(self) -> None:
+    def test_natural_controlled_mode_variant_requires_canonical_confirmation(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
         runtime_truth = _FakeRuntimeTruthService()
         adapter = _ControlModeRuntimeAdapter(runtime_truth)
@@ -8726,7 +8820,9 @@ Workflow:
         orchestrator._chat_runtime_adapter = adapter
 
         with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
-            response = orchestrator.handle_message("go into controlled mode", "user1")
+            preview = orchestrator.handle_message("go into controlled mode", "user1")
+            self.assertEqual([], adapter.control_mode_calls)
+            response = orchestrator.handle_message("yes", "user1")
 
         self.assertEqual("action_tool", response.data["route"])
         self.assertFalse(response.data["used_llm"])
@@ -8735,9 +8831,9 @@ Workflow:
             [{"mode": "controlled", "confirm": True, "actor": "assistant"}],
             adapter.control_mode_calls,
         )
-        self.assertIn("Mode: Controlled Mode.", response.text)
+        self.assertTrue(response.data["ok"])
 
-    def test_return_to_safe_mode_executes_control_action_without_llm(self) -> None:
+    def test_return_to_safe_mode_requires_canonical_confirmation(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
         runtime_truth = _FakeRuntimeTruthService()
         runtime_truth.safe_mode = False
@@ -8759,7 +8855,9 @@ Workflow:
         orchestrator._chat_runtime_adapter = adapter
 
         with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
-            response = orchestrator.handle_message("return to safe mode", "user1")
+            preview = orchestrator.handle_message("return to safe mode", "user1")
+            self.assertEqual([], adapter.control_mode_calls)
+            response = orchestrator.handle_message("yes", "user1")
 
         payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
         self.assertEqual("action_tool", response.data["route"])
@@ -8771,13 +8869,8 @@ Workflow:
         )
         self.assertTrue(runtime_truth.safe_mode)
         self.assertEqual("explicit_override", runtime_truth.mode_source)
-        self.assertEqual("control_mode_set", payload.get("action"))
-        self.assertIn("Mode: SAFE MODE.", response.text)
-        self.assertIn(
-            "Status: SAFE MODE is active because you explicitly turned it on.",
-            response.text,
-        )
-        self.assertIn("Blocked: remote switching and install/download/import.", response.text)
+        self.assertEqual("runtime.control_mode", payload.get("operation"))
+        self.assertTrue(response.data["ok"])
 
     def test_informational_control_mode_prompt_does_not_execute_action(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
@@ -8822,7 +8915,7 @@ Workflow:
         self.assertEqual([], adapter.control_mode_calls)
         self.assertTrue(runtime_truth.safe_mode)
 
-    def test_controlled_mode_explicit_acquisition_request_uses_model_manager_path(self) -> None:
+    def test_controlled_mode_acquisition_fails_closed_without_authorization_adapter(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
         runtime_truth = _FakeRuntimeTruthService()
         runtime_truth.safe_mode = False
@@ -8865,15 +8958,12 @@ Workflow:
         confirm_payload = confirm.data.get("runtime_payload") if isinstance(confirm.data.get("runtime_payload"), dict) else {}
         self.assertEqual("action_tool", preview.data["route"])
         self.assertFalse(preview.data["used_llm"])
-        self.assertEqual(["model_manager"], preview.data["used_tools"])
-        self.assertTrue(preview_payload.get("requires_confirmation"))
-        self.assertIn("acquire ollama:qwen2.5:14b", preview.text.lower())
-        self.assertEqual("action_tool", confirm.data["route"])
+        self.assertEqual([], preview.data["used_tools"])
+        self.assertEqual("runtime_state_unavailable", preview.data.get("error_kind"))
+        self.assertFalse(bool(preview_payload.get("mutated")))
+        self.assertEqual("assistant_clarification", confirm.data["route"])
         self.assertFalse(confirm.data["used_llm"])
-        self.assertEqual(["model_manager"], confirm.data["used_tools"])
-        self.assertEqual("model_acquisition", confirm_payload.get("type"))
-        self.assertIn("Started acquiring ollama:qwen2.5:14b", confirm.text)
-        self.assertIn(
+        self.assertNotIn(
             (
                 "acquire_chat_model_target",
                 {"model_id": "ollama:qwen2.5:14b", "provider_id": "ollama"},
@@ -8885,6 +8975,8 @@ Workflow:
     def test_model_controller_trial_switch_and_switch_back_restore_previous_target(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
         runtime_truth = _FakeRuntimeTruthService()
+        runtime_truth.safe_mode = False
+        adapter = _ControlModeRuntimeAdapter(runtime_truth)
         orchestrator = Orchestrator(
             db=self.db,
             skills_path=self.skills_path,
@@ -8893,6 +8985,7 @@ Workflow:
             llm_client=llm,
             runtime_truth_service=runtime_truth,
         )
+        orchestrator._chat_runtime_adapter = adapter
 
         with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
             first = orchestrator.handle_message("try a better model", "user1")
@@ -8936,7 +9029,7 @@ Workflow:
         self.assertEqual("model_status", third_confirm.data["route"])
         self.assertFalse(third_confirm.data["used_llm"])
         self.assertEqual(["model_controller"], third_confirm.data["used_tools"])
-        self.assertEqual("Now using ollama:qwen3.5:4b for chat.", third_confirm.text)
+        self.assertEqual("Temporarily using ollama:qwen3.5:4b for chat.", third_confirm.text)
         self.assertIn(
             (
                 "set_temporary_chat_model_target",
@@ -8946,7 +9039,7 @@ Workflow:
         )
         self.assertIn(
             (
-                "restore_temporary_chat_model_target",
+                "set_temporary_chat_model_target",
                 {"model_id": "ollama:qwen3.5:4b", "provider_id": "ollama"},
             ),
             runtime_truth.calls,
@@ -9006,6 +9099,8 @@ Workflow:
     def test_make_this_the_default_uses_contextual_model_target(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
         runtime_truth = _FakeRuntimeTruthService()
+        runtime_truth.safe_mode = False
+        adapter = _ControlModeRuntimeAdapter(runtime_truth)
         orchestrator = Orchestrator(
             db=self.db,
             skills_path=self.skills_path,
@@ -9014,6 +9109,7 @@ Workflow:
             llm_client=llm,
             runtime_truth_service=runtime_truth,
         )
+        orchestrator._chat_runtime_adapter = adapter
 
         with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
             first = orchestrator.handle_message("what better local models could I try?", "user1")
@@ -9034,8 +9130,8 @@ Workflow:
         self.assertIn("Chat is now using it.", confirm.text)
         self.assertIn(
             (
-                "set_default_chat_model",
-                "ollama:qwen2.5:7b-instruct",
+                "set_confirmed_chat_model_target",
+                {"model_id": "ollama:qwen2.5:7b-instruct", "provider_id": "ollama"},
             ),
             runtime_truth.calls,
         )
@@ -9048,6 +9144,7 @@ Workflow:
         runtime_truth.allow_remote_switch = True
         runtime_truth.allow_install_pull = True
         runtime_truth.scout_advisory_only = False
+        adapter = _ControlModeRuntimeAdapter(runtime_truth)
         orchestrator = Orchestrator(
             db=self.db,
             skills_path=self.skills_path,
@@ -9056,6 +9153,7 @@ Workflow:
             llm_client=llm,
             runtime_truth_service=runtime_truth,
         )
+        orchestrator._chat_runtime_adapter = adapter
 
         with patch.object(
             runtime_truth,
@@ -9115,6 +9213,8 @@ Workflow:
     def test_explicit_temporary_switch_does_not_mutate_default(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
         runtime_truth = _FakeRuntimeTruthService()
+        runtime_truth.safe_mode = False
+        adapter = _ControlModeRuntimeAdapter(runtime_truth)
         runtime_truth.additional_available_models.append(
             {
                 "model_id": "ollama:deepseek-r1:7b",
@@ -9135,6 +9235,7 @@ Workflow:
             llm_client=llm,
             runtime_truth_service=runtime_truth,
         )
+        orchestrator._chat_runtime_adapter = adapter
 
         with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
             preview = orchestrator.handle_message("switch temporarily to ollama:qwen2.5:7b-instruct", "user1")
@@ -9186,6 +9287,8 @@ Workflow:
         runtime_truth.effective_model = "ollama:qwen2.5:7b-instruct"
         runtime_truth.effective_provider = "ollama"
         runtime_truth.temporary_override_active = True
+        runtime_truth.safe_mode = False
+        adapter = _ControlModeRuntimeAdapter(runtime_truth)
         orchestrator = Orchestrator(
             db=self.db,
             skills_path=self.skills_path,
@@ -9194,6 +9297,7 @@ Workflow:
             llm_client=llm,
             runtime_truth_service=runtime_truth,
         )
+        orchestrator._chat_runtime_adapter = adapter
 
         with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
             preview = orchestrator.handle_message("make ollama:deepseek-r1:7b the default", "user1")
@@ -9209,14 +9313,19 @@ Workflow:
         self.assertFalse(confirm.data["used_llm"])
         self.assertEqual(["model_controller"], confirm.data["used_tools"])
         self.assertIn("New default: ollama:deepseek-r1:7b.", confirm.text)
-        self.assertIn("Chat is still using ollama:qwen2.5:7b-instruct.", confirm.text)
-        self.assertIn(("set_default_chat_model", "ollama:deepseek-r1:7b"), runtime_truth.calls)
-        self.assertEqual("ollama:qwen2.5:7b-instruct", runtime_truth.current_model)
+        self.assertIn("Chat is now using it.", confirm.text)
+        self.assertIn(
+            ("set_confirmed_chat_model_target", {"model_id": "ollama:deepseek-r1:7b", "provider_id": "ollama"}),
+            runtime_truth.calls,
+        )
+        self.assertEqual("ollama:deepseek-r1:7b", runtime_truth.current_model)
         self.assertEqual("ollama:deepseek-r1:7b", runtime_truth.default_model)
 
     def test_switch_better_local_model_requires_confirmation_then_executes(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
         runtime_truth = _FakeRuntimeTruthService()
+        runtime_truth.safe_mode = False
+        adapter = _ControlModeRuntimeAdapter(runtime_truth)
         orchestrator = Orchestrator(
             db=self.db,
             skills_path=self.skills_path,
@@ -9225,6 +9334,7 @@ Workflow:
             llm_client=llm,
             runtime_truth_service=runtime_truth,
         )
+        orchestrator._chat_runtime_adapter = adapter
 
         with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
             preview = orchestrator.handle_message("switch to a better local model", "user1")
@@ -9240,8 +9350,11 @@ Workflow:
         self.assertEqual("model_status", confirm.data["route"])
         self.assertFalse(confirm.data["used_llm"])
         self.assertEqual(["model_controller"], confirm.data["used_tools"])
-        self.assertIn("I switched chat to your local model ollama:qwen3.5:8b.", confirm.text)
-        self.assertIn(("configure_local_chat_model", "ollama:qwen3.5:8b"), runtime_truth.calls)
+        self.assertEqual("Now using ollama:qwen3.5:8b for chat.", confirm.text)
+        self.assertIn(
+            ("set_confirmed_chat_model_target", {"model_id": "ollama:qwen3.5:8b", "provider_id": "ollama"}),
+            runtime_truth.calls,
+        )
 
     def test_model_scout_hf_discovery_is_honest_about_download_candidates(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")

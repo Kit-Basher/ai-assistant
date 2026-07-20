@@ -3999,13 +3999,18 @@ def build_app(
         operator_recovery_fn if callable(operator_recovery_fn) else llm_fixit_fn
     )
     if not callable(effective_operator_recovery_fn) and runtime is not None:
-        runtime_recovery_fn = (
-            runtime.operator_recovery
-            if callable(getattr(runtime, "operator_recovery", None))
-            else getattr(runtime, "llm_fixit", None)
-        )
+        runtime_recovery_fn = runtime.operator_recovery if callable(getattr(runtime, "operator_recovery", None)) else getattr(runtime, "llm_fixit", None)
+        route_mutation = getattr(runtime, "route_provider_model_mutation", None)
         if callable(runtime_recovery_fn):
-            effective_operator_recovery_fn = runtime_recovery_fn
+            def _authorized_runtime_recovery(payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+                request = dict(payload) if isinstance(payload, dict) else {}
+                if request.get("confirm") is True or "mutation_plan" in request or "confirmation" in request:
+                    if not callable(route_mutation):
+                        return False, {"ok": False, "error": "provider_model_authorization_unavailable", "mutated": False}
+                    return route_mutation("llm.fix", request)
+                return runtime_recovery_fn(request)
+
+            effective_operator_recovery_fn = _authorized_runtime_recovery
     if not callable(effective_operator_recovery_fn):
         def _operator_recovery_internal(payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
             from agent.api_server import build_runtime
@@ -4017,7 +4022,10 @@ def build_app(
                     if callable(getattr(runtime, "operator_recovery", None))
                     else runtime.llm_fixit
                 )
-                return handler(payload if isinstance(payload, dict) else {})
+                request = dict(payload) if isinstance(payload, dict) else {}
+                if request.get("confirm") is True or "mutation_plan" in request or "confirmation" in request:
+                    return runtime.route_provider_model_mutation("llm.fix", request)
+                return handler(request)
             finally:
                 runtime.close()
 

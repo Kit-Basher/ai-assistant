@@ -802,3 +802,11 @@ Trusted bookkeeping and scheduled maintenance use a separate registered
 internal-writer contract. It cannot select public executors and is not a
 substitute for migrating operator or user actions. Arbitrary in-process Python
 remains inside the trust boundary until OS/process isolation exists.
+
+## Audit v2D domain mutation path
+
+Web/API compatibility aliases and CLI secret setup converge on
+`ProviderModelAuthorizationService`. Preview snapshots RuntimeTruthService and
+the registry; apply re-snapshots them before the Executor Registry transaction.
+This is not a second chat or inference router; `route_inference()` ownership is
+unchanged.

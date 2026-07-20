@@ -139,3 +139,10 @@ Counts remain 91 public surfaces, including 47 `legacy_unmigrated` and seven
 `plan_gated_legacy`. The 150-file inventory has 27
 `supported_pending_migration` files after correcting model-scout status writes.
 Universal authorization remains incomplete.
+
+## Audit v2D delta
+
+The provider/model/configuration/secret/setup domain moved from direct and
+domain-only confirmation to central authorization. The deterministic inventory
+now reports no `plan_gated_legacy` groups and 19 `legacy_unmigrated` surfaces,
+all assigned to later domains. Universal authorization still cannot be claimed.

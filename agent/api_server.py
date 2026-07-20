@@ -90,6 +90,7 @@ from agent.skill_governance import (
 from agent.skill_governance_store import SkillGovernanceStore
 from agent.version import read_build_info, read_git_commit, read_packaged_build_info, read_version
 from agent.runtime_truth_service import RuntimeTruthService
+from agent.provider_model_authorization import ProviderModelAuthorizationService
 from agent.runtime_lifecycle import RuntimeLifecyclePhase, derive_runtime_lifecycle_phase
 from agent.runtime_events import RuntimeEventRecorder
 from agent.runtime_contract import (
@@ -796,6 +797,10 @@ class AgentRuntime:
         )
         self._llm_fixit_store = LLMFixitWizardStore(path=llm_fixit_state_path)
         self._runtime_truth_service = RuntimeTruthService(self)
+        self._provider_model_authorization = ProviderModelAuthorizationService(
+            self,
+            state_root=Path(self.config.db_path).expanduser().resolve().parent,
+        )
         self._orchestrator_lock = threading.RLock()
         self._orchestrator_db: MemoryDB | None = None
         self._orchestrator: Orchestrator | None = None
@@ -6892,12 +6897,11 @@ class AgentRuntime:
     def _secret_metadata(value: str | None) -> dict[str, Any]:
         cleaned = str(value or "").strip()
         if not cleaned:
-            return {"present": False, "length": 0}
-        return {
-            "present": True,
-            "length": len(cleaned),
-            "fingerprint": hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:12],
-        }
+            return {"present": False}
+        # Length and unkeyed hashes leak information and can make low-entropy
+        # credentials guessable. Authorization Plans use a namespaced keyed
+        # opaque version; legacy reliability journals retain presence only.
+        return {"present": True, "version": "opaque"}
 
     @staticmethod
     def _provider_api_source_metadata(source: Any) -> dict[str, Any] | None:
@@ -9605,6 +9609,14 @@ class AgentRuntime:
 
     def runtime_truth_service(self) -> RuntimeTruthService:
         return self._runtime_truth_service
+
+    def route_provider_model_mutation(
+        self,
+        operation: str,
+        payload: dict[str, Any] | None = None,
+    ) -> tuple[bool, dict[str, Any]]:
+        """Route one public provider/model/setup write through the central stack."""
+        return self._provider_model_authorization.route(operation, dict(payload or {}))
 
     def _record_memory_issue(
         self,
@@ -24486,6 +24498,58 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if internal_claim:
                 self._send_json(400, {"ok": False, "error": "internal_writer_authority_claim_rejected"})
                 return
+            # Provider/model/configuration/setup mutation compatibility routes are
+            # aliases to one durable Plan/confirmation/executor boundary. A bare
+            # `confirm: true` is deliberately insufficient.
+            domain_operation = {
+                "/providers": "provider.add",
+                "/bootstrap/run": "setup.bootstrap",
+                "/models/refresh": "model.refresh",
+                "/defaults/rollback": "defaults.rollback",
+                "/telegram/secret": "telegram.secret.set",
+                "/model_watch/run": "model_watch.run",
+                "/model_watch/refresh": "model_watch.refresh",
+                "/model_watch/hf/scan": "model_watch.hf_scan",
+                "/llm/models/policy": "model.policy",
+                "/llm/models/switch": "model.switch",
+                "/llm/models/switch_temporary": "model.switch_temporary",
+                "/llm/control_mode": "runtime.control_mode",
+                "/llm/capabilities/reconcile/apply": "llm.reconcile",
+                "/llm/autoconfig/apply": "llm.autoconfig",
+                "/llm/hygiene/apply": "llm.hygiene",
+                "/llm/cleanup/apply": "llm.cleanup",
+                "/llm/self_heal/apply": "llm.self_heal",
+                "/llm/support/remediate/execute": "llm.support.remediate",
+                "/llm/registry/rollback": "llm.registry.rollback",
+                "/llm/autopilot/undo": "llm.autopilot.undo",
+                "/llm/autopilot/unpause": "llm.autopilot.unpause",
+                "/llm/autopilot/bootstrap": "llm.autopilot.bootstrap",
+                "/modelops/execute": "modelops.execute",
+                "/providers/ollama/pull": "model.acquire",
+            }.get(path)
+            if path in {"/authorized/provider-model/preview", "/authorized/provider-model/apply"}:
+                domain_operation = str(payload.get("operation") or "").strip().lower()
+            elif path == "/llm/fixit" and (
+                payload.get("confirm") is True
+                or isinstance(payload.get("mutation_plan"), dict)
+                or isinstance(payload.get("confirmation"), dict)
+            ):
+                domain_operation = "llm.fix"
+            if len(parts) == 3 and parts[0] == "providers" and parts[2] == "secret":
+                domain_operation = "provider.secret.set"
+                payload = {**payload, "provider_id": parts[1]}
+            elif len(parts) == 3 and parts[0] == "providers" and parts[2] == "models":
+                domain_operation = "provider.model.add"
+                payload = {**payload, "provider_id": parts[1]}
+            elif len(parts) == 4 and parts[0] == "providers" and parts[2:] == ["models", "refresh"]:
+                domain_operation = "model.refresh"
+                payload = {**payload, "provider": parts[1]}
+            if domain_operation:
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                ok, body = self.runtime.route_provider_model_mutation(domain_operation, payload)
+                self._send_json(200 if ok else 400, body)
+                return
             if path == "/search/query":
                 ok, body = self.runtime.search_query(payload)
                 self._send_json(200 if ok else 400, body)
@@ -25775,6 +25839,17 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"ok": False, "error": "internal_writer_authority_claim_rejected"})
                 return
 
+            put_domain_operation = {"/config": "config.update", "/defaults": "defaults.update"}.get(path)
+            if len(parts) == 2 and parts[0] == "providers":
+                put_domain_operation = "provider.update"
+                payload = {**payload, "provider_id": parts[1]}
+            if put_domain_operation:
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                ok, body = self.runtime.route_provider_model_mutation(put_domain_operation, payload)
+                self._send_json(200 if ok else 400, body)
+                return
+
             if path == "/pack_sources/policy":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
@@ -25844,6 +25919,19 @@ class APIServerHandler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:  # noqa: N802
         try:
             path, parts = self._path_parts()
+            if len(parts) == 2 and parts[0] == "providers":
+                payload = self._read_json()
+                internal_claim = reject_public_internal_authority_claim(payload)
+                if internal_claim:
+                    self._send_json(400, {"ok": False, "error": "internal_writer_authority_claim_rejected"})
+                    return
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                ok, body = self.runtime.route_provider_model_mutation(
+                    "provider.delete", {**payload, "provider_id": parts[1]}
+                )
+                self._send_json(200 if ok else 400, body)
+                return
             if len(parts) == 3 and parts[0] == "pack_sources" and parts[1] == "catalog":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return

@@ -22,20 +22,26 @@ class TestAgentSecretsCLI(unittest.TestCase):
         os.environ.update(self._env_backup)
         self.tmpdir.cleanup()
 
-    def test_set_telegram_token_saves_without_echoing_secret(self) -> None:
+    def test_set_telegram_token_previews_without_writing_or_echoing_secret(self) -> None:
         token = "1234567:abcdefghijklmnopqrstuvwxyz_123456"
         stdout = io.StringIO()
         stderr = io.StringIO()
-        with redirect_stdout(stdout), redirect_stderr(stderr):
-            exit_code = main(["set", "telegram:bot_token", "--value", token])
-        self.assertEqual(0, exit_code)
-        self.assertEqual("saved", stdout.getvalue().strip())
+        preview = {
+            "ok": True,
+            "requires_confirmation": True,
+            "plan": {"plan_id": "plan-1", "target_snapshot": {"proposed_secret_version": "opaque-v1:abc"}},
+        }
+        with patch("agent.secrets._authorized_secret_request", return_value=(True, preview)):
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                exit_code = main(["set", "telegram:bot_token", "--value", token])
+        self.assertEqual(3, exit_code)
+        self.assertIn("requires_confirmation", stdout.getvalue())
         self.assertNotIn(token, stdout.getvalue())
-        self.assertEqual("", stderr.getvalue().strip())
+        self.assertIn("No secret was changed", stderr.getvalue())
         store = SecretStore(path=os.environ["AGENT_SECRET_STORE_PATH"])
-        self.assertEqual(token, store.get_secret("telegram:bot_token"))
+        self.assertIsNone(store.get_secret("telegram:bot_token"))
 
-    def test_get_redacted_masks_secret_value(self) -> None:
+    def test_get_redacted_reports_presence_only(self) -> None:
         token = "1234567:abcdefghijklmnopqrstuvwxyz_123456"
         store = SecretStore(path=os.environ["AGENT_SECRET_STORE_PATH"])
         store.set_secret("telegram:bot_token", token)
@@ -44,7 +50,7 @@ class TestAgentSecretsCLI(unittest.TestCase):
             exit_code = main(["get", "telegram:bot_token", "--redacted"])
         self.assertEqual(0, exit_code)
         value = stdout.getvalue().strip()
-        self.assertTrue(value.startswith("1234..."))
+        self.assertEqual("(set)", value)
         self.assertNotIn(token, value)
 
     def test_set_telegram_token_rejects_invalid_format(self) -> None:

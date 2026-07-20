@@ -319,3 +319,8 @@ dev, release-bundle, and Debian services all derive it from the same
 `AGENT_DB_PATH` parent. A legacy
 `executor_registry_journal.jsonl.confirmations.sqlite3` is imported with
 `INSERT OR IGNORE` and then remains non-authoritative.
+
+Audit v2D registers one bounded executor per provider/model/setup operation.
+The registry shares the canonical confirmation database and journal. Callbacks
+validate trusted invocation context; direct invocation fails closed and
+receipts are redacted before return or persistence.

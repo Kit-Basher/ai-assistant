@@ -29,6 +29,7 @@ from agent.llm.types import LLMError, Response, Usage
 from agent.model_watch_catalog import write_snapshot_atomic
 from agent.public_chat import build_no_llm_public_message, build_trivial_social_turn_message
 from agent.modelops.discovery import ModelInfo
+from agent.mutation_plan import build_mutation_confirmation
 from agent.orchestrator import OrchestratorResponse
 from agent.memory_runtime import MemoryRuntime
 from agent.safe_mode_ux import build_safe_mode_paused_message
@@ -1318,20 +1319,31 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertIn("loopback", str(forbidden.response_payload.get("why") or "").lower())
         self.assertTrue(str(forbidden.response_payload.get("next_action") or "").strip())
 
-        confirm = _HandlerForTest(runtime, client_host="127.0.0.1", payload={"mode": "controlled"})
-        confirm.do_POST()
-        self.assertEqual(400, confirm.status_code)
-        self.assertEqual("confirm_required", confirm.response_payload.get("error_kind"))
-        self.assertIn("was not changed", str(confirm.response_payload.get("message") or "").lower())
-        self.assertIn("mutates runtime policy", str(confirm.response_payload.get("why") or "").lower())
-        self.assertIn('"confirm": true', str(confirm.response_payload.get("next_action") or ""))
+        preview = _HandlerForTest(runtime, client_host="127.0.0.1", payload={"mode": "controlled"})
+        preview.do_POST()
+        self.assertEqual(200, preview.status_code)
+        self.assertTrue(bool(preview.response_payload.get("requires_confirmation")))
+        plan = preview.response_payload.get("plan") if isinstance(preview.response_payload.get("plan"), dict) else {}
+        self.assertEqual("runtime.policy.configure", plan.get("capability_id"))
 
         allowed = _HandlerForTest(runtime, client_host="127.0.0.1", payload={"mode": "controlled", "confirm": True})
         allowed.do_POST()
-        self.assertEqual(200, allowed.status_code)
-        self.assertTrue(bool(allowed.response_payload.get("ok")))
-        policy = allowed.response_payload.get("policy") if isinstance(allowed.response_payload.get("policy"), dict) else {}
-        self.assertEqual("controlled", policy.get("mode"))
+        self.assertEqual(400, allowed.status_code)
+        self.assertEqual("boolean_confirmation_not_authorization", allowed.response_payload.get("error"))
+
+        applied = _HandlerForTest(
+            runtime,
+            client_host="127.0.0.1",
+            payload={
+                "mode": "controlled",
+                "mutation_plan": plan,
+                "confirmation": build_mutation_confirmation(plan, confirmation_id="explicit-control-mode-confirmation"),
+            },
+        )
+        applied.do_POST()
+        self.assertEqual(200, applied.status_code)
+        self.assertTrue(bool(applied.response_payload.get("ok")))
+        self.assertEqual("controlled", runtime.llm_control_mode_status().get("mode"))
 
     def test_defaults_sets_last_chat_model_on_successful_chat_model_change(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -3102,7 +3114,8 @@ class TestAPIServerRuntime(unittest.TestCase):
             self.assertEqual(200, run_handler.status_code)
             run_payload = json.loads(run_handler.body.decode("utf-8"))
             self.assertTrue(run_payload["ok"])
-            self.assertEqual(12, run_payload["fetched_candidates"])
+            self.assertTrue(run_payload["requires_confirmation"])
+            self.assertEqual("model_watch.run", run_payload["operation"])
 
         with patch.object(runtime, "model_watch_refresh", return_value=(True, {"ok": True, "model_count": 5})):
             refresh_handler = _HandlerForTest(runtime, "/model_watch/refresh", {})
@@ -3110,7 +3123,8 @@ class TestAPIServerRuntime(unittest.TestCase):
             self.assertEqual(200, refresh_handler.status_code)
             refresh_payload = json.loads(refresh_handler.body.decode("utf-8"))
             self.assertTrue(refresh_payload["ok"])
-            self.assertEqual(5, refresh_payload["model_count"])
+            self.assertTrue(refresh_payload["requires_confirmation"])
+            self.assertEqual("model_watch.refresh", refresh_payload["operation"])
 
         with patch.object(
             runtime,
@@ -3122,7 +3136,8 @@ class TestAPIServerRuntime(unittest.TestCase):
             self.assertEqual(200, hf_scan_handler.status_code)
             hf_scan_payload = json.loads(hf_scan_handler.body.decode("utf-8"))
             self.assertTrue(hf_scan_payload["ok"])
-            self.assertTrue(hf_scan_payload["proposal_created"])
+            self.assertTrue(hf_scan_payload["requires_confirmation"])
+            self.assertEqual("model_watch.hf_scan", hf_scan_payload["operation"])
 
     def test_model_endpoint_returns_current_selection_payload(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -3583,10 +3598,9 @@ class TestAPIServerRuntime(unittest.TestCase):
             {"actor": "test", "confirm": True},
         )
         capabilities_reconcile_apply.do_POST()
-        self.assertEqual(200, capabilities_reconcile_apply.status_code)
+        self.assertEqual(400, capabilities_reconcile_apply.status_code)
         capabilities_reconcile_apply_payload = json.loads(capabilities_reconcile_apply.body.decode("utf-8"))
-        self.assertTrue(capabilities_reconcile_apply_payload["ok"])
-        self.assertIn("applied", capabilities_reconcile_apply_payload)
+        self.assertEqual("boolean_confirmation_not_authorization", capabilities_reconcile_apply_payload["error"])
 
         autoconfig_apply = _HandlerForTest(
             runtime,
@@ -3594,10 +3608,9 @@ class TestAPIServerRuntime(unittest.TestCase):
             {"actor": "test", "confirm": True},
         )
         autoconfig_apply.do_POST()
-        self.assertEqual(200, autoconfig_apply.status_code)
+        self.assertEqual(400, autoconfig_apply.status_code)
         autoconfig_apply_payload = json.loads(autoconfig_apply.body.decode("utf-8"))
-        self.assertTrue(autoconfig_apply_payload["ok"])
-        self.assertTrue(autoconfig_apply_payload["applied"])
+        self.assertEqual("boolean_confirmation_not_authorization", autoconfig_apply_payload["error"])
 
         hygiene_plan = _HandlerForTest(runtime, "/llm/hygiene/plan", {"actor": "test"})
         hygiene_plan.do_POST()
@@ -3612,10 +3625,9 @@ class TestAPIServerRuntime(unittest.TestCase):
             {"actor": "test", "confirm": True},
         )
         hygiene_apply.do_POST()
-        self.assertEqual(200, hygiene_apply.status_code)
+        self.assertEqual(400, hygiene_apply.status_code)
         hygiene_apply_payload = json.loads(hygiene_apply.body.decode("utf-8"))
-        self.assertTrue(hygiene_apply_payload["ok"])
-        self.assertIn("applied", hygiene_apply_payload)
+        self.assertEqual("boolean_confirmation_not_authorization", hygiene_apply_payload["error"])
 
         restarted = AgentRuntime(_config(self.registry_path, self.db_path))
         self.assertEqual(
@@ -3623,7 +3635,7 @@ class TestAPIServerRuntime(unittest.TestCase):
             restarted.get_defaults()["default_model"],
         )
 
-    def test_llm_apply_endpoints_deny_when_permission_not_allowed(self) -> None:
+    def test_llm_apply_endpoints_reject_boolean_confirmation_bypass(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
         runtime._health_monitor._probe_fn = lambda *_args: {"ok": True}  # type: ignore[attr-defined]
 
@@ -3667,7 +3679,7 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertEqual(400, autoconfig_apply.status_code)
         autoconfig_payload = json.loads(autoconfig_apply.body.decode("utf-8"))
         self.assertFalse(autoconfig_payload["ok"])
-        self.assertEqual("action_not_permitted", autoconfig_payload["error"])
+        self.assertEqual("boolean_confirmation_not_authorization", autoconfig_payload["error"])
 
         hygiene_apply = _HandlerForTest(
             runtime,
@@ -3678,7 +3690,7 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertEqual(400, hygiene_apply.status_code)
         hygiene_payload = json.loads(hygiene_apply.body.decode("utf-8"))
         self.assertFalse(hygiene_payload["ok"])
-        self.assertEqual("action_not_permitted", hygiene_payload["error"])
+        self.assertEqual("boolean_confirmation_not_authorization", hygiene_payload["error"])
 
         capabilities_reconcile_apply = _HandlerForTest(
             runtime,
@@ -3689,7 +3701,7 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertEqual(400, capabilities_reconcile_apply.status_code)
         capabilities_reconcile_payload = json.loads(capabilities_reconcile_apply.body.decode("utf-8"))
         self.assertFalse(capabilities_reconcile_payload["ok"])
-        self.assertEqual("action_not_permitted", capabilities_reconcile_payload["error"])
+        self.assertEqual("boolean_confirmation_not_authorization", capabilities_reconcile_payload["error"])
 
     def test_unknown_llm_endpoint_returns_not_found(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -4133,7 +4145,7 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertEqual(400, exec_handler.status_code)
         exec_payload = json.loads(exec_handler.body.decode("utf-8"))
         self.assertFalse(exec_payload["ok"])
-        self.assertEqual("action_not_permitted", exec_payload["error"])
+        self.assertEqual("boolean_confirmation_not_authorization", exec_payload["error"])
 
     def test_modelops_execute_pull_model_uses_canonical_install_executor(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -5557,13 +5569,16 @@ class TestAPIServerRuntime(unittest.TestCase):
                 "provider_health_status": "ok",
             }
 
-        def _set_temporary(model_id: str, *, provider_id: str | None = None) -> tuple[bool, dict[str, object]]:
-            active["provider"] = str(provider_id or "ollama").strip().lower() or "ollama"
-            active["model"] = model_id
+        def _set_temporary(payload: dict[str, object]) -> tuple[bool, dict[str, object]]:
+            model_id = str(payload.get("model_id") or payload.get("model") or "")
+            active["provider"] = str(payload.get("provider") or "ollama").strip().lower() or "ollama"
+            canonical_model = f"{active['provider']}:{model_id}"
+            active["model"] = canonical_model
             return True, {
+                "ok": True,
                 "provider": active["provider"],
-                "model_id": model_id,
-                "message": f"Temporarily using {model_id} for chat.",
+                "model_id": canonical_model,
+                "message": f"Temporarily using {canonical_model} for chat.",
             }
 
         with patch.object(runtime, "_auto_bootstrap_local_chat_model", return_value=None), patch.object(
@@ -5575,8 +5590,8 @@ class TestAPIServerRuntime(unittest.TestCase):
             "current_chat_target_status",
             side_effect=_current_target,
         ), patch.object(
-            truth,
-            "set_temporary_chat_model_target",
+            runtime,
+            "llm_models_switch_temporary",
             side_effect=_set_temporary,
         ) as switch_mock:
             first = _HandlerForTest(
@@ -5608,7 +5623,7 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertFalse(bool(first_meta.get("used_llm")))
         self.assertTrue(first_setup.get("requires_confirmation"))
 
-        self.assertEqual(200, second.status_code)
+        self.assertEqual(200, second.status_code, second.response_payload)
         second_meta = second.response_payload.get("meta") if isinstance(second.response_payload.get("meta"), dict) else {}
         self.assertEqual("model_status", second_meta.get("route"))
         self.assertEqual(["model_controller"], second_meta.get("used_tools"))
@@ -7470,8 +7485,23 @@ class TestAPIServerRuntime(unittest.TestCase):
                 self.status_code = status
                 self.response_payload = json.loads(json.dumps(payload, ensure_ascii=True))
 
-        create = _HandlerForTest(
-            runtime,
+        def _apply_policy(payload: dict[str, object]) -> _HandlerForTest:
+            preview = _HandlerForTest(runtime, payload)
+            preview.do_POST()
+            self.assertEqual(200, preview.status_code)
+            plan = preview.response_payload.get("plan") if isinstance(preview.response_payload.get("plan"), dict) else {}
+            applied = _HandlerForTest(
+                runtime,
+                {
+                    **payload,
+                    "mutation_plan": plan,
+                    "confirmation": build_mutation_confirmation(plan, confirmation_id=f"policy-{plan.get('plan_id')}"),
+                },
+            )
+            applied.do_POST()
+            return applied
+
+        create = _apply_policy(
             {
                 "model_id": "openrouter:vendor/coder-pro",
                 "status": "known_good",
@@ -7479,23 +7509,20 @@ class TestAPIServerRuntime(unittest.TestCase):
                 "notes": "Reviewed as a strong coding option.",
                 "justification": "Operator review",
                 "reviewed_at": "2026-03-30T00:00:00Z",
-            },
+            }
         )
-        create.do_POST()
         self.assertEqual(200, create.status_code)
         self.assertEqual("known_good", (((create.response_payload.get("envelope") or {}).get("entry")) or {}).get("status"))
         self.assertEqual(["coding"], (((create.response_payload.get("envelope") or {}).get("entry")) or {}).get("role_hints"))
 
-        update = _HandlerForTest(
-            runtime,
+        update = _apply_policy(
             {
                 "model_id": "openrouter:vendor/coder-pro",
                 "status": "avoid",
                 "role_hints": ["research"],
                 "notes": "No longer preferred.",
-            },
+            }
         )
-        update.do_POST()
         self.assertEqual(200, update.status_code)
         update_entry = (((update.response_payload.get("envelope") or {}).get("entry")) or {})
         self.assertEqual("avoid", update_entry.get("status"))
@@ -7522,14 +7549,12 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertEqual("/llm/models/policy", proposal_review.get("write_surface"))
         self.assertEqual("avoid", proposal_review.get("suggested_status"))
 
-        remove = _HandlerForTest(
-            runtime,
+        remove = _apply_policy(
             {
                 "model_id": "openrouter:vendor/coder-pro",
                 "action": "remove",
-            },
+            }
         )
-        remove.do_POST()
         self.assertEqual(200, remove.status_code)
         self.assertTrue(bool(((remove.response_payload.get("envelope") or {}).get("removed"))))
         policy_entries = ((remove.response_payload.get("envelope") or {}).get("policy_entries")) or []

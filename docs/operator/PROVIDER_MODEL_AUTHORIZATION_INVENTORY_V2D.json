@@ -1,0 +1,529 @@
+{
+  "central_authorized": [
+    {
+      "action_type": "config.update",
+      "capability_id": "runtime.policy.configure",
+      "disposition": "central_authorized",
+      "executor_id": "config.update.v1",
+      "operation": "config.update",
+      "safe_mode_blocked": true,
+      "secret_bearing": false,
+      "surfaces": [
+        "PUT /config"
+      ],
+      "transport_aliases": []
+    },
+    {
+      "action_type": "defaults.rollback",
+      "capability_id": "model.configure",
+      "disposition": "central_authorized",
+      "executor_id": "defaults.rollback.v1",
+      "operation": "defaults.rollback",
+      "safe_mode_blocked": true,
+      "secret_bearing": false,
+      "surfaces": [
+        "POST /defaults/rollback"
+      ],
+      "transport_aliases": []
+    },
+    {
+      "action_type": "defaults.update",
+      "capability_id": "model.configure",
+      "disposition": "central_authorized",
+      "executor_id": "defaults.update.v1",
+      "operation": "defaults.update",
+      "safe_mode_blocked": true,
+      "secret_bearing": false,
+      "surfaces": [
+        "PUT /defaults"
+      ],
+      "transport_aliases": []
+    },
+    {
+      "action_type": "llm.autoconfig",
+      "capability_id": "setup.repair",
+      "disposition": "central_authorized",
+      "executor_id": "llm.autoconfig.v1",
+      "operation": "llm.autoconfig",
+      "safe_mode_blocked": true,
+      "secret_bearing": false,
+      "surfaces": [
+        "POST /llm/autoconfig/apply"
+      ],
+      "transport_aliases": []
+    },
+    {
+      "action_type": "llm.autopilot.bootstrap",
+      "capability_id": "setup.repair",
+      "disposition": "central_authorized",
+      "executor_id": "llm.autopilot.bootstrap.v1",
+      "operation": "llm.autopilot.bootstrap",
+      "safe_mode_blocked": true,
+      "secret_bearing": false,
+      "surfaces": [
+        "POST /llm/autopilot/bootstrap"
+      ],
+      "transport_aliases": []
+    },
+    {
+      "action_type": "llm.autopilot.undo",
+      "capability_id": "runtime.policy.configure",
+      "disposition": "central_authorized",
+      "executor_id": "llm.autopilot.undo.v1",
+      "operation": "llm.autopilot.undo",
+      "safe_mode_blocked": true,
+      "secret_bearing": false,
+      "surfaces": [
+        "POST /llm/autopilot/undo"
+      ],
+      "transport_aliases": []
+    },
+    {
+      "action_type": "llm.autopilot.unpause",
+      "capability_id": "runtime.policy.configure",
+      "disposition": "central_authorized",
+      "executor_id": "llm.autopilot.unpause.v1",
+      "operation": "llm.autopilot.unpause",
+      "safe_mode_blocked": true,
+      "secret_bearing": false,
+      "surfaces": [
+        "POST /llm/autopilot/unpause"
+      ],
+      "transport_aliases": []
+    },
+    {
+      "action_type": "llm.cleanup",
+      "capability_id": "model.maintain",
+      "disposition": "central_authorized",
+      "executor_id": "llm.cleanup.v1",
+      "operation": "llm.cleanup",
+      "safe_mode_blocked": true,
+      "secret_bearing": false,
+      "surfaces": [
+        "POST /llm/cleanup/apply"
+      ],
+      "transport_aliases": []
+    },
+    {
+      "action_type": "llm.fix",
+      "capability_id": "setup.repair",
+      "disposition": "central_authorized",
+      "executor_id": "llm.fix.v1",
+      "operation": "llm.fix",
+      "safe_mode_blocked": true,
+      "secret_bearing": false,
+      "surfaces": [
+        "POST /llm/fixit",
+        "CLI agent doctor --fix --apply-plan --confirmation"
+      ],
+      "transport_aliases": [
+        "assistant confirmed fix/recovery intent",
+        "Telegram recovery confirmation callback"
+      ]
+    },
+    {
+      "action_type": "llm.hygiene",
+      "capability_id": "model.maintain",
+      "disposition": "central_authorized",
+      "executor_id": "llm.hygiene.v1",
+      "operation": "llm.hygiene",
+      "safe_mode_blocked": true,
+      "secret_bearing": false,
+      "surfaces": [
+        "POST /llm/hygiene/apply"
+      ],
+      "transport_aliases": []
+    },
+    {
+      "action_type": "llm.reconcile",
+      "capability_id": "setup.repair",
+      "disposition": "central_authorized",
+      "executor_id": "llm.reconcile.v1",
+      "operation": "llm.reconcile",
+      "safe_mode_blocked": true,
+      "secret_bearing": false,
+      "surfaces": [
+        "POST /llm/capabilities/reconcile/apply"
+      ],
+      "transport_aliases": []
+    },
+    {
+      "action_type": "llm.registry.rollback",
+      "capability_id": "runtime.policy.configure",
+      "disposition": "central_authorized",
+      "executor_id": "llm.registry.rollback.v1",
+      "operation": "llm.registry.rollback",
+      "safe_mode_blocked": true,
+      "secret_bearing": false,
+      "surfaces": [
+        "POST /llm/registry/rollback"
+      ],
+      "transport_aliases": []
+    },
+    {
+      "action_type": "llm.self_heal",
+      "capability_id": "setup.repair",
+      "disposition": "central_authorized",
+      "executor_id": "llm.self_heal.v1",
+      "operation": "llm.self_heal",
+      "safe_mode_blocked": true,
+      "secret_bearing": false,
+      "surfaces": [
+        "POST /llm/self_heal/apply"
+      ],
+      "transport_aliases": []
+    },
+    {
+      "action_type": "llm.support.remediate",
+      "capability_id": "setup.repair",
+      "disposition": "central_authorized",
+      "executor_id": "llm.support.remediate.v1",
+      "operation": "llm.support.remediate",
+      "safe_mode_blocked": true,
+      "secret_bearing": false,
+      "surfaces": [
+        "POST /llm/support/remediate/execute"
+      ],
+      "transport_aliases": []
+    },
+    {
+      "action_type": "model.acquire",
+      "capability_id": "model.acquire",
+      "disposition": "central_authorized",
+      "executor_id": "model.acquire.v1",
+      "operation": "model.acquire",
+      "safe_mode_blocked": true,
+      "secret_bearing": false,
+      "surfaces": [
+        "POST /providers/ollama/pull",
+        "CLI agent llm_install --apply-plan --confirmation"
+      ],
+      "transport_aliases": [
+        "assistant confirmed model acquisition"
+      ]
+    },
+    {
+      "action_type": "model.policy",
+      "capability_id": "runtime.policy.configure",
+      "disposition": "central_authorized",
+      "executor_id": "model.policy.v1",
+      "operation": "model.policy",
+      "safe_mode_blocked": true,
+      "secret_bearing": false,
+      "surfaces": [
+        "POST /llm/models/policy"
+      ],
+      "transport_aliases": []
+    },
+    {
+      "action_type": "model.refresh",
+      "capability_id": "model.maintain",
+      "disposition": "central_authorized",
+      "executor_id": "model.refresh.v1",
+      "operation": "model.refresh",
+      "safe_mode_blocked": true,
+      "secret_bearing": false,
+      "surfaces": [
+        "POST /models/refresh",
+        "POST /providers/{provider_id}/models/refresh"
+      ],
+      "transport_aliases": []
+    },
+    {
+      "action_type": "model.switch",
+      "capability_id": "model.configure",
+      "disposition": "central_authorized",
+      "executor_id": "model.switch.v1",
+      "operation": "model.switch",
+      "safe_mode_blocked": true,
+      "secret_bearing": false,
+      "surfaces": [
+        "POST /llm/models/switch"
+      ],
+      "transport_aliases": [
+        "assistant confirmed default/local-model switch"
+      ]
+    },
+    {
+      "action_type": "model.switch_temporary",
+      "capability_id": "model.configure",
+      "disposition": "central_authorized",
+      "executor_id": "model.switch_temporary.v1",
+      "operation": "model.switch_temporary",
+      "safe_mode_blocked": true,
+      "secret_bearing": false,
+      "surfaces": [
+        "POST /llm/models/switch_temporary"
+      ],
+      "transport_aliases": [
+        "assistant confirmed temporary switch/switch-back",
+        "Telegram ordinary chat via the assistant front door"
+      ]
+    },
+    {
+      "action_type": "model_watch.hf_scan",
+      "capability_id": "model.maintain",
+      "disposition": "central_authorized",
+      "executor_id": "model_watch.hf_scan.v1",
+      "operation": "model_watch.hf_scan",
+      "safe_mode_blocked": true,
+      "secret_bearing": false,
+      "surfaces": [
+        "POST /model_watch/hf/scan"
+      ],
+      "transport_aliases": []
+    },
+    {
+      "action_type": "model_watch.refresh",
+      "capability_id": "model.maintain",
+      "disposition": "central_authorized",
+      "executor_id": "model_watch.refresh.v1",
+      "operation": "model_watch.refresh",
+      "safe_mode_blocked": true,
+      "secret_bearing": false,
+      "surfaces": [
+        "POST /model_watch/refresh"
+      ],
+      "transport_aliases": []
+    },
+    {
+      "action_type": "model_watch.run",
+      "capability_id": "model.maintain",
+      "disposition": "central_authorized",
+      "executor_id": "model_watch.run.v1",
+      "operation": "model_watch.run",
+      "safe_mode_blocked": true,
+      "secret_bearing": false,
+      "surfaces": [
+        "POST /model_watch/run"
+      ],
+      "transport_aliases": []
+    },
+    {
+      "action_type": "modelops.execute",
+      "capability_id": "model.acquire",
+      "disposition": "central_authorized",
+      "executor_id": "modelops.execute.v1",
+      "operation": "modelops.execute",
+      "safe_mode_blocked": true,
+      "secret_bearing": false,
+      "surfaces": [
+        "POST /modelops/execute"
+      ],
+      "transport_aliases": []
+    },
+    {
+      "action_type": "provider.add",
+      "capability_id": "provider.configure",
+      "disposition": "central_authorized",
+      "executor_id": "provider.add.v1",
+      "operation": "provider.add",
+      "safe_mode_blocked": true,
+      "secret_bearing": false,
+      "surfaces": [
+        "POST /providers"
+      ],
+      "transport_aliases": []
+    },
+    {
+      "action_type": "provider.delete",
+      "capability_id": "provider.configure",
+      "disposition": "central_authorized",
+      "executor_id": "provider.delete.v1",
+      "operation": "provider.delete",
+      "safe_mode_blocked": true,
+      "secret_bearing": false,
+      "surfaces": [
+        "DELETE /providers/{provider_id}"
+      ],
+      "transport_aliases": []
+    },
+    {
+      "action_type": "provider.model.add",
+      "capability_id": "model.configure",
+      "disposition": "central_authorized",
+      "executor_id": "provider.model.add.v1",
+      "operation": "provider.model.add",
+      "safe_mode_blocked": true,
+      "secret_bearing": false,
+      "surfaces": [
+        "POST /providers/{provider_id}/models"
+      ],
+      "transport_aliases": []
+    },
+    {
+      "action_type": "provider.secret.set",
+      "capability_id": "provider.secret.manage",
+      "disposition": "central_authorized",
+      "executor_id": "provider.secret.set.v1",
+      "operation": "provider.secret.set",
+      "safe_mode_blocked": true,
+      "secret_bearing": true,
+      "surfaces": [
+        "POST /providers/{provider_id}/secret",
+        "CLI agent.secrets provider:*:api_key"
+      ],
+      "transport_aliases": []
+    },
+    {
+      "action_type": "provider.update",
+      "capability_id": "provider.configure",
+      "disposition": "central_authorized",
+      "executor_id": "provider.update.v1",
+      "operation": "provider.update",
+      "safe_mode_blocked": true,
+      "secret_bearing": false,
+      "surfaces": [
+        "PUT /providers/{provider_id}"
+      ],
+      "transport_aliases": []
+    },
+    {
+      "action_type": "runtime.control_mode",
+      "capability_id": "runtime.policy.configure",
+      "disposition": "central_authorized",
+      "executor_id": "runtime.control_mode.v1",
+      "operation": "runtime.control_mode",
+      "safe_mode_blocked": false,
+      "secret_bearing": false,
+      "surfaces": [
+        "POST /llm/control_mode"
+      ],
+      "transport_aliases": [
+        "assistant confirmed SAFE/Controlled Mode change"
+      ]
+    },
+    {
+      "action_type": "setup.bootstrap",
+      "capability_id": "setup.repair",
+      "disposition": "central_authorized",
+      "executor_id": "setup.bootstrap.v1",
+      "operation": "setup.bootstrap",
+      "safe_mode_blocked": false,
+      "secret_bearing": false,
+      "surfaces": [
+        "POST /bootstrap/run"
+      ],
+      "transport_aliases": []
+    },
+    {
+      "action_type": "telegram.secret.set",
+      "capability_id": "secret.manage",
+      "disposition": "central_authorized",
+      "executor_id": "telegram.secret.set.v1",
+      "operation": "telegram.secret.set",
+      "safe_mode_blocked": false,
+      "secret_bearing": true,
+      "surfaces": [
+        "POST /telegram/secret",
+        "CLI agent.secrets telegram:bot_token"
+      ],
+      "transport_aliases": []
+    }
+  ],
+  "mixed_writers": [
+    {
+      "blocker": "mixed module does not yet require InternalWriterAuthority at its persistence leaf; internal authority remains denied",
+      "disposition": "blocked_internal_leaf_contract",
+      "internal": "persist_effective_policy",
+      "public": "model.policy central_authorized",
+      "writer": "llm_model_discovery_policy"
+    },
+    {
+      "blocker": "notification public migration is explicitly outside v2D",
+      "disposition": "deferred_v2e",
+      "internal": "enqueue/delivery bookkeeping",
+      "public": "notification routes assigned to Audit v2E",
+      "writer": "llm_notifications"
+    },
+    {
+      "blocker": null,
+      "disposition": "bounded_by_scheduled_parent",
+      "internal": "scheduled_model_scout wrapper",
+      "public": "proposal inspection read_only; adoption uses model.policy",
+      "writer": "model_scout"
+    },
+    {
+      "blocker": "runtime scheduler still reaches the mixed persistence helper without leaf authority validation",
+      "disposition": "blocked_internal_leaf_contract",
+      "internal": "scheduler watch persistence",
+      "public": "manual run/refresh central_authorized",
+      "writer": "model_watch"
+    },
+    {
+      "blocker": "nested scheduled scan lacks its own exact internal-writer leaf contract",
+      "disposition": "blocked_internal_leaf_contract",
+      "internal": "nested scheduled scan persistence",
+      "public": "manual scan central_authorized",
+      "writer": "model_watch_hf"
+    }
+  ],
+  "read_only": [
+    "GET /providers",
+    "GET /models",
+    "GET /model",
+    "GET /llm/model",
+    "POST /providers/test",
+    "POST /providers/{provider_id}/test",
+    "POST /llm/models/check",
+    "POST /llm/models/recommend",
+    "POST /llm/models/proposals",
+    "POST /llm/health/run",
+    "POST /llm/catalog/run",
+    "GET /model_watch/latest",
+    "GET /model_watch/hf/status",
+    "CLI agent setup --dry-run",
+    "CLI agent doctor (without --fix)"
+  ],
+  "removed": [
+    "POST /model",
+    "POST /llm/model"
+  ],
+  "schema": "personal-agent.provider-model-authorization-inventory.v2d",
+  "source_checkpoint": "1521878e729aea5669a7adb67db711c2513ad718",
+  "summary": {
+    "central_operations": 31,
+    "central_surfaces": 36,
+    "mixed_writer_blockers": 4,
+    "read_only_surfaces": 15,
+    "removed_surfaces": 2,
+    "transport_aliases": 7,
+    "unimplemented_denied_operations": 5
+  },
+  "unimplemented_denied": [
+    {
+      "disposition": "unimplemented_denied",
+      "operation": "provider.secret.delete",
+      "reason": "No public delete surface exists; replacement is supported and plaintext rollback is forbidden.",
+      "surface": null
+    },
+    {
+      "disposition": "unimplemented_denied",
+      "operation": "provider.secret.import",
+      "reason": "Bulk secret import is not exposed.",
+      "surface": null
+    },
+    {
+      "disposition": "unimplemented_denied",
+      "operation": "provider.secret.repair",
+      "reason": "Repair is advisory; replacement requires provider.secret.set authorization.",
+      "surface": null
+    },
+    {
+      "disposition": "unimplemented_denied",
+      "operation": "configuration.import",
+      "reason": "Bulk configuration import is not exposed.",
+      "surface": null
+    },
+    {
+      "disposition": "unimplemented_denied",
+      "operation": "configuration.reset",
+      "reason": "Bulk configuration reset is not exposed; bounded field changes use config.update.",
+      "surface": null
+    }
+  ],
+  "validation": {
+    "missing_aliases": [],
+    "stale_aliases": []
+  }
+}

@@ -146,10 +146,10 @@ class TestFailureRecoveryPaths(unittest.TestCase):
         self.assertNotIn("{", _first_line(text))
 
     def test_install_failure_produces_next_step_not_success(self) -> None:
-        runtime, truth = self._runtime()
+        runtime, _truth = self._runtime()
         with patch.object(
-            truth,
-            "acquire_chat_model_target",
+            runtime,
+            "pull_ollama_model",
             return_value=(False, {"ok": False, "error_kind": "provider_unavailable", "message": "Ollama is down. Restart it and try again.", "next_action": "Restart Ollama and retry."}),
         ):
             preview = self._chat(runtime, "install ollama:qwen2.5:7b-instruct")

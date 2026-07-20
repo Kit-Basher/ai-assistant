@@ -80,7 +80,7 @@ def _profile_install_plan(*, profile: dict[str, Any], task_type: str, reason: st
         "install_command": f"ollama pull {install_name}",
         "approval_required": True,
         "plan": _build_plan_steps(profile=profile, task_type=task_type),
-        "next_action": f"Run: python -m agent llm_install --model {model_id} --approve",
+        "next_action": f"Preview a Universal Mutation Plan for {model_id}, confirm it, then apply with --apply-plan and --confirmation.",
     }
 
 

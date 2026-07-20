@@ -3442,6 +3442,7 @@ class Orchestrator:
         resources = plan.get("resources_affected") if isinstance(plan.get("resources_affected"), list) else []
         resources_text = ", ".join(str(item) for item in resources if str(item).strip()) or "none listed"
         confirmations = plan.get("confirmation_words") if isinstance(plan.get("confirmation_words"), list) else ["yes", "confirm"]
+        expires_value = plan.get("expires_at") or 0
         return [
             "Plan Mode v2:",
             f"Plan ID: {str(plan.get('plan_id') or '').strip()}.",
@@ -3459,7 +3460,7 @@ class Orchestrator:
             f"Rollback supported: {'yes' if bool(plan.get('rollback_supported')) else 'no'}.",
             f"Executor status: {str(plan.get('executor_status') or '').strip()}.",
             f"Allowed confirmations: {', '.join(str(item) for item in confirmations if str(item).strip())}.",
-            f"Expires at: {int(plan.get('expires_at') or 0)}.",
+            f"Expires at: {expires_value}.",
         ]
 
     def _current_plan_response(self, user_id: str) -> OrchestratorResponse:
@@ -3566,18 +3567,80 @@ class Orchestrator:
         pending_id = f"confirm-{uuid.uuid4().hex[:10]}"
         expires_at = now_epoch + 600
         active_thread_id = self._active_thread_id_for_user(user_id)
-        canonical_plan = self._build_canonical_pending_plan(
-            pending_id=pending_id,
-            action={**dict(action), "mutating": bool(mutating), "thread_id": active_thread_id, "user_id": user_id},
-            title=title,
-            preview_payload=preview_payload,
-            expires_at=expires_at,
-        )
+        action_for_plan = {**dict(action), "mutating": bool(mutating), "thread_id": active_thread_id, "user_id": user_id}
+        action_operation = str(action_for_plan.get("operation") or "").strip().lower()
+        if action_operation in {"model_trial_switch", "model_set_target"}:
+            action_params = dict(action_for_plan.get("params")) if isinstance(action_for_plan.get("params"), dict) else {}
+            truth = self._runtime_truth()
+            current_target = truth.current_chat_target_status() if truth is not None else {}
+            previous_provider, previous_model = self._target_snapshot_from_truth(current_target)
+            if action_operation == "model_trial_switch" or not bool(action_params.get("promote_default")):
+                action_params["previous_provider"] = previous_provider
+                action_params["previous_model"] = previous_model
+            else:
+                action_params["previous_default_provider"] = str(
+                    current_target.get("configured_provider") or previous_provider or ""
+                ).strip().lower()
+                action_params["previous_default_model"] = str(
+                    current_target.get("configured_model") or previous_model or ""
+                ).strip()
+            action_for_plan["params"] = action_params
+        domain_binding = self._provider_model_domain_binding(action_for_plan)
+        if domain_binding is not None:
+            adapter = self._chat_runtime_adapter
+            route_mutation = getattr(adapter, "route_provider_model_mutation", None)
+            if not callable(route_mutation):
+                return self._runtime_state_unavailable_response(
+                    route=route,
+                    reason="provider_model_authorization_unavailable",
+                )
+            domain_operation, domain_request = domain_binding
+            domain_session_id = f"assistant:{active_thread_id or 'thread'}"
+            ok, body = route_mutation(
+                domain_operation,
+                {
+                    **domain_request,
+                    "actor_id": user_id,
+                    "thread_id": active_thread_id,
+                    "session_id": domain_session_id,
+                },
+            )
+            domain_plan = body.get("plan") if isinstance(body, dict) and isinstance(body.get("plan"), dict) else None
+            if not ok or domain_plan is None:
+                response_body = dict(body) if isinstance(body, dict) else {}
+                message = str(response_body.get("message") or "This mutation is not currently eligible.").strip()
+                return self._runtime_truth_response(
+                    text=message,
+                    route=route,
+                    used_tools=used_tools,
+                    used_memory=used_memory,
+                    used_runtime_state=True,
+                    ok=False,
+                    error_kind=str(response_body.get("error_kind") or response_body.get("error") or "mutation_preview_denied"),
+                    payload={**response_body, "mutated": False},
+                    skip_post_response_hooks=skip_post_response_hooks,
+                )
+            canonical_plan = domain_plan
+            action_for_plan.update(
+                {
+                    "provider_model_domain_operation": domain_operation,
+                    "provider_model_domain_request": domain_request,
+                    "provider_model_session_id": domain_session_id,
+                }
+            )
+        else:
+            canonical_plan = self._build_canonical_pending_plan(
+                pending_id=pending_id,
+                action=action_for_plan,
+                title=title,
+                preview_payload=preview_payload,
+                expires_at=expires_at,
+            )
         rendered_question = str(question or "").strip()
         if "Plan Mode v2:" not in rendered_question:
             rendered_question = "\n".join([rendered_question, *self._render_canonical_plan_lines(canonical_plan)]).strip()
         action_payload = {
-            **dict(action),
+            **action_for_plan,
             "kind": "native_mutation",
             "pending_id": pending_id,
             "expires_at": expires_at,
@@ -3639,6 +3702,26 @@ class Orchestrator:
             payload=payload,
             skip_post_response_hooks=skip_post_response_hooks,
         )
+
+    def _provider_model_domain_binding(self, action: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
+        operation = str(action.get("operation") or "").strip().lower()
+        params = dict(action.get("params")) if isinstance(action.get("params"), dict) else {}
+        provider = str(params.get("provider_id") or params.get("provider") or "").strip().lower()
+        model = str(params.get("model_id") or params.get("model") or "").strip()
+        if operation in {"model_trial_switch", "model_switch_back"}:
+            return "model.switch_temporary", {"provider": provider, "model_id": model}
+        if operation == "model_set_target":
+            return (
+                "model.switch" if bool(params.get("promote_default")) else "model.switch_temporary",
+                {"provider": provider, "model_id": model},
+            )
+        if operation == "switch_better_local_model":
+            return "model.switch", {"provider": "ollama", "model_id": model}
+        if operation == "model_acquire":
+            return "model.acquire", {"provider": provider or "ollama", "model": model}
+        if operation == "runtime_control_mode":
+            return "runtime.control_mode", {"mode": str(params.get("mode") or "").strip().lower()}
+        return None
 
     def _expired_confirmation_response(self, user_id: str, *, pending: PendingAction | None = None, pending_item: dict[str, Any] | None = None) -> OrchestratorResponse:
         action_title = ""
@@ -3833,6 +3916,81 @@ class Orchestrator:
                 confirmation_id=str(action.get("pending_id") or mutation_plan_id),
                 actor_id=user_id,
                 thread_id=str(action.get("thread_id") or ""),
+            )
+        domain_operation = str(action.get("provider_model_domain_operation") or "").strip().lower()
+        if domain_operation:
+            adapter = self._chat_runtime_adapter
+            route_mutation = getattr(adapter, "route_provider_model_mutation", None)
+            domain_plan = canonical_plan_for_status
+            domain_request = dict(action.get("provider_model_domain_request")) if isinstance(action.get("provider_model_domain_request"), dict) else {}
+            session_id = str(action.get("provider_model_session_id") or "").strip()
+            if not callable(route_mutation) or not domain_plan:
+                return self._runtime_state_unavailable_response(
+                    route="action_tool",
+                    reason="provider_model_authorization_unavailable",
+                )
+            confirmation = build_mutation_confirmation(
+                domain_plan,
+                confirmation_id=str(action.get("pending_id") or domain_plan.get("plan_id") or ""),
+                actor_id=user_id,
+                thread_id=str(action.get("thread_id") or ""),
+                session_id=session_id,
+            )
+            ok, body = route_mutation(
+                domain_operation,
+                {
+                    **domain_request,
+                    "actor_id": user_id,
+                    "thread_id": str(action.get("thread_id") or ""),
+                    "session_id": session_id,
+                    "mutation_plan": domain_plan,
+                    "confirmation": confirmation,
+                },
+            )
+            response_body = dict(body) if isinstance(body, dict) else {}
+            operation = str(action.get("operation") or "").strip().lower()
+            params = dict(action.get("params")) if isinstance(action.get("params"), dict) else {}
+            if ok and operation in {"model_trial_switch", "model_set_target"} and (
+                operation == "model_trial_switch" or not bool(params.get("promote_default"))
+            ):
+                self._record_model_trial_switch(
+                    user_id,
+                    previous_provider=str(params.get("previous_provider") or "").strip().lower() or None,
+                    previous_model=str(params.get("previous_model") or "").strip() or None,
+                    applied_provider=str(domain_request.get("provider") or "").strip().lower() or None,
+                    applied_model=str(domain_request.get("model_id") or "").strip() or None,
+                    source="temporary_switch",
+                )
+            elif ok and operation == "model_switch_back":
+                self._clear_model_trial_state(user_id)
+            if ok and operation == "model_set_target" and bool(params.get("promote_default")):
+                applied_model = str(
+                    response_body.get("model_id") or domain_request.get("model_id") or ""
+                ).strip()
+                previous_default = str(params.get("previous_default_model") or "none").strip() or "none"
+                truth = self._runtime_truth()
+                current_after = truth.current_chat_target_status() if truth is not None else {}
+                _active_provider, active_model = self._target_snapshot_from_truth(current_after)
+                if active_model == applied_model:
+                    response_body["message"] = (
+                        f"Default chat model updated from {previous_default} to {applied_model}. "
+                        f"Previous default: {previous_default}. New default: {applied_model}. "
+                        "Chat is now using it."
+                    )
+                elif active_model:
+                    response_body["message"] = (
+                        f"Default chat model updated from {previous_default} to {applied_model}. "
+                        f"Previous default: {previous_default}. New default: {applied_model}. "
+                        f"Chat is still using {active_model}."
+                    )
+            message = str(response_body.get("message") or ("Mutation completed." if ok else "Mutation was not completed.")).strip()
+            return self._runtime_truth_response(
+                text=message,
+                route="model_status" if operation.startswith(("model_", "switch_")) else "action_tool",
+                used_tools=["model_controller"],
+                ok=bool(ok),
+                error_kind=None if ok else str(response_body.get("error_kind") or response_body.get("error_code") or response_body.get("error") or "mutation_failed"),
+                payload={**response_body, "type": "provider_model_authorization_result", "operation": domain_operation},
             )
         if operation == "managed_local_service_setup_preview":
             params = action.get("params") if isinstance(action.get("params"), dict) else {}
@@ -6087,7 +6245,7 @@ class Orchestrator:
             return {"kind": "set_mode", "mode": "controlled"}
         return None
 
-    def _control_mode_intent_response(self, text: str) -> OrchestratorResponse | None:
+    def _control_mode_intent_response(self, user_id: str, text: str) -> OrchestratorResponse | None:
         intent = self._parse_control_mode_intent(text)
         if not isinstance(intent, dict):
             return None
@@ -6097,7 +6255,7 @@ class Orchestrator:
         if kind == "set_mode":
             requested_mode = str(intent.get("mode") or "").strip().lower()
             if requested_mode in {"safe", "controlled", "baseline"}:
-                return self._control_mode_change_response(requested_mode)
+                return self._control_mode_change_response(user_id, requested_mode)
         return None
 
     @staticmethod
@@ -8371,7 +8529,7 @@ class Orchestrator:
         intent_kind = self._time_date_intent_kind(text)
         if intent_kind is not None:
             return self._local_time_response(intent_kind)
-        control_mode_response = self._control_mode_intent_response(text)
+        control_mode_response = self._control_mode_intent_response(user_id, text)
         if control_mode_response is not None:
             return control_mode_response
         normalized = normalize_setup_text(text).replace("/", " ")
@@ -17376,62 +17534,17 @@ class Orchestrator:
             skip_post_response_hooks=True,
         )
 
-    def _control_mode_change_response(self, requested_mode: str) -> OrchestratorResponse:
-        adapter = self._chat_runtime_adapter
-        set_mode = getattr(adapter, "llm_control_mode_set", None)
-        if not callable(set_mode):
-            return self._runtime_state_unavailable_response(
-                route="action_tool",
-                reason="control_mode_unavailable",
-            )
-        ok, body = set_mode(
-            {
-                "mode": str(requested_mode or "").strip().lower(),
-                "confirm": True,
-                "actor": "assistant",
-            }
-        )
-        response_body = dict(body) if isinstance(body, dict) else {}
-        policy_payload = (
-            dict(response_body.get("policy"))
-            if isinstance(response_body.get("policy"), dict)
-            else {}
-        )
-        if not policy_payload and callable(getattr(adapter, "llm_control_mode_status", None)):
-            status_payload = adapter.llm_control_mode_status()
-            policy_payload = dict(status_payload) if isinstance(status_payload, dict) else {}
-        if not policy_payload:
-            truth = self._runtime_truth()
-            if truth is not None and callable(getattr(truth, "model_controller_policy_status", None)):
-                status_payload = truth.model_controller_policy_status()
-                policy_payload = dict(status_payload) if isinstance(status_payload, dict) else {}
-        if not ok:
-            message = str(response_body.get("message") or "").strip() or "I couldn't change the control mode right now."
-            return self._runtime_truth_response(
-                text=message,
-                route="action_tool",
-                ok=False,
-                error_kind=str(response_body.get("error_kind") or response_body.get("error") or "control_mode_change_failed").strip() or "control_mode_change_failed",
-                used_tools=["model_controller"],
-                payload={
-                    "type": "model_controller_policy",
-                    "action": "control_mode_set",
-                    "requested_mode": str(requested_mode or "").strip().lower() or None,
-                    "summary": message,
-                    "ok": False,
-                    "result": response_body,
-                    **policy_payload,
-                },
-            )
-        return self._model_controller_policy_payload_response(
-            policy_payload,
+    def _control_mode_change_response(self, user_id: str, requested_mode: str) -> OrchestratorResponse:
+        normalized = str(requested_mode or "").strip().lower()
+        return self._confirmation_preview_response(
+            user_id,
             route="action_tool",
+            question=f"Control mode change preview: I will change the runtime policy mode to {normalized}. Say yes to continue, or no to cancel.",
             used_tools=["model_controller"],
-            extra_payload={
-                "action": "control_mode_set",
-                "requested_mode": str(requested_mode or "").strip().lower() or None,
-                "result": response_body,
-            },
+            action={"operation": "runtime_control_mode", "params": {"mode": normalized}},
+            title="Control mode change confirmation",
+            preview_payload={"requested_mode": normalized, "mutated": False},
+            skip_post_response_hooks=True,
         )
 
     def _model_policy_status_response(self) -> OrchestratorResponse:
@@ -18536,7 +18649,7 @@ class Orchestrator:
                 return capability_gap_response
             return self._agent_pack_install_explanation_response(user_id, text)
         control_mode_response = (
-            None if kind in mode_safe_model_kinds else self._control_mode_intent_response(text)
+            None if kind in mode_safe_model_kinds else self._control_mode_intent_response(user_id, text)
         )
         if control_mode_response is not None:
             return control_mode_response

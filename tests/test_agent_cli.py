@@ -738,7 +738,7 @@ class TestAgentCLI(unittest.TestCase):
         self.assertIn("approval_required: true", text)
         self.assertIn("model_id: ollama:llava:7b", text)
 
-    def test_llm_install_subcommand_with_approve_executes(self) -> None:
+    def test_llm_install_subcommand_with_approve_cannot_manufacture_authorization(self) -> None:
         output = io.StringIO()
         plan = {
             "needed": True,
@@ -768,12 +768,10 @@ class TestAgentCLI(unittest.TestCase):
             "agent.cli._execute_llm_install_via_model_manager", return_value=result
         ) as execute_mock, redirect_stdout(output):
             code = cli.main(["llm_install", "--model", "ollama:llava:7b", "--approve"])
-        self.assertEqual(0, code)
-        execute_mock.assert_called_once()
+        self.assertEqual(2, code)
+        execute_mock.assert_not_called()
         text = output.getvalue()
-        self.assertIn("LLM install result", text)
-        self.assertIn("executed: true", text)
-        self.assertIn("ollama:llava:7b", text)
+        self.assertIn("--approve cannot authorize", text)
 
     def test_execute_llm_install_via_model_manager_routes_approved_plan_through_runtime_manager(self) -> None:
         plan = {

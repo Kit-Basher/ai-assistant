@@ -377,3 +377,11 @@ Uninstall:
 1. Run `python -m agent doctor`.
 2. Follow the single `Next action`.
 3. Re-run `python -m agent setup`.
+
+## Authorized secret and provider setup
+
+`python -m agent.secrets set ...` now requests a safe loopback API preview and
+prints a Universal Mutation Plan; it does not write directly. Apply requires a
+previously previewed Plan and already valid scoped confirmation artifact.
+`--yes` and `confirm: true` are not authorization. Secret status reports
+presence only; plaintext display is disabled.

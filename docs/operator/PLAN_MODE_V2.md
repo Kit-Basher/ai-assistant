@@ -155,3 +155,7 @@ Stale `reserved` rows fail closed before execution. Stale `executing` rows
 become `indeterminate` and require reconciliation. `succeeded`, `failed`, and
 `indeterminate` all block replay. Existing pending Plans must pass the current
 schema and are never repaired by fabricating confirmation context.
+
+Audit v2D uses this transaction boundary for provider, model, configuration,
+secret, and setup writes. Compatibility routes may return a new Universal
+Mutation Plan, but cannot accept their former boolean confirmation.

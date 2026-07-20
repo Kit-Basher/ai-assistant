@@ -185,3 +185,8 @@ uninstall receipt.
 
 The default uninstall mode preserves user data in place. Full user-data purge is
 not part of Uninstall Executor v1.
+
+Provider/model authorization adds no standalone durable database. It uses the
+canonical confirmation transaction database and executor journal already
+covered by Backup/Restore v1. Plaintext secrets are never copied into Plans,
+receipts, support artifacts, or backup summaries.

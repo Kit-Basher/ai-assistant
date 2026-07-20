@@ -14,6 +14,7 @@ from agent.error_kind import (
     INTERNAL_ERROR_SUPPORT_HINT,
     classify_error_kind,
 )
+from agent.mutation_plan import build_mutation_confirmation
 from telegram_adapter.bot import _envelope_from_exception
 
 
@@ -78,6 +79,26 @@ class _HandlerForPostTest(APIServerHandler):
     def _send_json(self, status: int, payload: dict[str, object]) -> None:  # type: ignore[override]
         self.status_code = status
         self.response_payload = json.loads(json.dumps(payload, ensure_ascii=True))
+
+
+def _apply_defaults(runtime: AgentRuntime, request: dict[str, object]) -> _HandlerForPostTest:
+    preview = _HandlerForPostTest(runtime, "/defaults", request)
+    preview.do_PUT()
+    plan = preview.response_payload.get("plan") if isinstance(preview.response_payload.get("plan"), dict) else {}
+    applied = _HandlerForPostTest(
+        runtime,
+        "/defaults",
+        {
+            **request,
+            "mutation_plan": plan,
+            "confirmation": build_mutation_confirmation(
+                plan,
+                confirmation_id=f"defaults-{plan.get('plan_id')}",
+            ),
+        },
+    )
+    applied.do_PUT()
+    return applied
 
 
 class _HandlerForGetTest(APIServerHandler):
@@ -256,15 +277,10 @@ class TestErrorKindContract(unittest.TestCase):
         document["models"] = models
         runtime._save_registry_document(document)
 
-        handler = _HandlerForPostTest(
+        handler = _apply_defaults(
             runtime,
-            "/defaults",
-            {
-                "default_provider": "ollama",
-                "default_model": "ollama:nomic-embed-text:latest",
-            },
+            {"default_provider": "ollama", "default_model": "ollama:nomic-embed-text:latest"},
         )
-        handler.do_PUT()
 
         self.assertEqual(400, handler.status_code)
         self.assertEqual(False, handler.response_payload.get("ok"))
@@ -288,12 +304,24 @@ class TestErrorKindContract(unittest.TestCase):
         document["models"] = models
         runtime._save_registry_document(document)
 
+        request = {
+            "default_provider": "ollama",
+            "default_model": "qwen2.5:3b-instruct",
+        }
+        preview = _HandlerForPostTest(
+            runtime,
+            "/defaults",
+            request,
+        )
+        preview.do_PUT()
+        plan = preview.response_payload.get("plan") if isinstance(preview.response_payload.get("plan"), dict) else {}
         handler = _HandlerForPostTest(
             runtime,
             "/defaults",
             {
-                "default_provider": "ollama",
-                "default_model": "qwen2.5:3b-instruct",
+                **request,
+                "mutation_plan": plan,
+                "confirmation": build_mutation_confirmation(plan, confirmation_id="defaults-test"),
             },
         )
         handler.do_PUT()
@@ -316,15 +344,10 @@ class TestErrorKindContract(unittest.TestCase):
         document["models"] = models
         runtime._save_registry_document(document)
 
-        handler = _HandlerForPostTest(
+        handler = _apply_defaults(
             runtime,
-            "/defaults",
-            {
-                "default_provider": "ollama",
-                "chat_model": "ollama:nomic-embed-text:latest",
-            },
+            {"default_provider": "ollama", "chat_model": "ollama:nomic-embed-text:latest"},
         )
-        handler.do_PUT()
 
         self.assertEqual(400, handler.status_code)
         self.assertEqual(False, handler.response_payload.get("ok"))
@@ -345,15 +368,10 @@ class TestErrorKindContract(unittest.TestCase):
         document["models"] = models
         runtime._save_registry_document(document)
 
-        handler = _HandlerForPostTest(
+        handler = _apply_defaults(
             runtime,
-            "/defaults",
-            {
-                "default_provider": "ollama",
-                "embed_model": "ollama:qwen2.5:3b-instruct",
-            },
+            {"default_provider": "ollama", "embed_model": "ollama:qwen2.5:3b-instruct"},
         )
-        handler.do_PUT()
 
         self.assertEqual(400, handler.status_code)
         self.assertEqual(False, handler.response_payload.get("ok"))

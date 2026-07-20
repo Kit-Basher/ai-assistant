@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from agent.api_server import APIServerHandler, AgentRuntime
 from agent.config import Config
+from agent.mutation_plan import build_mutation_confirmation
 
 
 def _config(registry_path: str, db_path: str, **overrides: object) -> Config:
@@ -218,6 +219,36 @@ class _HandlerForTest(APIServerHandler):
         return self._payload
 
 
+def _authorized_mutation(
+    runtime: AgentRuntime,
+    operation: str,
+    payload: dict[str, object],
+) -> _HandlerForTest:
+    preview = _HandlerForTest(
+        runtime,
+        "/authorized/provider-model/preview",
+        {"operation": operation, **payload},
+    )
+    preview.do_POST()
+    preview_payload = json.loads(preview.body.decode("utf-8"))
+    plan = preview_payload.get("plan") if isinstance(preview_payload.get("plan"), dict) else {}
+    applied = _HandlerForTest(
+        runtime,
+        "/authorized/provider-model/apply",
+        {
+            "operation": operation,
+            **payload,
+            "mutation_plan": plan,
+            "confirmation": build_mutation_confirmation(
+                plan,
+                confirmation_id=f"test-{operation}-{plan.get('plan_id')}",
+            ),
+        },
+    )
+    applied.do_POST()
+    return applied
+
+
 class TestLLMFixitEndpointFlow(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
@@ -291,12 +322,7 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
             "_execute_llm_fixit_plan",
             return_value=(True, {"ok": True, "executed_steps": [{"id": "01"}], "blocked_steps": [], "failed_steps": []}),
         ):
-            third = _HandlerForTest(
-                runtime,
-                "/llm/fixit",
-                {"confirm": True},
-            )
-            third.do_POST()
+            third = _authorized_mutation(runtime, "llm.fix", {})
 
         self.assertEqual(200, third.status_code)
         third_payload = json.loads(third.body.decode("utf-8"))
@@ -373,13 +399,12 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
             }
         )
         with patch("agent.api_server.time.time", return_value=200):
-            handler = _HandlerForTest(runtime, "/llm/fixit", {"confirm": True})
-            handler.do_POST()
-        self.assertEqual(200, handler.status_code)
+            handler = _authorized_mutation(runtime, "llm.fix", {})
+        self.assertEqual(400, handler.status_code)
         payload = json.loads(handler.body.decode("utf-8"))
-        self.assertTrue(payload["ok"])
-        self.assertEqual("needs_clarification", payload["error_kind"])
-        self.assertIn("expired", payload["message"])
+        self.assertFalse(payload["ok"])
+        self.assertTrue(str(payload.get("error_code") or ""))
+        self.assertFalse(bool(payload.get("mutated")))
 
     def test_fixit_cancel_clears_pending_plan(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -472,8 +497,7 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
                 },
             ),
         ):
-            third = _HandlerForTest(runtime, "/llm/fixit", {"confirm": True})
-            third.do_POST()
+            third = _authorized_mutation(runtime, "llm.fix", {})
         third_payload = json.loads(third.body.decode("utf-8"))
         self.assertEqual("needs_user_choice", third_payload["status"])
         self.assertEqual("openrouter_down", third_payload["issue_code"])
@@ -545,8 +569,7 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
         self.assertEqual(200, second.status_code)
         self.assertEqual("needs_confirmation", second_payload["status"])
 
-        third = _HandlerForTest(runtime, "/llm/fixit", {"confirm": True})
-        third.do_POST()
+        third = _authorized_mutation(runtime, "llm.fix", {})
         third_payload = json.loads(third.body.decode("utf-8"))
         self.assertEqual(200, third.status_code)
         self.assertTrue(third_payload["ok"])
@@ -654,8 +677,7 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
             "refresh_models",
             return_value=(True, {"ok": True}),
         ):
-            handler = _HandlerForTest(runtime, "/providers/ollama/pull", {"model": "qwen2.5:3b-instruct", "confirm": True})
-            handler.do_POST()
+            handler = _authorized_mutation(runtime, "model.acquire", {"model": "qwen2.5:3b-instruct"})
         self.assertEqual(200, handler.status_code)
         payload = json.loads(handler.body.decode("utf-8"))
         self.assertTrue(payload["ok"])
@@ -670,8 +692,7 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
         )
         direct_pull_mock.assert_not_called()
 
-        disallowed = _HandlerForTest(runtime, "/providers/ollama/pull", {"model": "llama3:8b"})
-        disallowed.do_POST()
+        disallowed = _authorized_mutation(runtime, "model.acquire", {"model": "llama3:8b"})
         self.assertEqual(400, disallowed.status_code)
         disallowed_payload = json.loads(disallowed.body.decode("utf-8"))
         self.assertFalse(disallowed_payload["ok"])
@@ -719,8 +740,7 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
             "refresh_models",
             return_value=(True, {"ok": True}),
         ):
-            handler = _HandlerForTest(runtime, "/providers/ollama/pull", {"model": "ollama:qwen2.5:3b-instruct", "confirm": True})
-            handler.do_POST()
+            handler = _authorized_mutation(runtime, "model.acquire", {"model": "ollama:qwen2.5:3b-instruct"})
         self.assertEqual(200, handler.status_code)
         payload = json.loads(handler.body.decode("utf-8"))
         self.assertTrue(payload["ok"])
@@ -745,8 +765,7 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
                 "stderr_tail": "",
             },
         ):
-            timeout_handler = _HandlerForTest(runtime, "/providers/ollama/pull", {"model": "qwen2.5:3b-instruct", "confirm": True})
-            timeout_handler.do_POST()
+            timeout_handler = _authorized_mutation(runtime, "model.acquire", {"model": "qwen2.5:3b-instruct"})
         self.assertEqual(400, timeout_handler.status_code)
         timeout_payload = json.loads(timeout_handler.body.decode("utf-8"))
         self.assertFalse(timeout_payload["ok"])
@@ -779,11 +798,12 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
         ) as direct_pull_mock:
             handler = _HandlerForTest(runtime, "/providers/ollama/pull", {"model": "qwen2.5:3b-instruct"})
             handler.do_POST()
-        self.assertEqual(400, handler.status_code)
+        self.assertEqual(200, handler.status_code)
         payload = json.loads(handler.body.decode("utf-8"))
-        self.assertFalse(payload["ok"])
-        self.assertEqual("approval_required", payload["error_kind"])
-        self.assertFalse(bool(install_mock.call_args.kwargs["approve"]))
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["requires_confirmation"])
+        self.assertFalse(payload["mutated"])
+        install_mock.assert_not_called()
         direct_pull_mock.assert_not_called()
 
     def test_fixit_offers_install_local_models_and_applies_install_plan(self) -> None:
@@ -857,8 +877,7 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
             "test_provider",
             return_value=(True, {"ok": True, "provider": "ollama", "model": "qwen2.5:3b-instruct"}),
         ) as test_provider_mock:
-            third = _HandlerForTest(runtime, "/llm/fixit", {"confirm": True})
-            third.do_POST()
+            third = _authorized_mutation(runtime, "llm.fix", {})
 
         self.assertEqual(200, third.status_code)
         third_payload = json.loads(third.body.decode("utf-8"))
@@ -891,8 +910,7 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
         runtime.update_defaults({"chat_model": "ollama:llama3"})
         runtime.update_defaults({"chat_model": "ollama:qwen2.5:3b-instruct"})
 
-        handler = _HandlerForTest(runtime, "/defaults/rollback", {})
-        handler.do_POST()
+        handler = _authorized_mutation(runtime, "defaults.rollback", {})
         self.assertEqual(200, handler.status_code)
         payload = json.loads(handler.body.decode("utf-8"))
         self.assertTrue(payload["ok"])
@@ -956,8 +974,7 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
             "test_provider",
             return_value=(True, {"ok": True, "provider": "ollama", "model": "ollama:llama3"}),
         ):
-            third = _HandlerForTest(runtime, "/llm/fixit", {"confirm": True})
-            third.do_POST()
+            third = _authorized_mutation(runtime, "llm.fix", {})
         third_payload = json.loads(third.body.decode("utf-8"))
         self.assertEqual(200, third.status_code)
         self.assertTrue(third_payload["ok"])

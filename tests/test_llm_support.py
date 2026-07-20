@@ -9,6 +9,7 @@ import unittest
 from agent.api_server import APIServerHandler, AgentRuntime
 from agent.config import Config
 from agent.model_watch import normalize_model_watch_state
+from agent.mutation_plan import build_mutation_confirmation
 
 
 def _config(registry_path: str, db_path: str, **overrides: object) -> Config:
@@ -323,10 +324,27 @@ class TestLLMSupport(unittest.TestCase):
         self.assertTrue(remediate_payload["ok"])
         self.assertTrue(remediate_payload["plan"]["plan_only"])
 
+        mutation_request = {"target": "defaults", "intent": "fix_routing"}
+        remediate_preview_handler = _HandlerForTest(
+            runtime,
+            "/authorized/provider-model/preview",
+            {"operation": "llm.support.remediate", **mutation_request},
+        )
+        remediate_preview_handler.do_POST()
+        preview_payload = json.loads(remediate_preview_handler.body.decode("utf-8"))
+        mutation_plan = preview_payload.get("plan") if isinstance(preview_payload.get("plan"), dict) else {}
         remediate_execute_handler = _HandlerForTest(
             runtime,
-            "/llm/support/remediate/execute",
-            {"target": "defaults", "intent": "fix_routing", "confirm": True},
+            "/authorized/provider-model/apply",
+            {
+                "operation": "llm.support.remediate",
+                **mutation_request,
+                "mutation_plan": mutation_plan,
+                "confirmation": build_mutation_confirmation(
+                    mutation_plan,
+                    confirmation_id="support-remediation-test",
+                ),
+            },
         )
         remediate_execute_handler.do_POST()
         self.assertEqual(200, remediate_execute_handler.status_code)

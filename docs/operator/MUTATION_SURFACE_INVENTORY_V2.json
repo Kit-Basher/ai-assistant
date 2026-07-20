@@ -35,23 +35,25 @@
   ],
   "schema": "personal-agent.mutation-surface-inventory.v2",
   "scope": "public API mutations plus assistant, Telegram, CLI, skill-pack, executor, and background entry points",
-  "source_commit": "audit-v2c-working-tree-on-a59292274df04fde3b9a3d48f90b6cd7c92b71c4",
+  "source_commit": "audit-v2d-working-tree-on-1521878e729aea5669a7adb67db711c2513ad718",
   "status_definitions": {
     "central_authorized": "central capability schema, policy, Universal Mutation Plan, confirmation, and Executor Registry",
+    "internal_state_write": "bounded scheduled/runtime bookkeeping, not public authority",
     "legacy_unmigrated": "public or reachable mutation not fully migrated to the canonical authorization stack",
     "plan_confirm_gated": "bounded domain Plan/apply confirmation, not yet central Executor Registry",
     "plan_gated_legacy": "domain Plan/apply exists but remains outside the central capability/executor authority",
+    "removed": "obsolete compatibility mutation denied or method-not-allowed",
     "unimplemented_denied": "intentionally unavailable and fail-closed"
   },
   "summary": {
     "canonical_front_door": 2,
-    "central_authorized": 3,
+    "central_authorized": 37,
     "internal_state_write": 1,
-    "legacy_unmigrated": 47,
+    "legacy_unmigrated": 19,
     "plan_confirm_gated": 7,
-    "plan_gated_legacy": 7,
-    "read_only": 9,
+    "read_only": 11,
     "read_only_preview": 14,
+    "removed": 2,
     "unimplemented_denied": 1
   },
   "surfaces": [
@@ -65,12 +67,30 @@
       "surface": "api.post:/ask"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/authorized/provider-model/apply",
+      "status": "central_authorized",
+      "surface": "api.post:/authorized/provider-model/apply"
+    },
+    {
+      "authority": "capability policy + Executor Registry",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/authorized/provider-model/preview",
+      "status": "central_authorized",
+      "surface": "api.post:/authorized/provider-model/preview"
+    },
+    {
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/bootstrap/run",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.post:/bootstrap/run"
     },
     {
@@ -83,12 +103,12 @@
       "surface": "api.post:/chat"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/defaults/rollback",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.post:/defaults/rollback"
     },
     {
@@ -101,12 +121,12 @@
       "surface": "api.post:/done"
     },
     {
-      "authority": "domain-specific Plan/apply controller; not central capability registry",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/llm/autoconfig/apply",
-      "status": "plan_gated_legacy",
+      "status": "central_authorized",
       "surface": "api.post:/llm/autoconfig/apply"
     },
     {
@@ -119,39 +139,39 @@
       "surface": "api.post:/llm/autoconfig/plan"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/llm/autopilot/bootstrap",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.post:/llm/autopilot/bootstrap"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/llm/autopilot/undo",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.post:/llm/autopilot/undo"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/llm/autopilot/unpause",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.post:/llm/autopilot/unpause"
     },
     {
-      "authority": "domain-specific Plan/apply controller; not central capability registry",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/llm/capabilities/reconcile/apply",
-      "status": "plan_gated_legacy",
+      "status": "central_authorized",
       "surface": "api.post:/llm/capabilities/reconcile/apply"
     },
     {
@@ -173,12 +193,12 @@
       "surface": "api.post:/llm/catalog/run"
     },
     {
-      "authority": "domain-specific Plan/apply controller; not central capability registry",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/llm/cleanup/apply",
-      "status": "plan_gated_legacy",
+      "status": "central_authorized",
       "surface": "api.post:/llm/cleanup/apply"
     },
     {
@@ -191,21 +211,21 @@
       "surface": "api.post:/llm/cleanup/plan"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/llm/control_mode",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.post:/llm/control_mode"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/llm/fixit",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.post:/llm/fixit"
     },
     {
@@ -218,12 +238,12 @@
       "surface": "api.post:/llm/health/run"
     },
     {
-      "authority": "domain-specific Plan/apply controller; not central capability registry",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/llm/hygiene/apply",
-      "status": "plan_gated_legacy",
+      "status": "central_authorized",
       "surface": "api.post:/llm/hygiene/apply"
     },
     {
@@ -236,12 +256,12 @@
       "surface": "api.post:/llm/hygiene/plan"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "removed compatibility mutation; method is denied",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/llm/model",
-      "status": "legacy_unmigrated",
+      "status": "removed",
       "surface": "api.post:/llm/model"
     },
     {
@@ -254,21 +274,21 @@
       "surface": "api.post:/llm/models/check"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/llm/models/policy",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.post:/llm/models/policy"
     },
     {
-      "authority": "legacy runtime/controller mutation",
-      "effect": "mutating",
+      "authority": "runtime service",
+      "effect": "read_only",
       "kind": "api_route",
       "method": "POST",
       "route": "/llm/models/proposals",
-      "status": "legacy_unmigrated",
+      "status": "read_only",
       "surface": "api.post:/llm/models/proposals"
     },
     {
@@ -281,21 +301,21 @@
       "surface": "api.post:/llm/models/recommend"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/llm/models/switch",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.post:/llm/models/switch"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/llm/models/switch_temporary",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.post:/llm/models/switch_temporary"
     },
     {
@@ -326,21 +346,21 @@
       "surface": "api.post:/llm/notifications/test"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/llm/registry/rollback",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.post:/llm/registry/rollback"
     },
     {
-      "authority": "domain-specific Plan/apply controller; not central capability registry",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/llm/self_heal/apply",
-      "status": "plan_gated_legacy",
+      "status": "central_authorized",
       "surface": "api.post:/llm/self_heal/apply"
     },
     {
@@ -353,12 +373,12 @@
       "surface": "api.post:/llm/self_heal/plan"
     },
     {
-      "authority": "domain-specific Plan/apply controller; not central capability registry",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/llm/support/remediate/execute",
-      "status": "plan_gated_legacy",
+      "status": "central_authorized",
       "surface": "api.post:/llm/support/remediate/execute"
     },
     {
@@ -380,48 +400,48 @@
       "surface": "api.post:/memory/reset"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "removed compatibility mutation; method is denied",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/model",
-      "status": "legacy_unmigrated",
+      "status": "removed",
       "surface": "api.post:/model"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/model_watch/hf/scan",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.post:/model_watch/hf/scan"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/model_watch/refresh",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.post:/model_watch/refresh"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/model_watch/run",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.post:/model_watch/run"
     },
     {
-      "authority": "domain-specific Plan/apply controller; not central capability registry",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/modelops/execute",
-      "status": "plan_gated_legacy",
+      "status": "central_authorized",
       "surface": "api.post:/modelops/execute"
     },
     {
@@ -434,12 +454,12 @@
       "surface": "api.post:/modelops/plan"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/models/refresh",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.post:/models/refresh"
     },
     {
@@ -587,21 +607,21 @@
       "surface": "api.post:/packs/remove/plan"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/providers",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.post:/providers"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/providers/ollama/pull",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.post:/providers/ollama/pull"
     },
     {
@@ -614,30 +634,30 @@
       "surface": "api.post:/providers/test"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/providers/{provider_id}/models",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.post:/providers/{provider_id}/models"
     },
     {
-      "authority": "runtime internal state writer",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/providers/{provider_id}/models/refresh",
-      "status": "internal_state_write",
+      "status": "central_authorized",
       "surface": "api.post:/providers/{provider_id}/models/refresh"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/providers/{provider_id}/secret",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.post:/providers/{provider_id}/secret"
     },
     {
@@ -731,39 +751,39 @@
       "surface": "api.post:/semantic/repair"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/telegram/secret",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.post:/telegram/secret"
     },
     {
-      "authority": "legacy runtime/controller mutation",
-      "effect": "mutating",
+      "authority": "runtime service",
+      "effect": "read_only",
       "kind": "api_route",
       "method": "POST",
       "route": "/telegram/test",
-      "status": "legacy_unmigrated",
+      "status": "read_only",
       "surface": "api.post:/telegram/test"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "PUT",
       "route": "/config",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.put:/config"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "PUT",
       "route": "/defaults",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.put:/defaults"
     },
     {
@@ -803,12 +823,12 @@
       "surface": "api.put:/permissions"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "PUT",
       "route": "/providers/{provider_id}",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.put:/providers/{provider_id}"
     },
     {
@@ -830,6 +850,12 @@
       "surface": "cli.legacy_builtin_skill_writes"
     },
     {
+      "kind": "cli_command",
+      "path": "agent.secrets -> loopback authorized provider/model preview/apply API; no direct SecretStore write",
+      "status": "central_authorized",
+      "surface": "cli.secret_set"
+    },
+    {
       "kind": "skill_pack",
       "path": "SkillPackInvocationBroker.request_action preview -> persisted scoped plan -> confirm_action -> ExecutorRegistry",
       "status": "central_authorized",
@@ -843,9 +869,9 @@
     },
     {
       "kind": "background_job",
-      "path": "AgentRuntime model-watch/autopilot callbacks",
-      "status": "legacy_unmigrated",
-      "surface": "background.model_watch_and_autopilot"
+      "path": "scheduled model-watch/scout bookkeeping only; public triggers are centrally authorized",
+      "status": "internal_state_write",
+      "surface": "background.model_watch_bookkeeping"
     },
     {
       "kind": "pack_runtime",

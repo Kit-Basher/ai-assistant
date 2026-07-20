@@ -195,3 +195,14 @@ writer/capability/operation/resource/target/trigger/mode binding and a durable
 redacted journal. Public structured boundaries reject claimed internal
 identities. This does not defend against malicious Python already in the
 process and is not process isolation.
+
+## Provider/model/secret boundary (Audit v2D)
+
+Provider URLs reject credentials, non-HTTP schemes, undeclared loopback, and
+literal private/link-local/reserved addresses before a Plan exists. Secret
+Plans contain only namespace plus keyed opaque current/proposed versions;
+plaintext is excluded from Plans, confirmations, receipts, journals, and CLI
+output. DNS rebinding and malicious in-process Python remain limitations.
+Secret delete/import/repair and bulk configuration import/reset are not public
+surfaces and are explicitly recorded as unimplemented/denied rather than
+silently treated as authorized functionality.

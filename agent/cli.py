@@ -812,7 +812,40 @@ def _cmd_llm_install(args: argparse.Namespace) -> int:
             policy_name="default",
             policy=config.default_policy if isinstance(config.default_policy, dict) else None,
         )
-    if bool(getattr(args, "json", False)) and not bool(getattr(args, "approve", False)):
+    apply_plan_path = str(getattr(args, "apply_plan", "") or "").strip()
+    confirmation_path = str(getattr(args, "confirmation", "") or "").strip()
+    if apply_plan_path or confirmation_path:
+        if not apply_plan_path or not confirmation_path:
+            print("both --apply-plan and --confirmation are required", flush=True)
+            return 2
+        try:
+            plan_artifact = json.loads(Path(apply_plan_path).read_text(encoding="utf-8"))
+            confirmation = json.loads(Path(confirmation_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"authorization artifact could not be read: {exc.__class__.__name__}", flush=True)
+            return 2
+        decision = plan.get("decision") if isinstance(plan.get("decision"), dict) else {}
+        model_id = str(decision.get("model_id") or getattr(args, "model", "") or "").strip()
+        model_name = model_id.split(":", 1)[1] if model_id.startswith("ollama:") else model_id
+        from agent.secrets import _authorized_secret_request
+        ok_http, result = _authorized_secret_request(
+            str(getattr(args, "api_base_url", "") or _DEFAULT_API_BASE_URL),
+            {
+                "operation": "model.acquire",
+                "model": model_name,
+                "actor_id": "local_cli",
+                "thread_id": "cli",
+                "session_id": "cli",
+                "mutation_plan": plan_artifact.get("plan") if isinstance(plan_artifact, dict) and isinstance(plan_artifact.get("plan"), dict) else plan_artifact,
+                "confirmation": confirmation,
+            },
+        )
+        print(json.dumps(result, ensure_ascii=True, sort_keys=True, indent=2), flush=True)
+        return 0 if ok_http else 1
+    if bool(getattr(args, "approve", False)):
+        print("--approve cannot authorize a mutation. Use a Universal Mutation Plan with --apply-plan and --confirmation.", flush=True)
+        return 2
+    if bool(getattr(args, "json", False)):
         payload = {
             "task_request": task_request,
             "plan": plan,
@@ -834,34 +867,7 @@ def _cmd_llm_install(args: argparse.Namespace) -> int:
         print("\n".join(lines), flush=True)
         return 0
 
-    result = _execute_llm_install_via_model_manager(
-        config=config,
-        plan=plan,
-        trace_id=_trace_id("llm-install"),
-    )
-    if bool(getattr(args, "json", False)):
-        print(json.dumps(result, ensure_ascii=True, sort_keys=True, indent=2), flush=True)
-    else:
-        lines = [
-            "LLM install result",
-            f"ok: {str(bool(result.get('ok', False))).lower()}",
-            f"executed: {str(bool(result.get('executed', False))).lower()}",
-            f"model_id: {str(result.get('model_id') or 'none')}",
-            f"install_name: {str(result.get('install_name') or 'none')}",
-            f"error_kind: {str(result.get('error_kind') or 'none')}",
-            f"message: {str(result.get('message') or 'none')}",
-            f"trace_id: {str(result.get('trace_id') or 'none')}",
-        ]
-        verification = result.get("verification") if isinstance(result.get("verification"), dict) else {}
-        if verification:
-            lines.extend(
-                [
-                    "verification:",
-                    f"- found={str(bool(verification.get('found', False))).lower()} installed={str(bool(verification.get('installed', False))).lower()} available={str(bool(verification.get('available', False))).lower()} healthy={str(bool(verification.get('healthy', False))).lower()}",
-                ]
-            )
-        print("\n".join(lines), flush=True)
-    return 0 if bool(result.get("ok", False)) else 1
+    return 0
 
 
 def _cmd_packs(args: argparse.Namespace) -> int:
@@ -1335,7 +1341,10 @@ def build_parser() -> argparse.ArgumentParser:
     llm_install_target = llm_install_parser.add_mutually_exclusive_group(required=True)
     llm_install_target.add_argument("--task", help="task description")
     llm_install_target.add_argument("--model", help="approved local model id, for example ollama:llava:7b")
-    llm_install_parser.add_argument("--approve", action="store_true", help="execute the approved local install")
+    llm_install_parser.add_argument("--approve", action="store_true", help="legacy flag; cannot authorize execution")
+    llm_install_parser.add_argument("--apply-plan", default=None, help="path to an authorized Universal Mutation Plan")
+    llm_install_parser.add_argument("--confirmation", default=None, help="path to a scoped confirmation artifact")
+    llm_install_parser.add_argument("--api-base-url", default=_DEFAULT_API_BASE_URL)
     llm_install_parser.add_argument("--json", action="store_true", help="emit JSON output")
 
     packs_parser = sub.add_parser("packs", help="Show installed skill and pack safety status")

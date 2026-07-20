@@ -578,3 +578,9 @@ The first-line truth is already available through:
 - `python -m agent doctor`
 
 Logs are for deeper debugging. They should not be required for ordinary diagnosis.
+
+Provider/model/configuration changes are two-stage operations. Obtain a Plan
+from the compatibility endpoint or `/authorized/provider-model/preview`, then
+apply the exact Plan with actor/thread/session-bound confirmation. If runtime
+truth, registry state, mode, arguments, or target changes, preview again. Never
+automatically retry an indeterminate receipt.

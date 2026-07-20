@@ -9,6 +9,7 @@ from unittest.mock import patch
 from agent.api_server import APIServerHandler, AgentRuntime
 from agent.bootstrap.snapshot import BootstrapSnapshot
 from agent.config import Config
+from agent.mutation_plan import build_mutation_confirmation
 
 
 def _config(registry_path: str, db_path: str, **overrides: object) -> Config:
@@ -172,25 +173,37 @@ class TestBootstrapRunEndpoint(unittest.TestCase):
         ]
         with patch("agent.api_server.collect_bootstrap_snapshot", side_effect=snapshots):
             runtime = AgentRuntime(_config(self.registry_path, self.db_path))
-            handler = _HandlerForTest(
+            preview = _HandlerForTest(
                 runtime,
                 "/bootstrap/run",
                 {"force": True, "promote_semantic": True, "reason": "manual refresh"},
+            )
+            preview.do_POST()
+            preview_payload = json.loads(preview.body.decode("utf-8"))
+            plan = preview_payload.get("plan") if isinstance(preview_payload.get("plan"), dict) else {}
+            self.assertTrue(bool(preview_payload.get("requires_confirmation")))
+            handler = _HandlerForTest(
+                runtime,
+                "/bootstrap/run",
+                {
+                    "force": True,
+                    "promote_semantic": True,
+                    "reason": "manual refresh",
+                    "mutation_plan": plan,
+                    "confirmation": build_mutation_confirmation(plan, confirmation_id="bootstrap-run-test"),
+                },
             )
             handler.do_POST()
 
         payload = json.loads(handler.body.decode("utf-8"))
         self.assertEqual(200, handler.status_code)
         self.assertTrue(payload.get("ok"))
-        self.assertTrue(payload.get("did_work"))
-        self.assertEqual("bootstrap", payload.get("intent"))
-        self.assertIn("Bootstrap snapshot captured.", str(payload.get("message") or ""))
-
-        envelope = payload.get("envelope") if isinstance(payload.get("envelope"), dict) else {}
-        bootstrap = envelope.get("bootstrap") if isinstance(envelope.get("bootstrap"), dict) else {}
-        self.assertTrue(bool(bootstrap.get("completed")))
-        self.assertTrue(isinstance(bootstrap.get("episodic_ids"), list))
-        semantic_updates = bootstrap.get("semantic_updates") if isinstance(bootstrap.get("semantic_updates"), dict) else {}
+        self.assertTrue(payload.get("mutated"))
+        self.assertEqual("setup.repair", payload.get("capability_id"))
+        self.assertTrue(isinstance(payload.get("authorization_receipt"), dict))
+        ingest = payload.get("ingest") if isinstance(payload.get("ingest"), dict) else {}
+        self.assertTrue(isinstance(ingest.get("episodic_ids"), list))
+        semantic_updates = ingest.get("semantic_updates") if isinstance(ingest.get("semantic_updates"), dict) else {}
         self.assertTrue(isinstance(semantic_updates.get("inserted"), list))
         self.assertTrue(isinstance(semantic_updates.get("unchanged"), list))
         self.assertTrue(isinstance(semantic_updates.get("superseded"), list))

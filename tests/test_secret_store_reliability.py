@@ -82,7 +82,7 @@ class TestSecretStoreReliability(unittest.TestCase):
 
         self.assertEqual(0, exit_code)
         self.assertEqual("(not set)", stdout.getvalue().strip())
-        self.assertIn("Use --show", stderr.getvalue())
+        self.assertEqual("", stderr.getvalue())
         self.assertNotIn("Traceback", stderr.getvalue())
 
     def test_doctor_reports_corrupt_secret_store_without_raw_payload(self) -> None:
