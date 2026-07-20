@@ -11,6 +11,17 @@ marketing copy and it is not a final release claim.
 - Release status: Recovery and Installation Audit v1 is complete; the fresh
   Debian VM proof remains the final release gate
 
+## Active Audit: Architecture and Safety Audit v2
+
+Audit v2 preserves the single Web/Telegram assistant path and closes a
+high-severity Executor Registry confirmation-boundary gap. Migrated execution
+now requires an existing Universal Mutation Plan plus scope-bound, single-use
+confirmation metadata; automatic Plan synthesis is removed. The machine
+inventory records 91 public/reachable surfaces, including 48 explicitly
+`legacy_unmigrated` and seven `plan_gated_legacy` surfaces. This is not a claim
+that central authorization migration is complete. See
+`docs/operator/ARCHITECTURE_SAFETY_AUDIT_V2.md`.
+
 ## Active Audit: Recovery and Installation Audit v1
 
 Confirmed recovery work found an ambiguous recommended installer, a

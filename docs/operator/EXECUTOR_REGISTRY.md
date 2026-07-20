@@ -11,6 +11,14 @@ fingerprint, and receipt metadata for the migrated mutating set. See
 `docs/operator/CAPABILITY_POLICY_V1.md` and
 `docs/operator/UNIVERSAL_PLAN_MODE_V1.md`.
 
+Audit v2 hardening makes the registry enforce confirmation at its own boundary.
+Every migrated execution must supply a pre-existing valid Universal Mutation
+Plan and separate confirmation metadata bound to the Plan fingerprint,
+capability, executor, actor, thread, session, activation fingerprint, and
+expiry. Confirmation is consumed before the executor runs, so replay fails
+with `mutation_confirmation_replayed`. Missing Plans are rejected; the registry
+does not synthesize them.
+
 ## Result Schema
 
 Every registry result includes:

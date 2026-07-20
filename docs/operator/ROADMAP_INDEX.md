@@ -27,6 +27,8 @@ future work where to look first.
 | Skill-pack permission boundary | `docs/operator/SKILL_PACK_PERMISSION_BOUNDARY_V1.md` |
 | Generic mutation bypass hardening | `docs/operator/GENERIC_MUTATION_BYPASS_HARDENING_V1.md` |
 | Full adversarial authorization proof | `docs/operator/FULL_ADVERSARIAL_AUTHORIZATION_PROOF_V1.md` |
+| Architecture and Safety Audit v2 | `docs/operator/ARCHITECTURE_SAFETY_AUDIT_V2.md` |
+| Machine-readable mutation surfaces | `docs/operator/MUTATION_SURFACE_INVENTORY_V2.json` |
 | Runtime latency closure | `docs/operator/RUNTIME_LATENCY_CLOSURE_V1.md` |
 | v0.2.2 final release audit | `docs/operator/V0_2_2_FINAL_RELEASE_AUDIT.md` |
 | v0.2.2 full pytest closure | `docs/operator/FULL_PYTEST_FAILURE_TRIAGE_V1.md` |

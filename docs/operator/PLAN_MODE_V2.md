@@ -34,6 +34,14 @@ bounded apply path may exist through the executor registry, while
 `preview_only` means confirmation is still blocked from real execution and
 returns `executor_not_enabled` with `mutated=false`.
 
+For a migrated executor, confirmation is a separate security object, not a
+boolean. It is bound to the exact Plan ID and fingerprint, capability,
+executor, actor, thread, session, activation fingerprint, affirmative phrase
+class, and expiry. The Executor Registry consumes it once before mutation.
+Missing, altered, cross-scope, expired, or replayed confirmation fails closed.
+The registry no longer synthesizes a Universal Mutation Plan for callers that
+omit one.
+
 Capability Policy v1 extends Plan Mode for representative migrated actions:
 package install, cleanup execution, system update, and system uninstall. The
 confirmation is bound to capability id, policy version, Plan fingerprint,

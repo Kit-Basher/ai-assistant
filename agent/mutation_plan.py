@@ -298,6 +298,73 @@ class MutationConfirmation:
         }
 
 
+def build_mutation_confirmation(
+    plan: dict[str, Any],
+    *,
+    confirmation_id: str,
+    actor_id: str | None = None,
+    thread_id: str | None = None,
+    session_id: str | None = None,
+    confirmation_phrase_class: str = "affirmative",
+) -> dict[str, Any]:
+    """Build confirmation metadata bound to one exact Universal Mutation Plan.
+
+    This is deliberately separate from the Plan.  The Plan is safe to preview;
+    the confirmation is issued only after the front door has validated the
+    pending user/thread scope.
+    """
+    validate_mutation_plan(plan)
+    return MutationConfirmation(
+        confirmation_id=str(confirmation_id or "").strip(),
+        plan_id=str(plan.get("plan_id") or ""),
+        plan_fingerprint=str(plan.get("plan_fingerprint") or ""),
+        capability_id=str(plan.get("capability_id") or ""),
+        executor_id=str(plan.get("executor_id") or ""),
+        thread_id=str(plan.get("thread_id") if thread_id is None else thread_id),
+        session_id=str(plan.get("session_id") if session_id is None else session_id),
+        actor_id=str(plan.get("actor_id") if actor_id is None else actor_id),
+        confirmed_at=utc_now_iso(),
+        confirmation_phrase_class=str(confirmation_phrase_class or "").strip().lower(),
+        activation_fingerprint=str(plan.get("activation_fingerprint") or "") or None,
+    ).to_dict()
+
+
+def validate_mutation_confirmation(
+    plan: dict[str, Any],
+    confirmation: dict[str, Any] | None,
+    *,
+    now: int | None = None,
+) -> None:
+    validate_mutation_plan(plan)
+    if not isinstance(confirmation, dict):
+        raise ValueError("mutation_confirmation_missing")
+    if not str(confirmation.get("confirmation_id") or "").strip():
+        raise ValueError("mutation_confirmation_token_missing")
+    for field in (
+        "plan_id",
+        "plan_fingerprint",
+        "capability_id",
+        "executor_id",
+        "thread_id",
+        "session_id",
+        "actor_id",
+        "activation_fingerprint",
+    ):
+        expected = str(plan.get(field) or "")
+        actual = str(confirmation.get(field) or "")
+        if actual != expected:
+            raise ValueError(f"mutation_confirmation_{field}_mismatch")
+    if str(confirmation.get("confirmation_phrase_class") or "").strip().lower() != "affirmative":
+        raise ValueError("mutation_confirmation_phrase_invalid")
+    confirmed_at = normalize_timestamp(confirmation.get("confirmed_at"))
+    confirmed_epoch = int(datetime.fromisoformat(confirmed_at).timestamp())
+    current = int(now or time.time())
+    if confirmed_epoch > current + 30:
+        raise ValueError("mutation_confirmation_timestamp_invalid")
+    if expires_at_epoch(plan) <= current:
+        raise ValueError("mutation_confirmation_expired")
+
+
 class MutationPlanStore:
     def __init__(self, path: str | Path | None = None, *, max_records: int = 200) -> None:
         self.path = Path(path).expanduser().resolve() if path is not None else None

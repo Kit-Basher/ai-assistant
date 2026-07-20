@@ -12,6 +12,14 @@ behavior.
 Yellow for controlled local trial. No new public release claim is made until the
 fresh Debian VM install proof passes.
 
+Architecture and Safety Audit v2 adds an important qualification: central
+authorization coverage is incomplete. Migrated Executor Registry actions now
+require an existing Universal Mutation Plan and scope-bound, expiring,
+single-use confirmation metadata. The inventory still records 48
+`legacy_unmigrated` and seven `plan_gated_legacy` surfaces; see
+`ARCHITECTURE_SAFETY_AUDIT_V2.md`. These surfaces must not be represented as
+covered by the central capability/executor contract.
+
 ## Enforced Boundaries
 
 - Secrets/tokens: doctor, status, support bundle, Telegram setup, provider/API

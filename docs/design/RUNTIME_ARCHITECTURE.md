@@ -1,5 +1,13 @@
 # Runtime Architecture
 
+Audit v2 invariant: Web UI and Telegram are transports into the same
+`AgentOrchestrator.handle_message` assistant entity. `route_inference()` in
+`agent/llm/inference_router.py` remains the sole inference orchestrator, and
+`RuntimeTruthService` remains the authority for effective runtime/provider/
+model/readiness/policy truth. No adapter may create a parallel router, model
+selector, or execution path. See
+`docs/operator/ARCHITECTURE_SAFETY_AUDIT_V2.md` for evidence and qualifications.
+
 This document describes the current runtime architecture of Personal Agent.
 
 Source of truth is the code, not older handoff notes. The most relevant code

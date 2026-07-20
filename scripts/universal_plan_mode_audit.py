@@ -127,14 +127,14 @@ def run() -> list[Check]:
             action={"pending_id": "audit-cleanup"},
         ).to_dict()
         checks.append(
-            _pass("registry synthesizes Universal Plan for legacy canonical plan", f"schema={result.get('mutation_plan_schema_version')}")
-            if result.get("mutation_plan_schema_version") == MUTATION_PLAN_SCHEMA_VERSION and result.get("mutated") is True
-            else _fail("registry synthesizes Universal Plan for legacy canonical plan", str(result)[:700])
+            _pass("registry rejects a missing Universal Mutation Plan", str(result.get("error_code")))
+            if result.get("mutated") is False and result.get("error_code") == "mutation_plan_invalid"
+            else _fail("registry rejects a missing Universal Mutation Plan", str(result)[:700])
         )
         checks.append(
-            _pass("receipt metadata includes Plan fields", result.get("capability_id") == "cleanup.execute" and bool(result.get("plan_fingerprint")))
-            if result.get("authorization_decision_id")
-            else _fail("receipt metadata includes Plan fields", str(result)[:700])
+            _pass("missing-Plan rejection is recorded without authorization fabrication")
+            if not result.get("authorization_decision_id") and not result.get("mutated")
+            else _fail("missing-Plan rejection is recorded without authorization fabrication", str(result)[:700])
         )
 
     orchestrator = _source_text("agent/orchestrator.py")

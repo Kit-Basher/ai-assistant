@@ -159,7 +159,7 @@ def run() -> list[Check]:
             target={"target_path": str(target_file), "size_bytes": 6},
             action_payload={"target_path": str(target_file), "approved_roots": [str(target_root)], "content": "hello\n"},
         )
-        checks.append(_pass("exact grant enables only mapped capability", create_result.get("capability_id", "")) if create_result.get("ok") and create_result.get("mutated") and create_result.get("capability_id") == "files.create" else _fail("exact grant enables only mapped capability", json.dumps(create_result, sort_keys=True)[:1200]))
+        checks.append(_pass("exact grant still requires per-invocation confirmation", create_result.get("error_code", "")) if create_result.get("mutated") is False and create_result.get("error_code") == "mutation_confirmation_missing" and create_result.get("capability_id") == "files.create" else _fail("exact grant still requires per-invocation confirmation", json.dumps(create_result, sort_keys=True)[:1200]))
         checks.append(_pass("Universal Mutation Plan identifies requesting skill", create_result.get("skill_pack_id", "")) if create_result.get("skill_pack_id") == identity.skill_pack_id and create_result.get("grant_id") == grant.get("grant_id") else _fail("Universal Mutation Plan identifies requesting skill", json.dumps(create_result, sort_keys=True)[:1200]))
         checks.append(_pass("receipts include skill and grant metadata") if create_result.get("details", {}).get("skill_pack", {}).get("skill_pack_id") == identity.skill_pack_id else _fail("receipts include skill and grant metadata", json.dumps(create_result, sort_keys=True)[:1200]))
 
@@ -200,7 +200,7 @@ def run() -> list[Check]:
             target={"target_path": str(target_file), "size_bytes": 6},
             action_payload={"target_path": str(target_file), "approved_roots": [str(target_root)], "content": "hello\n"},
         )
-        checks.append(_pass("duplicate confirmation is bounded", duplicate.get("error_code", "")) if duplicate.get("mutated") is False else _fail("duplicate confirmation is bounded", json.dumps(duplicate, sort_keys=True)[:1000]))
+        checks.append(_pass("unconfirmed duplicate invocation is bounded", duplicate.get("error_code", "")) if duplicate.get("mutated") is False and duplicate.get("error_code") == "mutation_confirmation_missing" else _fail("unconfirmed duplicate invocation is bounded", json.dumps(duplicate, sort_keys=True)[:1000]))
 
         grant_store.revoke_grant(str(grant.get("grant_id")))
         revoked = broker.request_action(
@@ -229,7 +229,7 @@ def run() -> list[Check]:
             target={"target": "local_notification"},
             action_payload={"receipt_path": str(tmp / "notify.json"), "message": "fixture"},
         )
-        checks.append(_pass("mapped notification permission executes through broker", notification_grant.get("grant_id", "")) if notify_result.get("ok") and notify_result.get("capability_id") == "notification.local.send" else _fail("mapped notification permission executes through broker", json.dumps(notify_result, sort_keys=True)[:1000]))
+        checks.append(_pass("mapped notification permission still requires confirmation", notification_grant.get("grant_id", "")) if notify_result.get("mutated") is False and notify_result.get("error_code") == "mutation_confirmation_missing" and notify_result.get("capability_id") == "notification.local.send" else _fail("mapped notification permission still requires confirmation", json.dumps(notify_result, sort_keys=True)[:1000]))
 
         checks.append(_pass("arbitrary shell blocked", "no shell permission exists in registry"))
         checks.append(_pass("arbitrary HTTP mutation blocked", "no http.post/network mutation permission exists in registry"))
@@ -238,7 +238,7 @@ def run() -> list[Check]:
         read_result = broker.inspect(identity=identity, manifest=manifest, permission_id="read.notifications.inspect", target={"target": "notification_history"})
         checks.append(_pass("read-only skill inspection remains functional", read_grant.get("grant_id", "")) if read_result.get("ok") and read_result.get("mutated") is False else _fail("read-only skill inspection remains functional", json.dumps(read_result, sort_keys=True)))
         checks.append(_pass("status UX uses registry/grant/receipt truth", f"grants={len(grant_store.list_grants())}"))
-        checks.append(_pass("final skill-pack warning removed", "capability and Universal Plan audits no longer carry skill-pack legacy warnings"))
+        checks.append(_pass("skill-pack mutation gap remains audit-visible", "per-invocation preview/confirm handoff is still legacy_unmigrated"))
         checks.append(_warn("process-isolation limitation reported accurately", "platform APIs are permissioned; arbitrary malicious in-process Python is not claimed isolated"))
     return checks
 

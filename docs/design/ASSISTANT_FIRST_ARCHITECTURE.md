@@ -14,6 +14,12 @@ This document defines the intended product shape for the stabilized baseline.
 
 The user should normally experience one assistant conversation, not a router or menu.
 
+Audit v2 evidence confirms Web chat and Telegram both terminate at
+`AgentOrchestrator.handle_message`, with `route_inference()` as the sole
+inference orchestrator. This invariant does not imply that every mutation is
+already migrated: remaining legacy surfaces are tracked in
+`docs/operator/MUTATION_SURFACE_INVENTORY_V2.json`.
+
 Assistant identity is authoritative. Models and providers are internal components of
 the runtime, not the entity speaking to the user. Assistant replies should not claim
 to be DeepSeek, GPT, OpenAI, or any other model/vendor identity.

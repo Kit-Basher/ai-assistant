@@ -1,5 +1,17 @@
 # Release Ledger
 
+## Architecture and Safety Audit v2 (working tree; no release)
+
+- Baseline: `d911b9b95ce5df9b71cd9c78e28fa13e8767e79a`.
+- Preserved the single assistant/orchestrator and `route_inference()` paths.
+- Closed automatic Universal Mutation Plan synthesis and added scope-bound,
+  expiring, single-use Executor Registry confirmation validation.
+- Corrected unknown legacy skill operations to default to mutating while
+  preserving explicit observe/report/read operations without confirmation.
+- Added a 91-surface machine inventory; 48 remain `legacy_unmigrated` and seven
+  remain `plan_gated_legacy`, so no complete-migration claim is made.
+- Fresh Debian VM testing remains deferred and no release/tag is created.
+
 ## Recovery and Installation Audit v1 (final)
 
 - Baseline: `v0.2.5` / `12723f5`.

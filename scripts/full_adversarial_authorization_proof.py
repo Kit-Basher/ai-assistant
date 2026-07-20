@@ -47,6 +47,7 @@ from agent.mutation_plan import (  # noqa: E402
     MUTATION_PLAN_STATUS_CANCELLED,
     MUTATION_PLAN_STATUS_EXPIRED,
     MutationPlanStore,
+    build_mutation_confirmation,
     build_mutation_plan,
     mutation_plan_fingerprint,
     validate_mutation_plan,
@@ -132,6 +133,7 @@ class Fixture:
         self.root = root
         self.files = root / "files"
         self.files.mkdir()
+        self._plan_sequence = 0
         self.registry = self._registry()
 
     def _registry(self) -> ExecutorRegistry:
@@ -150,8 +152,9 @@ class Fixture:
         return registry
 
     def plan(self, action_type: str, capability_id: str, executor_id: str, target: str, *, risk_level: str | None = None) -> dict[str, Any]:
+        self._plan_sequence += 1
         plan = build_mutation_plan(
-            plan_id=f"adv-{action_type.replace('.', '-')}-{hashlib.sha256(target.encode()).hexdigest()[:8]}",
+            plan_id=f"adv-{action_type.replace('.', '-')}-{hashlib.sha256(target.encode()).hexdigest()[:8]}-{self._plan_sequence}",
             capability_id=capability_id,
             executor_id=executor_id,
             expires_at_epoch=int(time.time()) + 600,
@@ -174,7 +177,19 @@ class Fixture:
         )
         if risk_level:
             wrapped["risk_level"] = risk_level
+        wrapped["_proof_confirmation"] = build_mutation_confirmation(
+            plan,
+            confirmation_id=f"confirmation-{plan['plan_id']}",
+        )
         return wrapped
+
+    def execute(self, *, plan: dict[str, Any], action: dict[str, Any], **kwargs: Any):
+        return self.registry.execute_confirmed_plan(
+            plan=plan,
+            action=action,
+            confirmation=plan.get("_proof_confirmation"),
+            **kwargs,
+        )
 
     def context(self, plan: dict[str, Any], capability_id: str, executor_id: str, **overrides: Any) -> dict[str, Any]:
         payload = TrustedInvocationContext(
@@ -268,7 +283,7 @@ def case_fixed_authority_override_ignored(case: ProofCase, fx: Fixture) -> Proof
     plan = fx.plan("operator.file.create", "files.create", "operator.file.create.v1", str(target))
     plan["capability_id"] = "system.uninstall"
     plan["executor_id"] = "operator.uninstall.v1"
-    result = fx.registry.execute_confirmed_plan(
+    result = fx.execute(
         plan=plan,
         action={"pending_id": plan["plan_id"], "target_path": str(target), "approved_roots": [str(fx.files)], "content": "ok\n", "capability_id": "system.uninstall", "executor_id": "operator.uninstall.v1"},
     ).to_dict()
@@ -278,21 +293,21 @@ def case_fixed_authority_override_ignored(case: ProofCase, fx: Fixture) -> Proof
 
 def case_unknown_executor_denied(case: ProofCase, fx: Fixture) -> ProofResult:
     plan = fx.plan("operator.unknown", "files.create", "operator.file.create.v1", "unknown")
-    result = fx.registry.execute_confirmed_plan(plan=plan, action={"pending_id": plan["plan_id"]}).to_dict()
+    result = fx.execute(plan=plan, action={"pending_id": plan["plan_id"]}).to_dict()
     return _finish(case, decision=_result_decision(result), mutated=bool(result.get("mutated")), reason=_result_reason(result), evidence=result)
 
 
 def case_capability_executor_mismatch_denied(case: ProofCase, fx: Fixture) -> ProofResult:
     target = fx.files / "mismatch.txt"
     plan = fx.plan("operator.file.create", "files.modify", "operator.file.modify.v1", str(target))
-    result = fx.registry.execute_confirmed_plan(plan=plan, action={"pending_id": plan["plan_id"], "target_path": str(target), "approved_roots": [str(fx.files)], "content": "x"}).to_dict()
+    result = fx.execute(plan=plan, action={"pending_id": plan["plan_id"], "target_path": str(target), "approved_roots": [str(fx.files)], "content": "x"}).to_dict()
     return _finish(case, decision=_result_decision(result), mutated=bool(result.get("mutated")), reason=_result_reason(result), evidence=result)
 
 
 def case_high_risk_confirmation_missing(case: ProofCase, fx: Fixture) -> ProofResult:
     target = fx.files / "risk.txt"
     plan = fx.plan("operator.file.create", "files.create", "operator.file.create.v1", str(target), risk_level="high")
-    result = fx.registry.execute_confirmed_plan(plan=plan, action={"pending_id": plan["plan_id"], "target_path": str(target), "approved_roots": [str(fx.files)], "content": "x"}, high_risk_confirmed=False).to_dict()
+    result = fx.execute(plan=plan, action={"pending_id": plan["plan_id"], "target_path": str(target), "approved_roots": [str(fx.files)], "content": "x"}, high_risk_confirmed=False).to_dict()
     return _finish(case, decision=_result_decision(result), mutated=bool(result.get("mutated")), reason=_result_reason(result), evidence=result)
 
 
@@ -415,7 +430,7 @@ def case_plan_expired_denied(case: ProofCase, fx: Fixture) -> ProofResult:
 def case_confirmation_plan_id_mismatch(case: ProofCase, fx: Fixture) -> ProofResult:
     target = fx.files / "wrong-plan.txt"
     plan = fx.plan("operator.file.create", "files.create", "operator.file.create.v1", str(target))
-    result = fx.registry.execute_confirmed_plan(plan=plan, action={"pending_id": "other-plan", "target_path": str(target), "approved_roots": [str(fx.files)], "content": "x"}).to_dict()
+    result = fx.execute(plan=plan, action={"pending_id": "other-plan", "target_path": str(target), "approved_roots": [str(fx.files)], "content": "x"}).to_dict()
     return _finish(case, decision=_result_decision(result), mutated=bool(result.get("mutated")), reason=_result_reason(result), evidence=result)
 
 
@@ -425,7 +440,7 @@ def case_file_hash_drift_denied(case: ProofCase, fx: Fixture) -> ProofResult:
     old_hash = hashlib.sha256(b"before\n").hexdigest()
     target.write_text("changed\n", encoding="utf-8")
     plan = fx.plan("operator.file.modify", "files.modify", "operator.file.modify.v1", str(target))
-    result = fx.registry.execute_confirmed_plan(plan=plan, action={"pending_id": plan["plan_id"], "target_path": str(target), "approved_roots": [str(fx.files)], "expected_hash": old_hash, "content": "after\n"}).to_dict()
+    result = fx.execute(plan=plan, action={"pending_id": plan["plan_id"], "target_path": str(target), "approved_roots": [str(fx.files)], "expected_hash": old_hash, "content": "after\n"}).to_dict()
     return _finish(case, decision=_result_decision(result), mutated=bool(result.get("mutated")), reason=_result_reason(result), evidence=result)
 
 
@@ -433,7 +448,7 @@ def case_file_symlink_drift_denied(case: ProofCase, fx: Fixture) -> ProofResult:
     target = fx.files / "link.txt"
     target.symlink_to(fx.files / "elsewhere.txt")
     plan = fx.plan("operator.file.create", "files.create", "operator.file.create.v1", str(target))
-    result = fx.registry.execute_confirmed_plan(plan=plan, action={"pending_id": plan["plan_id"], "target_path": str(target), "approved_roots": [str(fx.files)], "content": "x"}).to_dict()
+    result = fx.execute(plan=plan, action={"pending_id": plan["plan_id"], "target_path": str(target), "approved_roots": [str(fx.files)], "content": "x"}).to_dict()
     return _finish(case, decision=_result_decision(result), mutated=bool(result.get("mutated")), reason=_result_reason(result), evidence=result)
 
 
@@ -442,13 +457,13 @@ def case_git_staged_diff_drift_denied(case: ProofCase, fx: Fixture) -> ProofResu
     (repo / "tracked.txt").write_text("different\n", encoding="utf-8")
     _git(repo, "add", "tracked.txt")
     plan = fx.plan("operator.git.commit", "git.commit", "operator.git.commit.v1", str(repo))
-    result = fx.registry.execute_confirmed_plan(plan=plan, action={"pending_id": plan["plan_id"], "repository_root": str(repo), "approved_roots": [str(fx.root)], "staged_diff_sha256": old_hash, "commit_message": "drift"}).to_dict()
+    result = fx.execute(plan=plan, action={"pending_id": plan["plan_id"], "repository_root": str(repo), "approved_roots": [str(fx.root)], "staged_diff_sha256": old_hash, "commit_message": "drift"}).to_dict()
     return _finish(case, decision=_result_decision(result), mutated=bool(result.get("mutated")), reason=_result_reason(result), evidence=result)
 
 
 def case_service_allowlist_drift_denied(case: ProofCase, fx: Fixture) -> ProofResult:
     plan = fx.plan("operator.service.restart", "system.service.restart", "operator.service.restart.v1", "ssh.service")
-    result = fx.registry.execute_confirmed_plan(plan=plan, action={"pending_id": plan["plan_id"], "service_name": "ssh.service", "allowed_services": ["personal-agent-proof-restart.service"], "service_fixture_root": str(fx.root / "services")}).to_dict()
+    result = fx.execute(plan=plan, action={"pending_id": plan["plan_id"], "service_name": "ssh.service", "allowed_services": ["personal-agent-proof-restart.service"], "service_fixture_root": str(fx.root / "services")}).to_dict()
     return _finish(case, decision=_result_decision(result), mutated=bool(result.get("mutated")), reason=_result_reason(result), evidence=result)
 
 
@@ -457,7 +472,7 @@ def case_notification_destination_drift_denied(case: ProofCase, fx: Fixture) -> 
     expected_chat = hashlib.sha256(b"chat-a").hexdigest()
     body_hash = hashlib.sha256(body.encode()).hexdigest()
     plan = fx.plan("operator.notification.telegram.send", "notification.external.send", "operator.notification.telegram.send.v1", "telegram")
-    result = fx.registry.execute_confirmed_plan(
+    result = fx.execute(
         plan=plan,
         action={"pending_id": plan["plan_id"], "fixture_transport": True, "transport_path": str(fx.root / "transport.jsonl"), "chat_id": "chat-b", "expected_chat_id_sha256": expected_chat, "expected_body_sha256": body_hash, "message": body},
     ).to_dict()
@@ -468,7 +483,7 @@ def case_notification_content_drift_denied(case: ProofCase, fx: Fixture) -> Proo
     expected_body = hashlib.sha256(b"hello").hexdigest()
     chat_hash = hashlib.sha256(b"chat-a").hexdigest()
     plan = fx.plan("operator.notification.telegram.send", "notification.external.send", "operator.notification.telegram.send.v1", "telegram")
-    result = fx.registry.execute_confirmed_plan(
+    result = fx.execute(
         plan=plan,
         action={"pending_id": plan["plan_id"], "fixture_transport": True, "transport_path": str(fx.root / "transport.jsonl"), "chat_id": "chat-a", "expected_chat_id_sha256": chat_hash, "expected_body_sha256": expected_body, "message": "changed"},
     ).to_dict()
@@ -482,11 +497,11 @@ def case_notification_duplicate_no_resend(case: ProofCase, fx: Fixture) -> Proof
     transport = fx.root / "transport.jsonl"
     plan = fx.plan("operator.notification.telegram.send", "notification.external.send", "operator.notification.telegram.send.v1", "telegram")
     action = {"pending_id": plan["plan_id"], "fixture_transport": True, "transport_path": str(transport), "chat_id": "chat-a", "expected_chat_id_sha256": chat_hash, "expected_body_sha256": body_hash, "message": message}
-    first = fx.registry.execute_confirmed_plan(plan=plan, action=dict(action)).to_dict()
-    second = fx.registry.execute_confirmed_plan(plan=plan, action=dict(action)).to_dict()
+    first = fx.execute(plan=plan, action=dict(action)).to_dict()
+    second = fx.execute(plan=plan, action=dict(action)).to_dict()
     delivered = len(transport.read_text(encoding="utf-8").splitlines()) if transport.exists() else 0
     ok = bool(first.get("mutated")) and second.get("mutated") is False and delivered == 1
-    return _finish(case, decision="no_op" if ok else "failed", mutated=False, reason=str((second.get("details") or {}).get("status") or _result_reason(second)), evidence={"first": first, "second": second, "delivered": delivered}, final_state_verified=ok)
+    return _finish(case, decision="denied" if ok else "failed", mutated=False, reason=_result_reason(second), evidence={"first": first, "second": second, "delivered": delivered}, final_state_verified=ok)
 
 
 def case_skill_undeclared_permission_denied(case: ProofCase, fx: Fixture) -> ProofResult:
@@ -554,7 +569,15 @@ def case_skill_raw_capability_ignored(case: ProofCase, fx: Fixture) -> ProofResu
         target={"target_path": str(target), "size_bytes": 1},
         action_payload={"target_path": str(target), "approved_roots": [str(fx.files)], "content": "x", "capability_id": "system.uninstall", "executor_id": "operator.uninstall.v1"},
     )
-    return _finish(case, decision=_result_decision(result), mutated=bool(result.get("mutated")), reason=str(result.get("capability_id") or ""), evidence=result, receipt_id=str(result.get("journal_id") or ""), final_state_verified=target.exists())
+    return _finish(
+        case,
+        decision=_result_decision(result),
+        mutated=bool(result.get("mutated")),
+        reason=_result_reason(result),
+        evidence=result,
+        receipt_id=str(result.get("journal_id") or ""),
+        final_state_verified=not target.exists(),
+    )
 
 
 def case_registry_freeze_denies_registration(case: ProofCase, fx: Fixture) -> ProofResult:
@@ -649,7 +672,11 @@ def case_partial_failure_truth(case: ProofCase, fx: Fixture) -> ProofResult:
     registry = ExecutorRegistry(fx.root / "partial_journal.jsonl")
     registry.register(ExecutorSpec("operator.file.create.v1", "operator.file.create", "enabled", partial, True, "Fixture rollback.", "files.create"))
     plan = fx.plan("operator.file.create", "files.create", "operator.file.create.v1", "partial")
-    result = registry.execute_confirmed_plan(plan=plan, action={"pending_id": plan["plan_id"]}).to_dict()
+    result = registry.execute_confirmed_plan(
+        plan=plan,
+        action={"pending_id": plan["plan_id"]},
+        confirmation=plan.get("_proof_confirmation"),
+    ).to_dict()
     return _finish(case, decision="partial", mutated=bool(result.get("mutated")), reason=str(result.get("error_code") or ""), evidence=result, receipt_id=str(result.get("journal_id") or ""))
 
 
@@ -660,7 +687,11 @@ def case_exception_before_mutation_truth(case: ProofCase, fx: Fixture) -> ProofR
     registry = ExecutorRegistry(fx.root / "exception_journal.jsonl")
     registry.register(ExecutorSpec("operator.file.create.v1", "operator.file.create", "enabled", exploding, True, "Fixture rollback.", "files.create"))
     plan = fx.plan("operator.file.create", "files.create", "operator.file.create.v1", "exception")
-    result = registry.execute_confirmed_plan(plan=plan, action={"pending_id": plan["plan_id"]}).to_dict()
+    result = registry.execute_confirmed_plan(
+        plan=plan,
+        action={"pending_id": plan["plan_id"]},
+        confirmation=plan.get("_proof_confirmation"),
+    ).to_dict()
     return _finish(case, decision=_result_decision(result), mutated=bool(result.get("mutated")), reason=str(result.get("error_code") or ""), evidence=result)
 
 
@@ -671,7 +702,11 @@ def case_executor_partial_exception_truth(case: ProofCase, fx: Fixture) -> Proof
     registry = ExecutorRegistry(fx.root / "partial_exception_journal.jsonl")
     registry.register(ExecutorSpec("operator.file.create.v1", "operator.file.create", "enabled", partial_exception, True, "Fixture rollback.", "files.create"))
     plan = fx.plan("operator.file.create", "files.create", "operator.file.create.v1", "partial-exception")
-    result = registry.execute_confirmed_plan(plan=plan, action={"pending_id": plan["plan_id"]}).to_dict()
+    result = registry.execute_confirmed_plan(
+        plan=plan,
+        action={"pending_id": plan["plan_id"]},
+        confirmation=plan.get("_proof_confirmation"),
+    ).to_dict()
     return _finish(case, decision=_result_decision(result), mutated=bool(result.get("mutated")), reason=str(result.get("error_code") or ""), evidence=result)
 
 
@@ -690,7 +725,7 @@ def case_uncertain_external_truth(case: ProofCase, fx: Fixture) -> ProofResult:
 def case_receipt_status_truth(case: ProofCase, fx: Fixture) -> ProofResult:
     target = fx.files / "receipt.txt"
     plan = fx.plan("operator.file.create", "files.create", "operator.file.create.v1", str(target))
-    result = fx.registry.execute_confirmed_plan(plan=plan, action={"pending_id": plan["plan_id"], "target_path": str(target), "approved_roots": [str(fx.files)], "content": "receipt\n"}).to_dict()
+    result = fx.execute(plan=plan, action={"pending_id": plan["plan_id"], "target_path": str(target), "approved_roots": [str(fx.files)], "content": "receipt\n"}).to_dict()
     records = fx.registry.journal.recent(limit=5)
     latest = records[-1] if records else {}
     ok = bool(result.get("journal_id")) and latest.get("result", {}).get("journal_id") == result.get("journal_id") and latest.get("result", {}).get("mutated") is True
@@ -724,10 +759,10 @@ def case_concurrent_duplicate_plan_no_double_mutation(case: ProofCase, fx: Fixtu
     target = fx.files / "concurrent.txt"
     plan = fx.plan("operator.file.create", "files.create", "operator.file.create.v1", str(target))
     action = {"pending_id": plan["plan_id"], "target_path": str(target), "approved_roots": [str(fx.files)], "content": "one\n"}
-    first = fx.registry.execute_confirmed_plan(plan=plan, action=dict(action)).to_dict()
-    second = fx.registry.execute_confirmed_plan(plan=plan, action=dict(action)).to_dict()
-    ok = first.get("mutated") is True and second.get("mutated") is False and second.get("error_code") == "file_exists_overwrite_not_allowed"
-    return _finish(case, decision="no_op" if ok else "failed", mutated=False, reason=str(second.get("error_code") or ""), evidence={"first": first, "second": second}, final_state_verified=target.read_text(encoding="utf-8") == "one\n")
+    first = fx.execute(plan=plan, action=dict(action)).to_dict()
+    second = fx.execute(plan=plan, action=dict(action)).to_dict()
+    ok = first.get("mutated") is True and second.get("mutated") is False and second.get("error_code") == "mutation_confirmation_replayed"
+    return _finish(case, decision="denied" if ok else "failed", mutated=False, reason=str(second.get("error_code") or ""), evidence={"first": first, "second": second}, final_state_verified=target.read_text(encoding="utf-8") == "one\n")
 
 
 def case_callback_replay_denied(case: ProofCase, fx: Fixture) -> ProofResult:

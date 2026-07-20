@@ -105,6 +105,8 @@ def build_canonical_plan(
 READ_ONLY_ACTION_TYPES = {
     "read",
     "list",
+    "observe",
+    "report",
     "search",
     "status",
     "preview",
@@ -285,11 +287,13 @@ def mutator_confirmation_required_payload(action_type: str, *, reason: str | Non
 
 
 def requires_confirmation(action: dict[str, Any]) -> bool:
-    # Treat delete/overwrite and ops restarts as sensitive.
-    action_type = action.get("action_type")
-    if action_type in {"delete", "overwrite", "ops_restart"}:
-        return True
-    return False
+    # Unknown operations fail closed as mutating. This legacy helper remains for
+    # built-in skills, but it must follow the same classification baseline as
+    # Universal Plan Mode.
+    action_type = str(action.get("action_type") or "").strip()
+    if not action_type:
+        return False
+    return classify_operation(action_type).requires_confirmation
 
 
 def evaluate_policy(skill_permissions: list[str], requested: list[str], action: dict[str, Any]) -> PolicyDecision:

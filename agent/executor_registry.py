@@ -33,7 +33,7 @@ from .llm.notifications import NotificationStore, sanitize_notification_text
 from .llm.notify_delivery import LocalTarget, TelegramTarget
 from .mutation_plan import (
     MUTATION_PLAN_SCHEMA_VERSION,
-    build_mutation_plan,
+    validate_mutation_confirmation,
     validate_mutation_plan,
 )
 from .primary_uninstall_policy import (
@@ -326,6 +326,7 @@ class ExecutorRegistry:
         self.journal = MutationJournal(journal_path)
         self._executors: dict[str, ExecutorSpec] = {}
         self._frozen = False
+        self._consumed_confirmations: set[str] = set()
 
     def register(self, spec: ExecutorSpec) -> None:
         if self._frozen:
@@ -354,6 +355,7 @@ class ExecutorRegistry:
         *,
         plan: dict[str, Any],
         action: dict[str, Any],
+        confirmation: dict[str, Any] | None = None,
         high_risk_confirmed: bool = True,
     ) -> ExecutorResult:
         started_at = utc_now_iso()
@@ -504,6 +506,37 @@ class ExecutorRegistry:
                     rollback_hint="No rollback needed because nothing changed.",
                     details={"exception": exc.__class__.__name__},
                 )
+            try:
+                validate_mutation_confirmation(mutation_plan, confirmation)
+            except ValueError as exc:
+                return _result(
+                    ok=False,
+                    mutated=False,
+                    executor_id=spec.executor_id,
+                    error_code=str(exc),
+                    user_message="I blocked execution because valid, scope-bound confirmation metadata was missing or stale.",
+                    rollback_available=False,
+                    rollback_hint="No rollback needed because nothing changed.",
+                )
+            confirmation_id = str((confirmation or {}).get("confirmation_id") or "").strip()
+            confirmation_key = stable_fingerprint(
+                {
+                    "confirmation_id": confirmation_id,
+                    "plan_id": mutation_plan.get("plan_id"),
+                    "plan_fingerprint": mutation_plan.get("plan_fingerprint"),
+                }
+            )
+            if confirmation_key in self._consumed_confirmations:
+                return _result(
+                    ok=False,
+                    mutated=False,
+                    executor_id=spec.executor_id,
+                    error_code="mutation_confirmation_replayed",
+                    user_message="I blocked execution because this confirmation was already consumed.",
+                    rollback_available=False,
+                    rollback_hint="No rollback needed because nothing changed.",
+                )
+            self._consumed_confirmations.add(confirmation_key)
             if not plan_fingerprint:
                 plan_fingerprint = str(mutation_plan.get("plan_fingerprint") or "")
                 plan["plan_fingerprint"] = plan_fingerprint
@@ -529,6 +562,10 @@ class ExecutorRegistry:
                 confirmation_context={
                     "confirmed": True,
                     "pending_id": str(action.get("pending_id") or ""),
+                    "confirmation_id": confirmation_id,
+                    "actor_id": str((confirmation or {}).get("actor_id") or ""),
+                    "thread_id": str((confirmation or {}).get("thread_id") or ""),
+                    "session_id": str((confirmation or {}).get("session_id") or ""),
                 },
                 activation_context=activation_context,
                 registry=build_default_capability_registry(),
@@ -694,45 +731,12 @@ def _ensure_universal_mutation_plan(
     target: str,
 ) -> dict[str, Any]:
     existing = plan.get("mutation_plan") if isinstance(plan.get("mutation_plan"), dict) else None
-    if existing is not None:
-        validate_mutation_plan(existing)
-        if existing.get("capability_id") != capability_id or existing.get("executor_id") != executor_id:
-            raise ValueError("mutation_plan_executor_or_capability_mismatch")
-        return existing
-    expires_at = int(plan.get("expires_at") or (int(datetime.now(timezone.utc).timestamp()) + 600))
-    resources = plan.get("resources_affected") if isinstance(plan.get("resources_affected"), list) else []
-    target_snapshot = {
-        "action_type": action_type,
-        "target": target,
-        "params": action.get("params") if isinstance(action.get("params"), dict) else {},
-        "resources_affected": resources,
-    }
-    mutation_inventory = [{"resource": str(item), "effect": "may_change"} for item in resources]
-    if not mutation_inventory:
-        mutation_inventory = [{"target": target, "effect": "capability_specific"}]
-    universal = build_mutation_plan(
-        plan_id=str(plan.get("plan_id") or action.get("pending_id") or ""),
-        capability_id=capability_id,
-        executor_id=executor_id,
-        expires_at_epoch=expires_at,
-        thread_id=str(action.get("thread_id") or action.get("session_thread_id") or ""),
-        session_id=str(action.get("session_id") or ""),
-        actor_id=str(action.get("user_id") or action.get("actor_id") or ""),
-        target_snapshot=target_snapshot,
-        mutation_inventory=mutation_inventory,
-        preserved_resources=plan.get("preserved_resources") if isinstance(plan.get("preserved_resources"), list) else [],
-        expected_side_effects=plan.get("expected_side_effects") if isinstance(plan.get("expected_side_effects"), list) else [],
-        recovery={
-            "rollback_supported": bool(plan.get("rollback_supported")),
-            "rollback_scope": str(plan.get("rollback_scope") or ""),
-        },
-        activation_fingerprint=str(plan.get("activation_fingerprint") or "") or None,
-    )
-    plan["mutation_plan"] = universal
-    plan["target_fingerprint"] = str(universal.get("target_fingerprint") or "")
-    plan["plan_fingerprint"] = str(universal.get("plan_fingerprint") or "")
-    plan["mutation_plan_schema_version"] = MUTATION_PLAN_SCHEMA_VERSION
-    return universal
+    if existing is None:
+        raise ValueError("mutation_plan_missing")
+    validate_mutation_plan(existing)
+    if existing.get("capability_id") != capability_id or existing.get("executor_id") != executor_id:
+        raise ValueError("mutation_plan_executor_or_capability_mismatch")
+    return existing
 
 
 def _capability_policy_record(action: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any] | None:

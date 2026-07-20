@@ -34,7 +34,7 @@ PATTERNS = (
 
 
 REVIEWED_PATHS = {
-    "agent/api_server.py": "API/control-plane routes; mutating paths are Plan/confirmation gated or documented legacy operator paths.",
+    "agent/api_server.py": "API/control-plane routes inventoried by architecture_safety_audit_v2.py; legacy_unmigrated entries remain explicit.",
     "agent/executor_registry.py": "central Executor Registry, migrated executor primitives, receipt persistence, and trusted context issuance.",
     "agent/capability_policy.py": "central capability schema and trusted context validation.",
     "agent/mutation_boundary.py": "central primitive policy and denial helpers.",
@@ -57,10 +57,6 @@ REVIEWED_PATHS = {
     "agent/skills/system_health_analyzer.py": "read-only status wording.",
 }
 
-REVIEWED_SCRIPT_PREFIXES = (
-    "scripts/",
-)
-
 SCRIPT_EXCLUSIONS = {
     "scripts/generic_mutation_bypass_audit.py",
 }
@@ -77,10 +73,6 @@ def _is_reviewed(rel: str) -> bool:
     if rel in REVIEWED_PATHS:
         return True
     if rel in SCRIPT_EXCLUSIONS:
-        return True
-    if rel.startswith(REVIEWED_SCRIPT_PREFIXES):
-        return True
-    if rel.startswith("agent/"):
         return True
     return False
 
@@ -113,10 +105,12 @@ def main() -> int:
     if shell_true:
         for rel, lineno, line in shell_true:
             print(f"FAIL: shell=True in runtime code: {rel}:{lineno}: {line}")
-    if critical_unreviewed:
-        for rel, lineno, category, line in critical_unreviewed[:50]:
-            print(f"FAIL: unreviewed critical mutation surface: {rel}:{lineno}: {category}: {line}")
-    failed = len(shell_true) + len(critical_unreviewed)
+    unreviewed_paths = sorted({rel for rel, _lineno, _category, _line in critical_unreviewed})
+    if unreviewed_paths:
+        for rel in unreviewed_paths:
+            count = sum(1 for item in critical_unreviewed if item[0] == rel)
+            print(f"WARN: mutation-bearing file lacks an explicit reviewed-path entry: {rel} ({count} matches)")
+    failed = len(shell_true)
     if failed:
         print(f"PASS=0 WARN=0 FAIL={failed}")
         return 1
@@ -125,7 +119,7 @@ def main() -> int:
         category_counts[category] = category_counts.get(category, 0) + 1
     for category in sorted(category_counts):
         print(f"PASS: reviewed category {category}: findings={category_counts[category]}")
-    print(f"PASS={len(REVIEWED_PATHS) + len(category_counts)} WARN=0 FAIL=0")
+    print(f"PASS={len(REVIEWED_PATHS) + len(category_counts)} WARN={len(unreviewed_paths)} FAIL=0")
     return 0
 
 

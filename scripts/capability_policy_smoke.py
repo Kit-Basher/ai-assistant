@@ -6,6 +6,7 @@ from pathlib import Path
 import json
 import sys
 import tempfile
+import time
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -19,6 +20,7 @@ from agent.capability_policy import (  # noqa: E402
     stable_fingerprint,
 )
 from agent.executor_registry import ExecutorRegistry, ExecutorSpec  # noqa: E402
+from agent.mutation_plan import build_mutation_confirmation, build_mutation_plan  # noqa: E402
 from agent.shell_skill import ShellSkill  # noqa: E402
 
 
@@ -117,8 +119,18 @@ def run() -> list[Check]:
                 capability_id="cleanup.execute",
             )
         )
-        target_fp = stable_fingerprint({"target": "fixture cleanup"})
-        plan_fp = stable_fingerprint({"plan": "fixture cleanup", "target": target_fp})
+        mutation_plan = build_mutation_plan(
+            plan_id="capability-smoke",
+            capability_id="cleanup.execute",
+            executor_id="operator.cleanup.v1",
+            expires_at_epoch=int(time.time()) + 600,
+            thread_id="capability-smoke",
+            session_id="session-a",
+            actor_id="smoke-operator",
+            target_snapshot={"target": "fixture cleanup"},
+            mutation_inventory=[{"target": "fixture cleanup", "effect": "delete_fixture"}],
+            recovery={"rollback_supported": True},
+        )
         result = exec_registry.execute_confirmed_plan(
             plan={
                 "plan_id": "capability-smoke",
@@ -126,11 +138,16 @@ def run() -> list[Check]:
                 "target": "fixture cleanup",
                 "risk_level": "high",
                 "executor_status": "enabled",
-                "target_fingerprint": target_fp,
-                "plan_fingerprint": plan_fp,
+                "target_fingerprint": mutation_plan["target_fingerprint"],
+                "plan_fingerprint": mutation_plan["plan_fingerprint"],
                 "policy_schema_version": POLICY_SCHEMA_VERSION,
+                "mutation_plan": mutation_plan,
             },
             action={"pending_id": "capability-smoke"},
+            confirmation=build_mutation_confirmation(
+                mutation_plan,
+                confirmation_id="confirmation-capability-smoke",
+            ),
         )
         result_payload = result.to_dict()
         checks.append(_check("receipts include capability metadata", result_payload.get("capability_id") == "cleanup.execute" and bool(result_payload.get("authorization_decision_id")), json.dumps(result_payload, sort_keys=True)[:300]))
@@ -140,7 +157,7 @@ def run() -> list[Check]:
     legacy_audit_visible: list[str] = []
     checks.append(
         _check(
-            "unmigrated paths closed",
+            "registered capability set has no legacy status",
             not categories["legacy_unmigrated"] and not legacy_audit_visible,
             json.dumps({"registry_legacy": categories["legacy_unmigrated"], "audit_legacy": legacy_audit_visible}, sort_keys=True)[:300],
         )

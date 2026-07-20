@@ -214,9 +214,9 @@
       "entry_surface": "Executor Registry",
       "caller_type": "core",
       "target_type": "notification",
-      "expected_decision": "no_op",
+      "expected_decision": "denied",
       "expected_mutated": false,
-      "expected_reason": "duplicate_confirmation",
+      "expected_reason": "mutation_confirmation_replayed",
       "fixture_required": true
     },
     {
@@ -610,9 +610,9 @@
       "entry_surface": "skill-pack broker",
       "caller_type": "skill_pack",
       "target_type": "filesystem",
-      "expected_decision": "allowed",
-      "expected_mutated": true,
-      "expected_reason": "files.create",
+      "expected_decision": "denied",
+      "expected_mutated": false,
+      "expected_reason": "mutation_confirmation_missing",
       "fixture_required": true
     },
     {
@@ -622,9 +622,9 @@
       "entry_surface": "Executor Registry",
       "caller_type": "core",
       "target_type": "filesystem",
-      "expected_decision": "no_op",
+      "expected_decision": "denied",
       "expected_mutated": false,
-      "expected_reason": "file_exists_overwrite_not_allowed",
+      "expected_reason": "mutation_confirmation_replayed",
       "fixture_required": true
     },
     {

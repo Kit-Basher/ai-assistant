@@ -118,6 +118,7 @@ from agent.public_chat import build_trivial_social_turn_message
 from agent.mutation_plan import (
     MUTATION_PLAN_SCHEMA_VERSION,
     MutationPlanStore,
+    build_mutation_confirmation,
     build_mutation_plan,
 )
 import agent.opinion_gate as opinion_gate
@@ -3819,6 +3820,14 @@ class Orchestrator:
         canonical_plan_for_status = action.get("canonical_plan") if isinstance(action.get("canonical_plan"), dict) else {}
         mutation_plan_for_status = canonical_plan_for_status.get("mutation_plan") if isinstance(canonical_plan_for_status.get("mutation_plan"), dict) else {}
         mutation_plan_id = str(mutation_plan_for_status.get("plan_id") or canonical_plan_for_status.get("plan_id") or "").strip()
+        executor_confirmation = None
+        if mutation_plan_for_status:
+            executor_confirmation = build_mutation_confirmation(
+                mutation_plan_for_status,
+                confirmation_id=str(action.get("pending_id") or mutation_plan_id),
+                actor_id=user_id,
+                thread_id=str(action.get("thread_id") or ""),
+            )
         if operation == "managed_local_service_setup_preview":
             params = action.get("params") if isinstance(action.get("params"), dict) else {}
             service_id = str(params.get("service_id") or "searxng").strip() or "searxng"
@@ -4285,6 +4294,7 @@ class Orchestrator:
                     },
                     "origin": "plan_mode_confirmation",
                 },
+                confirmation=executor_confirmation,
             )
             result_payload = result.to_dict()
             if result.ok and result.mutated:
@@ -4344,7 +4354,11 @@ class Orchestrator:
                 registry_action["executor_journal_recent"] = self._executor_registry.journal.recent(limit=20)
                 registry_action["backup_sources"] = self._backup_v1_sources_snapshot()
                 registry_action["backup_root"] = str(state_root / "backups")
-            result = self._executor_registry.execute_confirmed_plan(plan=plan, action=registry_action)
+            result = self._executor_registry.execute_confirmed_plan(
+                plan=plan,
+                action=registry_action,
+                confirmation=executor_confirmation,
+            )
             result_payload = result.to_dict()
             if result.ok and result.mutated:
                 if mutation_plan_id and str(plan.get("capability_id") or "") in migrated_capabilities:
@@ -4394,7 +4408,11 @@ class Orchestrator:
         if operation.startswith("memory_lifecycle_"):
             action_label = str(params.get("action_label") or operation.replace("memory_lifecycle_", "")).strip() or "memory action"
             plan = action.get("canonical_plan") if isinstance(action.get("canonical_plan"), dict) else {}
-            result = self._executor_registry.execute_confirmed_plan(plan=plan, action=action)
+            result = self._executor_registry.execute_confirmed_plan(
+                plan=plan,
+                action=action,
+                confirmation=executor_confirmation,
+            )
             result_payload = result.to_dict()
             message = (
                 f"{action_label} was confirmed, but this memory lifecycle lane is preview-only right now. "
@@ -24608,13 +24626,20 @@ class Orchestrator:
                         )
                 skill_name = decision.get("skill", "core")
                 default_scopes = ["db:read"] if skill_name == "core" else []
+                requested_scopes = decision.get("scopes", default_scopes)
+                read_only_skill_call = not any(
+                    str(scope).strip().lower().endswith(":write")
+                    or str(scope).strip().lower() in {"ops:supervisor", "network:write", "filesystem:write"}
+                    for scope in requested_scopes
+                )
                 response = self._call_skill(
                     user_id,
                     skill_name,
                     decision["function"],
                     decision.get("args", {}),
-                    decision.get("scopes", default_scopes),
-                    action_type="auto",
+                    requested_scopes,
+                    action_type="read" if read_only_skill_call else "auto",
+                    read_only_mode=read_only_skill_call,
                 )
                 if skill_name == "diagnostics":
                     topic = (decision.get("args") or {}).get("topic")
@@ -24723,7 +24748,9 @@ class Orchestrator:
             "observe_now",
             {"user_id": user_id},
             ["db:write", "sys:read"],
-            action_type="insert",
+            # Observation may persist a bounded baseline, but it is a
+            # read/status operation rather than a user-requested mutation.
+            action_type="observe",
         )
 
         report = build_changed_report_from_system_facts(self.db, user_id)

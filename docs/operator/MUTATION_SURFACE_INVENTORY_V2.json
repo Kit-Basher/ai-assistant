@@ -1,0 +1,847 @@
+{
+  "architecture_checks": [
+    {
+      "check": "single_route_inference_definition",
+      "evidence": [
+        "agent/llm/inference_router.py"
+      ],
+      "ok": true
+    },
+    {
+      "check": "telegram_forwards_to_orchestrator",
+      "evidence": "agent/telegram_bridge.py",
+      "ok": true
+    },
+    {
+      "check": "api_does_not_call_route_inference",
+      "evidence": "agent/api_server.py",
+      "ok": true
+    },
+    {
+      "check": "orchestrator_calls_route_inference",
+      "evidence": "agent/orchestrator.py",
+      "ok": true
+    }
+  ],
+  "schema": "personal-agent.mutation-surface-inventory.v2",
+  "scope": "public API mutations plus assistant, Telegram, CLI, skill-pack, executor, and background entry points",
+  "source_commit": "working-tree-on-d911b9b95ce5df9b71cd9c78e28fa13e8767e79a",
+  "status_definitions": {
+    "central_authorized": "central capability schema, policy, Universal Mutation Plan, confirmation, and Executor Registry",
+    "legacy_unmigrated": "public or reachable mutation not fully migrated to the canonical authorization stack",
+    "plan_confirm_gated": "bounded domain Plan/apply confirmation, not yet central Executor Registry",
+    "plan_gated_legacy": "domain Plan/apply exists but remains outside the central capability/executor authority",
+    "unimplemented_denied": "intentionally unavailable and fail-closed"
+  },
+  "summary": {
+    "canonical_front_door": 2,
+    "central_authorized": 2,
+    "internal_state_write": 1,
+    "legacy_unmigrated": 48,
+    "plan_confirm_gated": 7,
+    "plan_gated_legacy": 7,
+    "read_only": 9,
+    "read_only_preview": 14,
+    "unimplemented_denied": 1
+  },
+  "surfaces": [
+    {
+      "authority": "runtime service",
+      "effect": "read_only",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/ask",
+      "status": "read_only",
+      "surface": "api.post:/ask"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/bootstrap/run",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/bootstrap/run"
+    },
+    {
+      "authority": "AgentOrchestrator",
+      "effect": "read_only",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/chat",
+      "status": "canonical_front_door",
+      "surface": "api.post:/chat"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/defaults/rollback",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/defaults/rollback"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/done",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/done"
+    },
+    {
+      "authority": "domain-specific Plan/apply controller; not central capability registry",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/llm/autoconfig/apply",
+      "status": "plan_gated_legacy",
+      "surface": "api.post:/llm/autoconfig/apply"
+    },
+    {
+      "authority": "domain preview controller",
+      "effect": "read_only",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/llm/autoconfig/plan",
+      "status": "read_only_preview",
+      "surface": "api.post:/llm/autoconfig/plan"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/llm/autopilot/bootstrap",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/llm/autopilot/bootstrap"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/llm/autopilot/undo",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/llm/autopilot/undo"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/llm/autopilot/unpause",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/llm/autopilot/unpause"
+    },
+    {
+      "authority": "domain-specific Plan/apply controller; not central capability registry",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/llm/capabilities/reconcile/apply",
+      "status": "plan_gated_legacy",
+      "surface": "api.post:/llm/capabilities/reconcile/apply"
+    },
+    {
+      "authority": "domain preview controller",
+      "effect": "read_only",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/llm/capabilities/reconcile/plan",
+      "status": "read_only_preview",
+      "surface": "api.post:/llm/capabilities/reconcile/plan"
+    },
+    {
+      "authority": "runtime service",
+      "effect": "read_only",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/llm/catalog/run",
+      "status": "read_only",
+      "surface": "api.post:/llm/catalog/run"
+    },
+    {
+      "authority": "domain-specific Plan/apply controller; not central capability registry",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/llm/cleanup/apply",
+      "status": "plan_gated_legacy",
+      "surface": "api.post:/llm/cleanup/apply"
+    },
+    {
+      "authority": "domain preview controller",
+      "effect": "read_only",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/llm/cleanup/plan",
+      "status": "read_only_preview",
+      "surface": "api.post:/llm/cleanup/plan"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/llm/control_mode",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/llm/control_mode"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/llm/fixit",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/llm/fixit"
+    },
+    {
+      "authority": "runtime service",
+      "effect": "read_only",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/llm/health/run",
+      "status": "read_only",
+      "surface": "api.post:/llm/health/run"
+    },
+    {
+      "authority": "domain-specific Plan/apply controller; not central capability registry",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/llm/hygiene/apply",
+      "status": "plan_gated_legacy",
+      "surface": "api.post:/llm/hygiene/apply"
+    },
+    {
+      "authority": "domain preview controller",
+      "effect": "read_only",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/llm/hygiene/plan",
+      "status": "read_only_preview",
+      "surface": "api.post:/llm/hygiene/plan"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/llm/model",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/llm/model"
+    },
+    {
+      "authority": "runtime service",
+      "effect": "read_only",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/llm/models/check",
+      "status": "read_only",
+      "surface": "api.post:/llm/models/check"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/llm/models/policy",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/llm/models/policy"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/llm/models/proposals",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/llm/models/proposals"
+    },
+    {
+      "authority": "runtime service",
+      "effect": "read_only",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/llm/models/recommend",
+      "status": "read_only",
+      "surface": "api.post:/llm/models/recommend"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/llm/models/switch",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/llm/models/switch"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/llm/models/switch_temporary",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/llm/models/switch_temporary"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/llm/notifications/mark_read",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/llm/notifications/mark_read"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/llm/notifications/prune",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/llm/notifications/prune"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/llm/notifications/test",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/llm/notifications/test"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/llm/registry/rollback",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/llm/registry/rollback"
+    },
+    {
+      "authority": "domain-specific Plan/apply controller; not central capability registry",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/llm/self_heal/apply",
+      "status": "plan_gated_legacy",
+      "surface": "api.post:/llm/self_heal/apply"
+    },
+    {
+      "authority": "domain preview controller",
+      "effect": "read_only",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/llm/self_heal/plan",
+      "status": "read_only_preview",
+      "surface": "api.post:/llm/self_heal/plan"
+    },
+    {
+      "authority": "domain-specific Plan/apply controller; not central capability registry",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/llm/support/remediate/execute",
+      "status": "plan_gated_legacy",
+      "surface": "api.post:/llm/support/remediate/execute"
+    },
+    {
+      "authority": "domain preview controller",
+      "effect": "read_only",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/llm/support/remediate/plan",
+      "status": "read_only_preview",
+      "surface": "api.post:/llm/support/remediate/plan"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/memory/reset",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/memory/reset"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/model",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/model"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/model_watch/hf/scan",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/model_watch/hf/scan"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/model_watch/refresh",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/model_watch/refresh"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/model_watch/run",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/model_watch/run"
+    },
+    {
+      "authority": "domain-specific Plan/apply controller; not central capability registry",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/modelops/execute",
+      "status": "plan_gated_legacy",
+      "surface": "api.post:/modelops/execute"
+    },
+    {
+      "authority": "domain preview controller",
+      "effect": "read_only",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/modelops/plan",
+      "status": "read_only_preview",
+      "surface": "api.post:/modelops/plan"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/models/refresh",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/models/refresh"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/pack_sources/catalog",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/pack_sources/catalog"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/packs/approve",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/packs/approve"
+    },
+    {
+      "authority": "domain Plan/apply controller",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/packs/approve/apply",
+      "status": "plan_confirm_gated",
+      "surface": "api.post:/packs/approve/apply"
+    },
+    {
+      "authority": "domain preview controller",
+      "effect": "read_only",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/packs/approve/plan",
+      "status": "read_only_preview",
+      "surface": "api.post:/packs/approve/plan"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/packs/enable",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/packs/enable"
+    },
+    {
+      "authority": "domain Plan/apply controller",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/packs/enable/apply",
+      "status": "plan_confirm_gated",
+      "surface": "api.post:/packs/enable/apply"
+    },
+    {
+      "authority": "domain preview controller",
+      "effect": "read_only",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/packs/enable/plan",
+      "status": "read_only_preview",
+      "surface": "api.post:/packs/enable/plan"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/packs/grant",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/packs/grant"
+    },
+    {
+      "authority": "domain Plan/apply controller",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/packs/grant/apply",
+      "status": "plan_confirm_gated",
+      "surface": "api.post:/packs/grant/apply"
+    },
+    {
+      "authority": "domain preview controller",
+      "effect": "read_only",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/packs/grant/plan",
+      "status": "read_only_preview",
+      "surface": "api.post:/packs/grant/plan"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/packs/install",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/packs/install"
+    },
+    {
+      "authority": "domain Plan/apply controller",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/packs/install/apply",
+      "status": "plan_confirm_gated",
+      "surface": "api.post:/packs/install/apply"
+    },
+    {
+      "authority": "domain preview controller",
+      "effect": "read_only",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/packs/install/plan",
+      "status": "read_only_preview",
+      "surface": "api.post:/packs/install/plan"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/packs/remove",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/packs/remove"
+    },
+    {
+      "authority": "domain Plan/apply controller",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/packs/remove/apply",
+      "status": "plan_confirm_gated",
+      "surface": "api.post:/packs/remove/apply"
+    },
+    {
+      "authority": "domain preview controller",
+      "effect": "read_only",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/packs/remove/plan",
+      "status": "read_only_preview",
+      "surface": "api.post:/packs/remove/plan"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/providers",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/providers"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/providers/ollama/pull",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/providers/ollama/pull"
+    },
+    {
+      "authority": "runtime service",
+      "effect": "read_only",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/providers/test",
+      "status": "read_only",
+      "surface": "api.post:/providers/test"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/providers/{provider_id}/models",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/providers/{provider_id}/models"
+    },
+    {
+      "authority": "runtime internal state writer",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/providers/{provider_id}/models/refresh",
+      "status": "internal_state_write",
+      "surface": "api.post:/providers/{provider_id}/models/refresh"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/providers/{provider_id}/secret",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/providers/{provider_id}/secret"
+    },
+    {
+      "authority": "runtime service",
+      "effect": "read_only",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/providers/{provider_id}/test",
+      "status": "read_only",
+      "surface": "api.post:/providers/{provider_id}/test"
+    },
+    {
+      "authority": "runtime service",
+      "effect": "read_only",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/search/query",
+      "status": "read_only",
+      "surface": "api.post:/search/query"
+    },
+    {
+      "authority": "domain Plan/apply controller",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/search/setup/apply",
+      "status": "plan_confirm_gated",
+      "surface": "api.post:/search/setup/apply"
+    },
+    {
+      "authority": "domain preview controller",
+      "effect": "read_only",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/search/setup/plan",
+      "status": "read_only_preview",
+      "surface": "api.post:/search/setup/plan"
+    },
+    {
+      "authority": "domain Plan/apply controller",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/search/setup/prerequisite/apply",
+      "status": "plan_confirm_gated",
+      "surface": "api.post:/search/setup/prerequisite/apply"
+    },
+    {
+      "authority": "domain preview controller",
+      "effect": "read_only",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/search/setup/prerequisite/plan",
+      "status": "read_only_preview",
+      "surface": "api.post:/search/setup/prerequisite/plan"
+    },
+    {
+      "authority": "runtime service",
+      "effect": "read_only",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/semantic/doctor",
+      "status": "read_only",
+      "surface": "api.post:/semantic/doctor"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/semantic/documents/ingest",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/semantic/documents/ingest"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/semantic/rebuild",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/semantic/rebuild"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/semantic/repair",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/semantic/repair"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/telegram/secret",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/telegram/secret"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "POST",
+      "route": "/telegram/test",
+      "status": "legacy_unmigrated",
+      "surface": "api.post:/telegram/test"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "PUT",
+      "route": "/config",
+      "status": "legacy_unmigrated",
+      "surface": "api.put:/config"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "PUT",
+      "route": "/defaults",
+      "status": "legacy_unmigrated",
+      "surface": "api.put:/defaults"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "PUT",
+      "route": "/pack_sources/catalog/{catalog_id}",
+      "status": "legacy_unmigrated",
+      "surface": "api.put:/pack_sources/catalog/{catalog_id}"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "PUT",
+      "route": "/pack_sources/policy",
+      "status": "legacy_unmigrated",
+      "surface": "api.put:/pack_sources/policy"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "PUT",
+      "route": "/pack_sources/{source_id}/policy",
+      "status": "legacy_unmigrated",
+      "surface": "api.put:/pack_sources/{source_id}/policy"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "PUT",
+      "route": "/permissions",
+      "status": "legacy_unmigrated",
+      "surface": "api.put:/permissions"
+    },
+    {
+      "authority": "legacy runtime/controller mutation",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "PUT",
+      "route": "/providers/{provider_id}",
+      "status": "legacy_unmigrated",
+      "surface": "api.put:/providers/{provider_id}"
+    },
+    {
+      "kind": "assistant_intent",
+      "path": "AgentOrchestrator._confirmation_preview_response -> _execute_confirmed_native_mutation -> ExecutorRegistry",
+      "status": "central_authorized",
+      "surface": "assistant.native_mutation"
+    },
+    {
+      "kind": "transport",
+      "path": "telegram_bridge -> AgentOrchestrator.handle_message",
+      "status": "canonical_front_door",
+      "surface": "telegram.message"
+    },
+    {
+      "kind": "cli_command",
+      "path": "AgentOrchestrator._call_skill (db:write/ops permissions)",
+      "status": "legacy_unmigrated",
+      "surface": "cli.legacy_builtin_skill_writes"
+    },
+    {
+      "kind": "skill_pack",
+      "path": "SkillPackInvocationBroker.request_action",
+      "status": "legacy_unmigrated",
+      "surface": "skill_pack.managed_adapter_invocation"
+    },
+    {
+      "kind": "executor",
+      "path": "Universal Mutation Plan + scope-bound confirmation + capability policy + trusted invocation context",
+      "status": "central_authorized",
+      "surface": "executor_registry.migrated_capabilities"
+    },
+    {
+      "kind": "background_job",
+      "path": "AgentRuntime model-watch/autopilot callbacks",
+      "status": "legacy_unmigrated",
+      "surface": "background.model_watch_and_autopilot"
+    },
+    {
+      "kind": "pack_runtime",
+      "path": "external packs are normalized data/instructions only; executable fields and executable archives denied",
+      "status": "unimplemented_denied",
+      "surface": "external_pack.foreign_code"
+    }
+  ]
+}

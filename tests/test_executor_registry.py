@@ -45,7 +45,7 @@ from agent.executor_registry import (
     support_bundle_redact,
 )
 from agent.capability_policy import POLICY_SCHEMA_VERSION
-from agent.mutation_plan import build_mutation_plan
+from agent.mutation_plan import build_mutation_confirmation, build_mutation_plan
 
 
 def _plan(**overrides):
@@ -348,9 +348,18 @@ class ExecutorRegistryTests(unittest.TestCase):
                 capability_id="cleanup.execute",
             )
         )
+        plan = _mutation_plan(
+            plan_id="confirm-test",
+            capability_id="cleanup.execute",
+            executor_id="operator.cleanup.v1",
+            action_type="operator.cleanup",
+            target="example cleanup",
+        )
+        plan.update(_plan(action_type="operator.cleanup", target="example cleanup", executor_status="enabled"))
         result = registry.execute_confirmed_plan(
-            plan=_plan(action_type="operator.cleanup", target="example cleanup", executor_status="enabled"),
+            plan=plan,
             action={"pending_id": "confirm-test"},
+            confirmation=build_mutation_confirmation(plan["mutation_plan"], confirmation_id="confirm-test"),
         )
         payload = result.to_dict()
         self.assertTrue(result.ok)
@@ -360,6 +369,72 @@ class ExecutorRegistryTests(unittest.TestCase):
         self.assertEqual("plan_and_confirm", payload["authorization_mode"])
         self.assertTrue(payload["authorization_decision_id"].startswith("authz-"))
         self.assertIn("authorization", payload["details"])
+
+    def test_migrated_executor_rejects_missing_confirmation_metadata(self) -> None:
+        registry = ExecutorRegistry(self.journal_path)
+        registry.register(
+            ExecutorSpec(
+                executor_id="operator.cleanup.v1",
+                action_type="operator.cleanup",
+                status="enabled",
+                run=lambda plan, action: {"ok": True, "mutated": True},
+                capability_id="cleanup.execute",
+            )
+        )
+        plan = _mutation_plan(
+            plan_id="confirm-test",
+            capability_id="cleanup.execute",
+            executor_id="operator.cleanup.v1",
+            action_type="operator.cleanup",
+            target="example cleanup",
+        )
+        plan.update(_plan(action_type="operator.cleanup", target="example cleanup"))
+        result = registry.execute_confirmed_plan(plan=plan, action={"pending_id": "confirm-test"})
+        self.assertFalse(result.ok)
+        self.assertFalse(result.mutated)
+        self.assertEqual("mutation_confirmation_missing", result.error_code)
+
+    def test_migrated_executor_rejects_cross_thread_and_replay(self) -> None:
+        registry = ExecutorRegistry(self.journal_path)
+        registry.register(
+            ExecutorSpec(
+                executor_id="operator.cleanup.v1",
+                action_type="operator.cleanup",
+                status="enabled",
+                run=lambda plan, action: {"ok": True, "mutated": True},
+                capability_id="cleanup.execute",
+            )
+        )
+        plan = _mutation_plan(
+            plan_id="confirm-test",
+            capability_id="cleanup.execute",
+            executor_id="operator.cleanup.v1",
+            action_type="operator.cleanup",
+            target="example cleanup",
+        )
+        plan.update(_plan(action_type="operator.cleanup", target="example cleanup"))
+        wrong_scope = build_mutation_confirmation(
+            plan["mutation_plan"], confirmation_id="confirm-test", thread_id="other-thread"
+        )
+        rejected = registry.execute_confirmed_plan(
+            plan=plan,
+            action={"pending_id": "confirm-test"},
+            confirmation=wrong_scope,
+        )
+        self.assertEqual("mutation_confirmation_thread_id_mismatch", rejected.error_code)
+        confirmation = build_mutation_confirmation(plan["mutation_plan"], confirmation_id="confirm-test")
+        first = registry.execute_confirmed_plan(
+            plan=plan,
+            action={"pending_id": "confirm-test"},
+            confirmation=confirmation,
+        )
+        second = registry.execute_confirmed_plan(
+            plan=plan,
+            action={"pending_id": "confirm-test"},
+            confirmation=confirmation,
+        )
+        self.assertTrue(first.ok)
+        self.assertEqual("mutation_confirmation_replayed", second.error_code)
 
     def test_update_executor_fixture_promotes_staged_release(self) -> None:
         root = Path(self.tmpdir.name)

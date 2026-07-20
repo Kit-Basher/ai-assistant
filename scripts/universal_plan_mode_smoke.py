@@ -17,6 +17,7 @@ from agent.mutation_plan import (  # noqa: E402
     MUTATION_PLAN_SCHEMA_VERSION,
     MUTATION_PLAN_STATUS_CANCELLED,
     MutationPlanStore,
+    build_mutation_confirmation,
     build_mutation_plan,
     validate_mutation_plan,
 )
@@ -89,6 +90,10 @@ def _run_registry_fixture(action_type: str, executor_id: str, capability_id: str
                 "target_fingerprint": plan["target_fingerprint"],
             },
             action={"pending_id": plan["plan_id"], "thread_id": "universal-plan-smoke", "session_id": "session-a"},
+            confirmation=build_mutation_confirmation(
+                plan,
+                confirmation_id=f"confirmation-{plan['plan_id']}",
+            ),
         )
         return result.to_dict()
 
@@ -215,7 +220,7 @@ def run() -> list[Check]:
         "legacy_visible": [],
     }
     checks.append(_pass("status UX reads Plan/operation truth", json.dumps(categories, sort_keys=True)))
-    checks.append(_pass("remaining legacy actions closed", "no first-party or skill-pack legacy mutation warnings remain"))
+    checks.append(_pass("migrated fixture set has no hidden legacy fallback", "repository-wide legacy surfaces remain tracked by architecture_safety_audit_v2.py"))
     return checks
 
 

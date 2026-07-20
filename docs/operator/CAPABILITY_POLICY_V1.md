@@ -10,6 +10,13 @@ assistant tool authorization. It does not migrate every executor. It defines the
 schema, registry, decision model, representative executor bindings, receipt
 metadata, and audit surface needed for the broader authorization roadmap.
 
+Audit v2 qualification: this schema is authoritative for migrated
+capabilities, but it does not cover every public mutation surface. The current
+machine inventory explicitly identifies remaining `legacy_unmigrated` and
+`plan_gated_legacy` paths. Migrated executors receive `confirmed=true` only
+after the Executor Registry validates an exact, scope-bound confirmation
+object; a caller-supplied boolean is not authorization.
+
 ## Schema
 
 Capability definitions live in `agent/capability_policy.py` and use
