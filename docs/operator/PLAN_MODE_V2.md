@@ -131,3 +131,14 @@ The installed-product smoke proves:
   Skill-Pack Permission Boundary v1 gates brokered platform API requests from
   skill packs. Unsupported destructive file, Git, service, provider, and
   process-isolation variants remain denied or deferred.
+
+## Audit v2B skill-pack continuation
+
+`request_action()` is preview-only and persists an exact Universal Mutation
+Plan. `confirm_action()` reauthorizes the current manifest and grant, checks
+pack/argument/target/actor/thread/session scope, and only then dispatches
+through the Executor Registry. `cancel_action()` is scope-bound. Non-pending
+or expired plans cannot execute.
+
+Seven historical API Plan/apply controllers remain outside the central
+Executor Registry, so Universal Plan Mode is not yet universal.

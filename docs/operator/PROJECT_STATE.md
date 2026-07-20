@@ -778,3 +778,15 @@ Search is not a browser. It returns untrusted SearXNG metadata only.
 - Start/restart/stop are bounded Plan Mode actions.
 - Telegram tokens must remain redacted from status, chat, logs, docs, and
   support output.
+
+## Architecture and Safety Audit v2B (in progress)
+
+- The file inventory explicitly classifies 150 mutation-bearing files: 132
+  newly flagged at v2B plus 18 previously reviewed scanner matches. New or
+  stale files fail the generic bypass audit.
+- Managed skill-pack mutations now use persisted preview/confirm/cancel. Scope
+  binds pack identity/version/fingerprint, grant, permission, arguments,
+  target, actor, thread, session, and expiry; apply revalidates and consumes it.
+- Universal authorization is **not complete**: 47 `legacy_unmigrated`, seven
+  `plan_gated_legacy`, and 16 runtime `supported_pending_migration`
+  dispositions remain release blockers.

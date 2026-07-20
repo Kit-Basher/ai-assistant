@@ -25,7 +25,7 @@
   ],
   "schema": "personal-agent.mutation-surface-inventory.v2",
   "scope": "public API mutations plus assistant, Telegram, CLI, skill-pack, executor, and background entry points",
-  "source_commit": "working-tree-on-d911b9b95ce5df9b71cd9c78e28fa13e8767e79a",
+  "source_commit": "audit-v2b-working-tree-on-7afbe8502f67d3c720311b7299521075e12d4229",
   "status_definitions": {
     "central_authorized": "central capability schema, policy, Universal Mutation Plan, confirmation, and Executor Registry",
     "legacy_unmigrated": "public or reachable mutation not fully migrated to the canonical authorization stack",
@@ -35,9 +35,9 @@
   },
   "summary": {
     "canonical_front_door": 2,
-    "central_authorized": 2,
+    "central_authorized": 3,
     "internal_state_write": 1,
-    "legacy_unmigrated": 48,
+    "legacy_unmigrated": 47,
     "plan_confirm_gated": 7,
     "plan_gated_legacy": 7,
     "read_only": 9,
@@ -821,8 +821,8 @@
     },
     {
       "kind": "skill_pack",
-      "path": "SkillPackInvocationBroker.request_action",
-      "status": "legacy_unmigrated",
+      "path": "SkillPackInvocationBroker.request_action preview -> persisted scoped plan -> confirm_action -> ExecutorRegistry",
+      "status": "central_authorized",
       "surface": "skill_pack.managed_adapter_invocation"
     },
     {

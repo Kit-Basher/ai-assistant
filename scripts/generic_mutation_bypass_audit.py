@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import re
 import sys
@@ -33,28 +34,11 @@ PATTERNS = (
 )
 
 
-REVIEWED_PATHS = {
-    "agent/api_server.py": "API/control-plane routes inventoried by architecture_safety_audit_v2.py; legacy_unmigrated entries remain explicit.",
-    "agent/executor_registry.py": "central Executor Registry, migrated executor primitives, receipt persistence, and trusted context issuance.",
-    "agent/capability_policy.py": "central capability schema and trusted context validation.",
-    "agent/mutation_boundary.py": "central primitive policy and denial helpers.",
-    "agent/mutation_plan.py": "Universal Mutation Plan persistence and state transitions.",
-    "agent/skill_pack_permissions.py": "skill-pack manifest/grant store and brokered dispatch.",
-    "agent/llm/notify_delivery.py": "provider delivery adapters requiring trusted invocation context.",
-    "agent/host_lifecycle.py": "Host Lifecycle operation hashing and fixture/lifecycle runner support.",
-    "agent/primary_uninstall_policy.py": "local primary uninstall activation policy marker management.",
-    "agent/services/managed_local_services.py": "managed SearXNG service Plan/apply implementation with fixed commands and loopback policy.",
-    "agent/modelops/safe_runner.py": "bounded modelops subprocess helper.",
-    "agent/modelops/discovery.py": "read-only model discovery and bounded local probes.",
-    "agent/modelops/seen_state.py": "internal model discovery seen-state persistence.",
-    "agent/semantic_memory/storage.py": "semantic memory domain store; current destructive execution remains gated/previewed by higher layers.",
-    "agent/memory_v2/storage.py": "memory v2 domain store; user-facing destructive lanes are Plan-gated or preview-only.",
-    "agent/control_plane.py": "legacy local control-plane file store; not exposed as a normal assistant mutation API.",
-    "agent/llm/action_ledger.py": "internal action-ledger append persistence.",
-    "agent/llm/model_discovery_policy.py": "internal model discovery policy persistence.",
-    "agent/logging_utils.py": "log append persistence.",
-    "agent/skills/system_health.py": "read-only system health subprocess/status probes.",
-    "agent/skills/system_health_analyzer.py": "read-only status wording.",
+CLASSIFICATION_PATH = ROOT / "docs" / "operator" / "MUTATION_FILE_CLASSIFICATIONS_V2B.json"
+REQUIRED_CLASSIFICATION_FIELDS = {
+    "path", "disposition", "capability", "entry_point", "actor", "target_resources",
+    "mutation_type", "policy_path", "executor", "confirmation_requirements",
+    "rollback_scope", "audit_evidence",
 }
 
 SCRIPT_EXCLUSIONS = {
@@ -69,15 +53,32 @@ def _iter_python_files() -> list[Path]:
     return files
 
 
-def _is_reviewed(rel: str) -> bool:
-    if rel in REVIEWED_PATHS:
-        return True
-    if rel in SCRIPT_EXCLUSIONS:
-        return True
-    return False
+def _load_classifications() -> tuple[dict[str, dict[str, object]], list[str]]:
+    errors: list[str] = []
+    try:
+        payload = json.loads(CLASSIFICATION_PATH.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return {}, [f"classification_inventory_unreadable:{exc.__class__.__name__}"]
+    rows = payload.get("classifications") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        return {}, ["classification_inventory_rows_missing"]
+    indexed: dict[str, dict[str, object]] = {}
+    for offset, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            errors.append(f"classification_row_invalid:{offset}")
+            continue
+        missing = sorted(field for field in REQUIRED_CLASSIFICATION_FIELDS if not str(row.get(field) or "").strip())
+        path = str(row.get("path") or "").strip()
+        if missing:
+            errors.append(f"classification_fields_missing:{path or offset}:{','.join(missing)}")
+        if path in indexed:
+            errors.append(f"classification_duplicate:{path}")
+        indexed[path] = row
+    return indexed, errors
 
 
 def main() -> int:
+    classifications, classification_errors = _load_classifications()
     findings: list[tuple[str, int, str, str, str]] = []
     critical_unreviewed: list[tuple[str, int, str, str]] = []
     shell_true: list[tuple[str, int, str]] = []
@@ -90,7 +91,7 @@ def main() -> int:
         for lineno, line in enumerate(lines, start=1):
             for pattern in PATTERNS:
                 if pattern.regex.search(line):
-                    reviewed = _is_reviewed(rel)
+                    reviewed = rel in classifications or rel in SCRIPT_EXCLUSIONS
                     findings.append((rel, lineno, pattern.category, pattern.severity, line.strip()[:160]))
                     if pattern.category == "shell_true" and rel.startswith("agent/"):
                         shell_true.append((rel, lineno, line.strip()))
@@ -98,10 +99,20 @@ def main() -> int:
                         critical_unreviewed.append((rel, lineno, pattern.category, line.strip()[:160]))
 
     print("# Generic Mutation Bypass Audit")
-    print(f"Reviewed inventory entries: {len(REVIEWED_PATHS)}")
+    detected_paths = {rel for rel, _lineno, _category, _severity, _line in findings if rel not in SCRIPT_EXCLUSIONS}
+    classified_paths = set(classifications)
+    missing_paths = sorted(detected_paths - classified_paths)
+    stale_paths = sorted(classified_paths - detected_paths)
+    print(f"Reviewed inventory entries: {len(classifications)}")
     print(f"Suspicious mutation-surface matches: {len(findings)}")
-    for rel, reason in sorted(REVIEWED_PATHS.items()):
-        print(f"PASS: reviewed surface {rel}: {reason}")
+    for rel, row in sorted(classifications.items()):
+        print(f"PASS: reviewed surface {rel}: {row.get('disposition')}: {row.get('audit_evidence')}")
+    for error in classification_errors:
+        print(f"FAIL: {error}")
+    for rel in missing_paths:
+        print(f"FAIL: mutation-bearing file lacks explicit classification: {rel}")
+    for rel in stale_paths:
+        print(f"FAIL: classified file no longer has a scanner finding; review or remove stale classification: {rel}")
     if shell_true:
         for rel, lineno, line in shell_true:
             print(f"FAIL: shell=True in runtime code: {rel}:{lineno}: {line}")
@@ -110,7 +121,7 @@ def main() -> int:
         for rel in unreviewed_paths:
             count = sum(1 for item in critical_unreviewed if item[0] == rel)
             print(f"WARN: mutation-bearing file lacks an explicit reviewed-path entry: {rel} ({count} matches)")
-    failed = len(shell_true)
+    failed = len(shell_true) + len(classification_errors) + len(missing_paths) + len(stale_paths)
     if failed:
         print(f"PASS=0 WARN=0 FAIL={failed}")
         return 1
@@ -119,7 +130,10 @@ def main() -> int:
         category_counts[category] = category_counts.get(category, 0) + 1
     for category in sorted(category_counts):
         print(f"PASS: reviewed category {category}: findings={category_counts[category]}")
-    print(f"PASS={len(REVIEWED_PATHS) + len(category_counts)} WARN={len(unreviewed_paths)} FAIL=0")
+    incomplete = sorted(rel for rel, row in classifications.items() if row.get("disposition") == "supported_pending_migration")
+    for rel in incomplete:
+        print(f"WARN: release-blocking central migration remains: {rel}")
+    print(f"PASS={len(classifications) + len(category_counts)} WARN={len(incomplete)} FAIL=0")
     return 0
 
 

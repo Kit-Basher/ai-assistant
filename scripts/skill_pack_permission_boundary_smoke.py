@@ -152,16 +152,27 @@ def run() -> list[Check]:
             granted_by="local_operator_cli",
             grant_reason="fixture",
         )
-        create_result = broker.request_action(
+        create_target = {"target_path": str(target_file), "size_bytes": 6}
+        create_action = {"target_path": str(target_file), "approved_roots": [str(target_root)], "content": "hello\n"}
+        create_preview = broker.request_action(
             identity=identity,
             manifest=manifest,
             permission_id="invoke.files.create",
-            target={"target_path": str(target_file), "size_bytes": 6},
-            action_payload={"target_path": str(target_file), "approved_roots": [str(target_root)], "content": "hello\n"},
+            target=create_target,
+            action_payload=create_action,
         )
-        checks.append(_pass("exact grant still requires per-invocation confirmation", create_result.get("error_code", "")) if create_result.get("mutated") is False and create_result.get("error_code") == "mutation_confirmation_missing" and create_result.get("capability_id") == "files.create" else _fail("exact grant still requires per-invocation confirmation", json.dumps(create_result, sort_keys=True)[:1200]))
-        checks.append(_pass("Universal Mutation Plan identifies requesting skill", create_result.get("skill_pack_id", "")) if create_result.get("skill_pack_id") == identity.skill_pack_id and create_result.get("grant_id") == grant.get("grant_id") else _fail("Universal Mutation Plan identifies requesting skill", json.dumps(create_result, sort_keys=True)[:1200]))
-        checks.append(_pass("receipts include skill and grant metadata") if create_result.get("details", {}).get("skill_pack", {}).get("skill_pack_id") == identity.skill_pack_id else _fail("receipts include skill and grant metadata", json.dumps(create_result, sort_keys=True)[:1200]))
+        checks.append(_pass("exact grant produces confirmation preview", create_preview.get("plan_id", "")) if create_preview.get("mutated") is False and create_preview.get("status") == "confirmation_required" and create_preview.get("plan", {}).get("capability_id") == "files.create" else _fail("exact grant produces confirmation preview", json.dumps(create_preview, sort_keys=True)[:1200]))
+        checks.append(_pass("Universal Mutation Plan identifies requesting skill", create_preview.get("skill_pack", {}).get("skill_pack_id", "")) if create_preview.get("skill_pack", {}).get("skill_pack_id") == identity.skill_pack_id and create_preview.get("grant_id") == grant.get("grant_id") else _fail("Universal Mutation Plan identifies requesting skill", json.dumps(create_preview, sort_keys=True)[:1200]))
+        create_result = broker.confirm_action(
+            plan_id=str(create_preview.get("plan_id") or ""),
+            confirmation_id="fixture-confirm-file",
+            identity=identity,
+            manifest=manifest,
+            permission_id="invoke.files.create",
+            target=create_target,
+            action_payload=create_action,
+        )
+        checks.append(_pass("confirmed receipt includes skill and grant metadata") if create_result.get("mutated") is True and create_result.get("details", {}).get("skill_pack", {}).get("skill_pack_id") == identity.skill_pack_id and create_result.get("grant_id") == grant.get("grant_id") else _fail("confirmed receipt includes skill and grant metadata", json.dumps(create_result, sort_keys=True)[:1200]))
 
         outside = broker.request_action(
             identity=identity,
@@ -191,7 +202,7 @@ def run() -> list[Check]:
             target={"target_path": str(target_root / "raw.md"), "size_bytes": 3},
             action_payload={"target_path": str(target_root / "raw.md"), "approved_roots": [str(target_root)], "content": "raw", "capability_id": "system.uninstall", "executor_id": "operator.uninstall.v1"},
         )
-        checks.append(_pass("skill cannot choose executor or capability", raw_executor_payload.get("capability_id", "")) if raw_executor_payload.get("capability_id") == "files.create" else _fail("skill cannot choose executor or capability", json.dumps(raw_executor_payload, sort_keys=True)[:1000]))
+        checks.append(_pass("skill cannot choose executor or capability", raw_executor_payload.get("plan", {}).get("capability_id", "")) if raw_executor_payload.get("plan", {}).get("capability_id") == "files.create" and raw_executor_payload.get("plan", {}).get("executor_id") == "operator.file.create.v1" else _fail("skill cannot choose executor or capability", json.dumps(raw_executor_payload, sort_keys=True)[:1000]))
 
         duplicate = broker.request_action(
             identity=identity,
@@ -200,7 +211,7 @@ def run() -> list[Check]:
             target={"target_path": str(target_file), "size_bytes": 6},
             action_payload={"target_path": str(target_file), "approved_roots": [str(target_root)], "content": "hello\n"},
         )
-        checks.append(_pass("unconfirmed duplicate invocation is bounded", duplicate.get("error_code", "")) if duplicate.get("mutated") is False and duplicate.get("error_code") == "mutation_confirmation_missing" else _fail("unconfirmed duplicate invocation is bounded", json.dumps(duplicate, sort_keys=True)[:1000]))
+        checks.append(_pass("unconfirmed duplicate invocation is bounded", duplicate.get("plan_id", "")) if duplicate.get("mutated") is False and duplicate.get("status") == "confirmation_required" and duplicate.get("plan_id") != create_preview.get("plan_id") else _fail("unconfirmed duplicate invocation is bounded", json.dumps(duplicate, sort_keys=True)[:1000]))
 
         grant_store.revoke_grant(str(grant.get("grant_id")))
         revoked = broker.request_action(
@@ -229,7 +240,7 @@ def run() -> list[Check]:
             target={"target": "local_notification"},
             action_payload={"receipt_path": str(tmp / "notify.json"), "message": "fixture"},
         )
-        checks.append(_pass("mapped notification permission still requires confirmation", notification_grant.get("grant_id", "")) if notify_result.get("mutated") is False and notify_result.get("error_code") == "mutation_confirmation_missing" and notify_result.get("capability_id") == "notification.local.send" else _fail("mapped notification permission still requires confirmation", json.dumps(notify_result, sort_keys=True)[:1000]))
+        checks.append(_pass("mapped notification permission produces confirmation preview", notification_grant.get("grant_id", "")) if notify_result.get("mutated") is False and notify_result.get("status") == "confirmation_required" and notify_result.get("plan", {}).get("capability_id") == "notification.local.send" else _fail("mapped notification permission produces confirmation preview", json.dumps(notify_result, sort_keys=True)[:1000]))
 
         checks.append(_pass("arbitrary shell blocked", "no shell permission exists in registry"))
         checks.append(_pass("arbitrary HTTP mutation blocked", "no http.post/network mutation permission exists in registry"))
@@ -238,7 +249,7 @@ def run() -> list[Check]:
         read_result = broker.inspect(identity=identity, manifest=manifest, permission_id="read.notifications.inspect", target={"target": "notification_history"})
         checks.append(_pass("read-only skill inspection remains functional", read_grant.get("grant_id", "")) if read_result.get("ok") and read_result.get("mutated") is False else _fail("read-only skill inspection remains functional", json.dumps(read_result, sort_keys=True)))
         checks.append(_pass("status UX uses registry/grant/receipt truth", f"grants={len(grant_store.list_grants())}"))
-        checks.append(_pass("skill-pack mutation gap remains audit-visible", "per-invocation preview/confirm handoff is still legacy_unmigrated"))
+        checks.append(_pass("skill-pack mutation path is centrally authorized", "persisted preview/confirm/cancel -> capability policy -> Executor Registry"))
         checks.append(_warn("process-isolation limitation reported accurately", "platform APIs are permissioned; arbitrary malicious in-process Python is not claimed isolated"))
     return checks
 

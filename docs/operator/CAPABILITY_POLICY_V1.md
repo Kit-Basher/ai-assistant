@@ -287,3 +287,13 @@ unsupported mutation warnings.
 Recommended next checkpoint:
 
 `v0.2.2-full-adversarial-authorization-proof-v1`
+
+## Audit v2B status
+
+Managed skill-pack mutations now produce a per-invocation Universal Mutation
+Plan and revalidate current pack permissions immediately before central policy
+dispatch. External packs still receive zero grants by default.
+
+Capability Policy is not yet the sole authority for all public mutations:
+47 legacy routes and seven legacy Plan/apply routes remain. Their per-file
+dispositions are recorded in `MUTATION_FILE_CLASSIFICATIONS_V2B.json`.

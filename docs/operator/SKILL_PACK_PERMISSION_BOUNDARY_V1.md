@@ -255,3 +255,13 @@ primitive access all fail closed through supported platform APIs.
 Recommended checkpoint tag:
 
 `v0.2.2-skill-pack-permission-boundary-v1`
+
+## Audit v2B per-invocation continuation
+
+Mutation requests now stop at a persisted preview. Confirmation binds actor,
+thread, session, pack identity/version/content fingerprint, permission, grant,
+capability/executor, arguments fingerprint, target fingerprint, and expiry.
+Apply re-reads the manifest and effective grant, rejects drift, and uses the
+Executor Registry once. Cancel is scope-bound. Read-only inspection remains
+immediate; external packs have zero grants by default and executable foreign
+packs remain unsupported.

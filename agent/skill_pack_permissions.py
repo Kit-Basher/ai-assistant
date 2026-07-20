@@ -8,11 +8,19 @@ import os
 from pathlib import Path
 import re
 import tempfile
+import threading
+import time
 import uuid
 from typing import TYPE_CHECKING, Any
 
 from agent.capability_policy import POLICY_SCHEMA_VERSION, stable_fingerprint
-from agent.mutation_plan import build_mutation_plan, validate_mutation_plan
+from agent.mutation_plan import (
+    MUTATION_PLAN_STATUS_PENDING,
+    MutationPlanStore,
+    build_mutation_confirmation,
+    build_mutation_plan,
+    validate_mutation_plan,
+)
 
 if TYPE_CHECKING:
     from agent.executor_registry import ExecutorRegistry
@@ -433,9 +441,21 @@ def diff_skill_permissions(old_manifest: dict[str, Any], new_manifest: dict[str,
 
 
 class SkillPackInvocationBroker:
-    def __init__(self, *, grant_store: SkillGrantStore, executor_registry: ExecutorRegistry | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        grant_store: SkillGrantStore,
+        executor_registry: ExecutorRegistry | None = None,
+        plan_store: MutationPlanStore | None = None,
+        plan_ttl_seconds: int = 600,
+    ) -> None:
         self.grant_store = grant_store
         self.executor_registry = executor_registry
+        self.plan_store = plan_store or MutationPlanStore(
+            grant_store.path.with_name("skill_pack_invocation_plans_v1.json")
+        )
+        self.plan_ttl_seconds = max(30, min(int(plan_ttl_seconds), 3600))
+        self._confirmation_lock = threading.RLock()
 
     def inspect(self, *, identity: SkillPackIdentity, manifest: dict[str, Any], permission_id: str, target: dict[str, Any]) -> dict[str, Any]:
         allowed, reason, definition, _grant = self._authorize(identity=identity, manifest=manifest, permission_id=permission_id, target=target)
@@ -453,30 +473,105 @@ class SkillPackInvocationBroker:
         permission_id: str,
         target: dict[str, Any],
         action_payload: dict[str, Any],
+        actor_id: str = "local_user",
         thread_id: str = "skill-pack",
         session_id: str = "skill-pack",
     ) -> dict[str, Any]:
+        """Preview a mutation and persist its exact invocation scope.
+
+        This method deliberately never executes.  ``confirm_action`` is the
+        only broker path that can dispatch a managed skill-pack mutation.
+        """
         allowed, reason, definition, grant = self._authorize(identity=identity, manifest=manifest, permission_id=permission_id, target=target)
         if not allowed:
             return {"ok": False, "mutated": False, "reason_code": reason, "skill_pack": identity.to_dict(), "permission_id": permission_id}
         if definition.effect != "mutating":
             return {"ok": False, "mutated": False, "reason_code": "permission_not_mutating", "skill_pack": identity.to_dict(), "permission_id": permission_id}
-        if self.executor_registry is None:
-            return {"ok": False, "mutated": False, "reason_code": "executor_registry_unavailable", "skill_pack": identity.to_dict(), "permission_id": permission_id}
         assert definition.capability_id and definition.executor_id and definition.action_type
         plan = build_mutation_plan(
             plan_id=f"skill-{uuid.uuid4().hex[:12]}",
             capability_id=definition.capability_id,
             executor_id=definition.executor_id,
-            expires_at_epoch=4_102_444_800,
+            expires_at_epoch=int(time.time()) + self.plan_ttl_seconds,
             thread_id=thread_id,
             session_id=session_id,
-            target_snapshot={"skill_pack": identity.to_dict(), "permission_id": permission_id, "target": dict(target)},
-            mutation_inventory=[{"permission_id": permission_id, "target": dict(target), "requested_by_skill_pack": identity.skill_pack_id}],
+            actor_id=actor_id,
+            target_snapshot={
+                "skill_pack": identity.to_dict(),
+                "permission_id": permission_id,
+                "grant_id": str((grant or {}).get("grant_id") or ""),
+                "target": dict(target),
+                "arguments_fingerprint": stable_fingerprint(action_payload),
+            },
+            mutation_inventory=[{
+                "permission_id": permission_id,
+                "target": dict(target),
+                "arguments_fingerprint": stable_fingerprint(action_payload),
+                "requested_by_skill_pack": identity.skill_pack_id,
+            }],
             preserved_resources=[],
             recovery={"rollback_supported": definition.permission_id in {"invoke.files.create", "invoke.backup.create"}},
         )
         validate_mutation_plan(plan)
+        self.plan_store.save(plan)
+        return {
+            "ok": True,
+            "mutated": False,
+            "status": "confirmation_required",
+            "plan": plan,
+            "plan_id": plan["plan_id"],
+            "expires_at": plan["expires_at"],
+            "skill_pack": identity.to_dict(),
+            "permission_id": permission_id,
+            "grant_id": str((grant or {}).get("grant_id") or ""),
+        }
+
+    def confirm_action(
+        self,
+        *,
+        plan_id: str,
+        confirmation_id: str,
+        identity: SkillPackIdentity,
+        manifest: dict[str, Any],
+        permission_id: str,
+        target: dict[str, Any],
+        action_payload: dict[str, Any],
+        actor_id: str = "local_user",
+        thread_id: str = "skill-pack",
+        session_id: str = "skill-pack",
+    ) -> dict[str, Any]:
+        with self._confirmation_lock:
+            plan = self.plan_store.load(plan_id)
+            if plan is None:
+                return self._blocked(identity, permission_id, "skill_invocation_plan_missing")
+            if str(plan.get("status") or "") != MUTATION_PLAN_STATUS_PENDING:
+                return self._blocked(identity, permission_id, "skill_invocation_plan_not_pending")
+        allowed, reason, definition, grant = self._authorize(
+            identity=identity,
+            manifest=manifest,
+            permission_id=permission_id,
+            target=target,
+        )
+        if not allowed:
+            return self._blocked(identity, permission_id, reason)
+        if definition.effect != "mutating":
+            return self._blocked(identity, permission_id, "permission_not_mutating")
+        snapshot = plan.get("target_snapshot") if isinstance(plan.get("target_snapshot"), dict) else {}
+        expected_snapshot = {
+            "skill_pack": identity.to_dict(),
+            "permission_id": permission_id,
+            "grant_id": str((grant or {}).get("grant_id") or ""),
+            "target": dict(target),
+            "arguments_fingerprint": stable_fingerprint(action_payload),
+        }
+        if stable_fingerprint(snapshot) != stable_fingerprint(expected_snapshot):
+            return self._blocked(identity, permission_id, "skill_invocation_scope_changed")
+        for field, actual in (("actor_id", actor_id), ("thread_id", thread_id), ("session_id", session_id)):
+            if str(plan.get(field) or "") != str(actual or ""):
+                return self._blocked(identity, permission_id, f"skill_invocation_{field}_mismatch")
+        if self.executor_registry is None:
+            return self._blocked(identity, permission_id, "executor_registry_unavailable")
+        assert definition.capability_id and definition.executor_id and definition.action_type
         wrapped_plan = {
             **plan,
             "mutation_plan": dict(plan),
@@ -497,7 +592,34 @@ class SkillPackInvocationBroker:
                 "grant_id": str((grant or {}).get("grant_id") or ""),
             },
         }
-        result = self.executor_registry.execute_confirmed_plan(plan=wrapped_plan, action=action).to_dict()
+        confirmation = build_mutation_confirmation(
+            plan,
+            confirmation_id=confirmation_id,
+            actor_id=actor_id,
+            thread_id=thread_id,
+            session_id=session_id,
+        )
+        with self._confirmation_lock:
+            current = self.plan_store.load(plan_id)
+            if current is None or str(current.get("status") or "") != MUTATION_PLAN_STATUS_PENDING:
+                return self._blocked(identity, permission_id, "skill_invocation_plan_not_pending")
+            still_allowed, current_reason, _current_definition, current_grant = self._authorize(
+                identity=identity,
+                manifest=manifest,
+                permission_id=permission_id,
+                target=target,
+            )
+            if not still_allowed:
+                return self._blocked(identity, permission_id, current_reason)
+            if str((current_grant or {}).get("grant_id") or "") != str((grant or {}).get("grant_id") or ""):
+                return self._blocked(identity, permission_id, "skill_invocation_grant_changed")
+            self.plan_store.transition(plan_id, "executing")
+            result = self.executor_registry.execute_confirmed_plan(
+                plan=wrapped_plan,
+                action=action,
+                confirmation=confirmation,
+            ).to_dict()
+            self.plan_store.transition(plan_id, "completed" if result.get("ok") else "failed")
         details = dict(result.get("details") if isinstance(result.get("details"), dict) else {})
         details["skill_pack"] = identity.to_dict()
         details["permission_id"] = permission_id
@@ -507,6 +629,36 @@ class SkillPackInvocationBroker:
         result["permission_id"] = permission_id
         result["grant_id"] = str((grant or {}).get("grant_id") or "")
         return result
+
+    def cancel_action(
+        self,
+        *,
+        plan_id: str,
+        actor_id: str,
+        thread_id: str,
+        session_id: str,
+    ) -> dict[str, Any]:
+        with self._confirmation_lock:
+            plan = self.plan_store.load(plan_id)
+            if plan is None:
+                return {"ok": False, "mutated": False, "reason_code": "skill_invocation_plan_missing"}
+            for field, actual in (("actor_id", actor_id), ("thread_id", thread_id), ("session_id", session_id)):
+                if str(plan.get(field) or "") != str(actual or ""):
+                    return {"ok": False, "mutated": False, "reason_code": f"skill_invocation_{field}_mismatch"}
+            if str(plan.get("status") or "") != MUTATION_PLAN_STATUS_PENDING:
+                return {"ok": False, "mutated": False, "reason_code": "skill_invocation_plan_not_pending"}
+            self.plan_store.cancel(plan_id)
+        return {"ok": True, "mutated": False, "status": "cancelled", "plan_id": plan_id}
+
+    @staticmethod
+    def _blocked(identity: SkillPackIdentity, permission_id: str, reason: str) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "mutated": False,
+            "reason_code": reason,
+            "skill_pack": identity.to_dict(),
+            "permission_id": permission_id,
+        }
 
     def _authorize(
         self,

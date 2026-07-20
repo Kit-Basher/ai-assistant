@@ -367,3 +367,14 @@ proof as mandatory:
 - Web UI assets are built from `desktop/` sources during clean verification;
 - `scripts/clean_checkout_reproducibility_smoke.py` and
   `scripts/clean_checkout_debian_package_smoke.py` are release-blocking gates.
+
+## 2026-07-20 — Architecture and Safety Audit v2B working checkpoint
+
+- Added deterministic, field-complete classification for all current
+  mutation-bearing files; new, missing, duplicate, or stale rows fail audit.
+- Restored managed skill-pack mutation usability through persisted scoped
+  preview, explicit confirmation, cancellation, expiry, current grant/manifest
+  revalidation, and single-use Executor Registry dispatch.
+- No release is authorized: 47 legacy mutations, seven legacy Plan/apply paths,
+  and the internal-writer migration remain open. Universal authorization is
+  not claimed.

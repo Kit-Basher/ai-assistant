@@ -79,8 +79,8 @@ NON_API_SURFACES = [
     {
         "surface": "skill_pack.managed_adapter_invocation",
         "kind": "skill_pack",
-        "status": "legacy_unmigrated",
-        "path": "SkillPackInvocationBroker.request_action",
+        "status": "central_authorized",
+        "path": "SkillPackInvocationBroker.request_action preview -> persisted scoped plan -> confirm_action -> ExecutorRegistry",
     },
     {
         "surface": "executor_registry.migrated_capabilities",
@@ -181,7 +181,7 @@ def build_inventory() -> dict[str, Any]:
         counts[item["status"]] = counts.get(item["status"], 0) + 1
     return {
         "schema": "personal-agent.mutation-surface-inventory.v2",
-        "source_commit": "working-tree-on-d911b9b95ce5df9b71cd9c78e28fa13e8767e79a",
+        "source_commit": "audit-v2b-working-tree-on-7afbe8502f67d3c720311b7299521075e12d4229",
         "scope": "public API mutations plus assistant, Telegram, CLI, skill-pack, executor, and background entry points",
         "status_definitions": {
             "central_authorized": "central capability schema, policy, Universal Mutation Plan, confirmation, and Executor Registry",

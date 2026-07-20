@@ -781,3 +781,11 @@ runtime design is intentionally changed.
 - `docs/design/RUNTIME_TRUTH_SERVICE.md`
 - `docs/design/TELEGRAM_API_BACKEND_HANDOFF.md`
 - `docs/design/SYSTEM_ARCHITECTURE_MAP.md`
+
+## Mutation authority status (Audit v2B)
+
+The assistant front door, `route_inference()` ownership,
+RuntimeTruthService, and SAFE MODE default are unchanged. Managed skill-pack
+writes now join the central Plan/confirmation/policy/registry path. Historical
+API/domain writers and internal scheduler bookkeeping remain separately
+inventoried and are not described as centrally migrated.

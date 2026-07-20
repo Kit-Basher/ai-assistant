@@ -223,3 +223,12 @@ docs/operator/doctor.md
 docs/operator/telegram_setup.md
 docs/product/PROJECT_INTENT.md
 ```
+
+## Audit v2B authorization inventory
+
+- Surface inventory: `docs/operator/MUTATION_SURFACE_INVENTORY_V2.json`
+- Per-file evidence: `docs/operator/MUTATION_FILE_CLASSIFICATIONS_V2B.json`
+
+Complete the remaining capability-family and internal-writer migrations before
+Audit 3. Audit 3 remains end-user behavior and UX; fresh-VM acceptance stays
+deferred.

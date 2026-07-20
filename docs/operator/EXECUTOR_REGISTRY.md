@@ -289,3 +289,14 @@ Full Adversarial Authorization Proof v1 adds fixture-based attack coverage for
 forged executor/capability fields, Plan tampering, context replay, target
 drift, duplicate execution, partial/uncertain result truth, receipt/status
 truth, and registry immutability.
+
+## Audit v2B skill-pack dispatch
+
+The broker no longer calls an executor during preview. Apply requires a
+persisted pending plan plus exact current pack, grant, permission, arguments,
+target, actor, thread, session, and expiry scope. It marks the plan executing
+before dispatch and completed/failed afterward to prevent concurrent
+in-process double use.
+
+This migrates one surface group; it does not convert remaining legacy
+API/domain writers into registered executors.

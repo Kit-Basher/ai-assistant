@@ -171,3 +171,14 @@ covered by the central capability/executor contract.
 If any chat/status/doc output appears to imply arbitrary shell, pack code
 execution, full browser/page fetching, public web exposure, or silent install,
 treat it as a security bug and add a regression before fixing it.
+
+## Audit v2B authorization status
+
+Managed skill-pack mutation confirmation is now scoped and single-use, with
+revalidation of pack content/version, grant, permission, arguments, target,
+actor, thread, session, and expiry. Read-only skill inspection stays immediate
+and foreign-code execution remains denied.
+
+Universal authorization is not closed. Sixteen runtime files retain an
+explicit release-blocking migration disposition; the route inventory reports
+47 legacy mutations and seven legacy Plan/apply paths.

@@ -105,3 +105,19 @@ language from Web and disabled/enabled-fixture Telegram through the same
 assistant, verify honest runtime-truth wording, and validate preview, confirm,
 cancel, expiry, replay, and blocked-legacy behavior. It should not be the fresh
 Debian VM acceptance audit.
+
+## Audit v2B working addendum — 2026-07-20
+
+The scanner has explicit evidence records for all 150 current mutation-bearing
+files: 132 newly flagged plus 18 previously reviewed. Counts are 78 offline
+tools, 24 internal-only writers, 24 read-only files, eight central-boundary
+files, and 16 supported files pending central migration.
+
+Managed skill-pack mutation dispatch now uses persisted preview/confirm/cancel
+with pack/grant/argument/target/scope drift checks. The 91-surface inventory now
+has three central-authorized groups and 47 legacy-unmigrated groups.
+
+This is not v2B closure: seven Plan-gated legacy surfaces and 47 legacy
+surfaces remain, and the 24 internal writers do not yet all use one enforced
+scheduler/service identity contract. Universal authorization cannot honestly
+be claimed.
