@@ -239,7 +239,8 @@ class TestFirstRunReleaseSmoke(unittest.TestCase):
             orch, "_safe_mode_containment_response", return_value=None
         ):
             abandoned = orch.handle_message("what can you do?", "user1", chat_context={"source_surface": "webui"})
-        self.assertIn("Capability policy v1 is active", abandoned.text)
+        self.assertIn("Supported changes use one preview-and-approval path", abandoned.text)
+        self.assertIn("Controlled Mode", abandoned.text)
         self.assertEqual("capability_policy", abandoned.data["route"])
         self.assertEqual("true", str(self.db.get_user_pref(onboarding_completed_key("user1")) or "").strip().lower())
         calls_after_abandon = len(llm.chat_calls)

@@ -153,14 +153,16 @@ def deterministic_error_message(
     next_action: str,
 ) -> str:
     lines = [
-        str(title or "Operation failed").strip(),
+        str(title or "I couldn't complete that operation").strip(),
+        "I did not assume that the requested change succeeded.",
+        f"Next: {str(next_action or 'check the current status').strip() or 'check the current status'}",
+        "Diagnostic details (for support):",
         f"trace_id: {str(trace_id or 'unknown').strip() or 'unknown'}",
         f"component: {str(component or 'unknown').strip() or 'unknown'}",
     ]
     code = str(failure_code or "").strip()
     if code:
         lines.append(f"failure_code: {code}")
-    lines.append(f"next_action: {str(next_action or 'run agent doctor').strip() or 'run agent doctor'}")
     return normalize_persona_text("\n".join(lines))
 
 

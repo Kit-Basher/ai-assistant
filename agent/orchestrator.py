@@ -2548,6 +2548,36 @@ class Orchestrator:
         return None
 
     @staticmethod
+    def _public_plan_resource_label(value: Any) -> str | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        prefix = text.split(":", 1)[0].strip().lower()
+        labels = {
+            "operation": None,
+            "user_id": "your user-scoped data",
+            "thread_id": "the current conversation",
+            "project_id": "the selected project",
+            "record_id": "the selected record",
+            "target_id": "the selected item",
+            "scope": "the selected memory scope",
+            "source_ref": "the selected local document",
+            "path": "the approved local document",
+            "hash": "the selected notification record",
+            "provider": "the selected provider",
+            "model": "the selected model",
+            "source_id": "the selected pack source",
+            "pack_id": "the selected pack version",
+            "service": "the managed local search service",
+            "bind": "the loopback-only search address",
+        }
+        if prefix in labels:
+            return labels[prefix]
+        if "/" in text or "\\" in text:
+            return "an approved local resource"
+        return "the selected resource"
+
+    @staticmethod
     def _plan_mode_public_payload(mutation_plan: dict[str, Any] | None) -> dict[str, Any]:
         if not isinstance(mutation_plan, dict):
             return {}
@@ -2564,10 +2594,24 @@ class Orchestrator:
                 flat = []
                 for row in mutation_plan.get("mutation_inventory") or []:
                     if isinstance(row, dict) and isinstance(row.get("resources"), list):
-                        flat.extend(str(item) for item in row.get("resources") or [])
-                resources["changed"] = flat
+                        flat.extend(
+                            label
+                            for item in row.get("resources") or []
+                            if (label := Orchestrator._public_plan_resource_label(item)) is not None
+                        )
+                flat = list(dict.fromkeys(flat))
+                action = str(mutation_plan.get("action_type") or "").lower()
+                bucket = (
+                    "deleted"
+                    if any(word in action for word in ("delete", "remove", "reset", "prune", "forget"))
+                    else "created"
+                    if any(word in action for word in ("create", "add", "install", "ingest", "send"))
+                    else "changed"
+                )
+                resources[bucket] = flat
             recovery = mutation_plan.get("recovery") if isinstance(mutation_plan.get("recovery"), dict) else {}
             confirmation = mutation_plan.get("confirmation_requirement") if isinstance(mutation_plan.get("confirmation_requirement"), dict) else {}
+            capability_row = build_default_capability_registry().get(capability)
             return {
                 "policy_layer": "universal_mutation_plan",
                 "action_type": str(mutation_plan.get("action_type") or ""),
@@ -2576,6 +2620,8 @@ class Orchestrator:
                 "rollback_scope": str(recovery.get("scope") or ""),
                 "rollback_supported": bool(recovery.get("rollback_available", False)),
                 "requires_confirmation": bool(confirmation.get("required", True)),
+                "external_effect": bool(getattr(capability_row, "external_side_effect", False)),
+                "risk_level": str(mutation_plan.get("risk_level") or ""),
                 "expires_at": mutation_plan.get("expires_at"),
                 "plan_id": str(mutation_plan.get("plan_id") or ""),
             }
@@ -2587,6 +2633,8 @@ class Orchestrator:
             "rollback_scope": str(mutation_plan.get("rollback_scope") or ""),
             "rollback_supported": bool(mutation_plan.get("rollback_supported", False)),
             "requires_confirmation": bool(mutation_plan.get("requires_confirmation", False)),
+            "external_effect": bool(mutation_plan.get("external_effect", False)),
+            "risk_level": str(mutation_plan.get("risk_level") or ""),
             "expires_at": mutation_plan.get("expires_at"),
             "plan_id": str(mutation_plan.get("plan_id") or ""),
         }
@@ -2594,7 +2642,12 @@ class Orchestrator:
     @staticmethod
     def _format_plan_resource_line(label: str, resources: dict[str, Any], key: str) -> str:
         values = resources.get(key) if isinstance(resources.get(key), list) else []
-        clean = [str(item).strip() for item in values if str(item).strip()]
+        replacements = {
+            "container:personal-agent-searxng": "the managed local search service",
+            "runtime_search_config": "the local search setting",
+            "memory/local_services/searxng/settings.yml": "the managed search configuration",
+        }
+        clean = [replacements.get(str(item).strip(), str(item).strip().replace("_", " ")) for item in values if str(item).strip()]
         return f"{label}: {', '.join(clean) if clean else 'nothing'}."
 
     def _render_plan_mode_confirmation_lines(self, mutation_plan: dict[str, Any] | None) -> list[str]:
@@ -2612,13 +2665,28 @@ class Orchestrator:
                     expiry_line = f"Expires: {datetime.fromtimestamp(int(expires_at), tz=timezone.utc).isoformat()}."
             except (TypeError, ValueError, OSError):
                 expiry_line = "Expires: soon."
+        action = str(plan.get("action_type") or "this change").strip().replace("_", " ").replace(".", " ")
+        deletes = resources.get("deleted") if isinstance(resources.get("deleted"), list) else []
+        external_effect = bool(plan.get("external_effect"))
         lines = [
-            "Plan Mode confirmation:",
-            self._format_plan_resource_line("Will create", resources, "created"),
-            self._format_plan_resource_line("Will change", resources, "changed"),
-            self._format_plan_resource_line("Will delete", resources, "deleted"),
-            f"Rollback scope: {rollback_scope}",
-            f"Rollback supported: {rollback_supported}.",
+            "Review this change before approving:",
+            f"What will happen: {action}.",
+            self._format_plan_resource_line("Creates", resources, "created"),
+            self._format_plan_resource_line("Changes", resources, "changed"),
+            self._format_plan_resource_line("Deletes", resources, "deleted"),
+            (
+                "External effect: this may contact a service or send information outside this assistant."
+                if external_effect
+                else "External effect: none identified by this plan."
+            ),
+            (
+                f"Risk: this deletes {len(deletes)} listed item(s); check the exact scope before approving."
+                if deletes
+                else "Risk: only the listed resources are eligible to change."
+            ),
+            f"Can it be undone automatically: {rollback_supported}.",
+            f"Rollback limit: {rollback_scope}",
+            "Nothing changes until you approve. Say yes to approve this preview, or no to cancel it.",
         ]
         if expiry_line:
             lines.append(expiry_line)
@@ -3721,8 +3789,9 @@ class Orchestrator:
                 expires_at=expires_at,
             )
         rendered_question = str(question or "").strip()
-        if "Plan Mode v2:" not in rendered_question:
-            rendered_question = "\n".join([rendered_question, *self._render_canonical_plan_lines(canonical_plan)]).strip()
+        # The complete Plan stays in the structured payload and explicit
+        # pending-action inspection. Ordinary confirmation copy leads with
+        # consequences, not IDs, fingerprints, or executor machinery.
         action_payload = {
             **action_for_plan,
             "kind": "native_mutation",
@@ -4904,10 +4973,10 @@ class Orchestrator:
             },
             {
                 "key": "pack_suggestions",
-                "title": "External skill acquisition",
+                "title": "Skill-pack discovery and local packs",
                 "summary": (
-                    "I can handle missing capabilities through approved catalog search, untrusted source leads, source approval, "
-                    "quarantine import, review state, and approval/enable/permission gates."
+                    "I can search approved catalogs as untrusted metadata and inspect reviewed local text packs. "
+                    "Arbitrary remote pack download is unavailable; discovery is not installation."
                 ),
                 "available": True,
             },
@@ -4991,12 +5060,12 @@ class Orchestrator:
                     current_target_summary = str(row.get("summary") or "").strip()
                     break
             brief_parts = [
-                "I can check runtime/model status, setup, system resources, local memory, safe web search status, and external skill acquisition gates.",
+                "I can check runtime/model status and system resources, help with planning and writing, use local memory, and explain search or local skill-pack setup.",
             ]
             if current_target_summary:
                 brief_parts.append(current_target_summary)
             if safe_mode_enabled:
-                brief_parts.append("Safe mode is on, so background automation and remote fallback stay paused.")
+                brief_parts.append("SAFE MODE is the normal default; higher-risk remote and install actions stay blocked, and supported local changes still need approval.")
             brief_parts.append("If you want, I can start by checking the runtime or inspecting system resources.")
             text = " ".join(brief_parts)
         else:
@@ -5119,7 +5188,9 @@ class Orchestrator:
             return "I'm having trouble reading the current runtime state right now."
         if "chat llm is unavailable." in lowered or "run: python -m agent setup" in lowered:
             return "Something went wrong while answering that. I'm having trouble accessing my language model right now."
-        if all(marker in normalized for marker in ("trace_id:", "component:", "next_action:")):
+        if all(marker in normalized for marker in ("trace_id:", "component:")) and (
+            "next_action:" in normalized or "diagnostic details (for support):" in lowered
+        ):
             if route in {
                 "generic_chat",
                 "runtime_status",
@@ -16328,28 +16399,20 @@ class Orchestrator:
         registry = build_default_capability_registry()
         categories = registry.status_categories()
         normalized = " ".join(str(text or "").strip().lower().split())
-        lines = ["Capability policy v1 is active for the migrated representative executor set."]
+        lines = ["Supported changes use one preview-and-approval path; unsupported changes are denied clearly."]
         if "install" in normalized:
             pkg = registry.get("system.package.install")
             if pkg is not None:
-                lines.append(
-                    f"Software install is controlled by {pkg.capability_id}: {pkg.authorization_mode}, {pkg.risk_level} risk. "
-                    "It requires Plan Mode confirmation before mutation."
-                )
+                lines.append("Software installation is a higher-risk change. When it is supported and allowed by the current mode, I show exactly what will be installed and wait for explicit approval.")
         else:
             lines.extend(
                 [
-                    "Available without confirmation: "
-                    + ", ".join(item["capability_id"] for item in categories["available_without_confirmation"][:6]),
-                    "Requires confirmation: "
-                    + ", ".join(item["capability_id"] for item in categories["requires_confirmation"]),
-                    "Requires local activation: "
-                    + ", ".join(item["capability_id"] for item in categories["requires_local_activation"]),
-                    "Legacy/unmigrated audit-visible: "
-                    + ", ".join(item["capability_id"] for item in categories["legacy_unmigrated"][:8]),
+                    "Reading, listing, searching, recommendations, and status checks normally run without approval.",
+                    "Changes to memory, tasks, settings, models, packs, permissions, services, or notifications show a bounded preview first.",
+                    "Some operator actions also require a local activation step; confirmation never bypasses that requirement.",
                 ]
             )
-        lines.append("Unmigrated actions are not claimed as centrally enforced yet.")
+        lines.append("SAFE MODE may block a proposed action entirely. Controlled Mode only makes eligible proposals available; it never makes changes automatic.")
         return self._runtime_truth_response(
             text="\n".join(lines),
             route="capability_policy",

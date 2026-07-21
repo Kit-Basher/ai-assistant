@@ -54,7 +54,8 @@ class TestPackSourceApproval(unittest.TestCase):
         self.assertEqual("github_archive", preview.source_kind)
         self.assertEqual(REGISTRY_KIND_GENERIC_API, preview.registry_kind)
         self.assertTrue(preview.untrusted)
-        self.assertTrue(preview.fetch_allowed_after_approval)
+        self.assertFalse(preview.fetch_allowed_after_approval)
+        self.assertIn("remote pack acquisition is unavailable", preview.user_message.lower())
 
     def test_generic_web_result_cannot_be_approved_for_direct_fetch(self) -> None:
         preview = self.controller.preview(
@@ -127,6 +128,7 @@ class TestPackSourceApproval(unittest.TestCase):
         self.assertIn("source content remains hostile", result.user_message.lower())
         self.assertIn("no pack was fetched", result.user_message.lower())
         self.assertIn("next safe step", result.user_message.lower())
+        self.assertIn("metadata", result.user_message.lower())
 
     def test_repeated_approval_does_not_fetch_or_import(self) -> None:
         preview = self.controller.preview(

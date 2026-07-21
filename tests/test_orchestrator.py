@@ -2409,8 +2409,9 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual("operator.uninstall", plan.get("action_type"))
         self.assertEqual("destructive", plan.get("mutation_level"))
         self.assertEqual("enabled", plan.get("executor_status"))
-        self.assertIn("Plan Mode v2:", preview.text)
-        self.assertIn("Plan ID:", preview.text)
+        self.assertNotIn("Plan Mode v2:", preview.text)
+        self.assertNotIn("Plan ID:", preview.text)
+        self.assertIn("Say yes", preview.text)
 
         inspect_response = orchestrator.handle_message("show the pending action", "user1")
         self.assertEqual("plan_mode", inspect_response.data.get("route"))
@@ -5020,9 +5021,9 @@ class TestOrchestrator(unittest.TestCase):
         self.assertTrue(response.text.startswith(
             "Temporary chat model switch preview: I will switch chat temporarily to ollama:qwen2.5:7b-instruct. This does not change your default model. Say yes to continue, or no to cancel.",
         ))
-        self.assertIn("Plan Mode v2:", response.text)
-        self.assertIn("Action type: model.switch_temporary.", response.text)
-        self.assertIn("Allowed confirmations: yes, confirm.", response.text)
+        self.assertNotIn("Plan Mode v2:", response.text)
+        self.assertNotIn("Executor ID:", response.text)
+        self.assertIn("Say yes to continue, or no to cancel", response.text)
         self.assertNotIn(("set_confirmed_chat_model_target", {"model_id": "ollama:qwen2.5:7b-instruct", "provider_id": "ollama"}), runtime_truth.calls)
         self.assertNotIn(("set_default_chat_model", "ollama:qwen2.5:7b-instruct"), runtime_truth.calls)
         self.assertEqual("ollama:qwen3.5:4b", runtime_truth.current_model)
@@ -5050,7 +5051,7 @@ class TestOrchestrator(unittest.TestCase):
         self.assertTrue(first.text.startswith(
             "Temporary chat model switch preview: I will switch chat temporarily to ollama:qwen2.5:7b-instruct. This does not change your default model. Say yes to continue, or no to cancel.",
         ))
-        self.assertIn("Plan Mode v2:", first.text)
+        self.assertNotIn("Plan Mode v2:", first.text)
         self.assertIn("do not have a recent trial model switch", second.text.lower())
         self.assertEqual("ollama:qwen3.5:4b", runtime_truth.current_model)
         self.assertNotIn(("set_confirmed_chat_model_target", {"model_id": "ollama:qwen3.5:4b", "provider_id": "ollama"}), runtime_truth.calls)
@@ -7068,14 +7069,15 @@ class TestOrchestrator(unittest.TestCase):
         review_preview = orchestrator.handle_message("yes", "user1")
         self.assertEqual(["pack_lifecycle_action"], review_preview.data["used_tools"])
         self.assertIn("review preview", review_preview.text.lower())
-        self.assertIn("plan mode confirmation", review_preview.text.lower())
+        self.assertIn("review this change before approving", review_preview.text.lower())
+        self.assertNotIn("executor id:", review_preview.text.lower())
         approved = orchestrator.handle_message("yes", "user1")
         self.assertEqual(["v2f_authorization"], approved.data["used_tools"])
         self.assertIn("approved for the next setup step", approved.text.lower())
         enable_preview = orchestrator.handle_message("yes", "user1")
         self.assertEqual(["pack_lifecycle_action"], enable_preview.data["used_tools"])
         self.assertIn("turn-on preview", enable_preview.text.lower())
-        self.assertIn("plan mode confirmation", enable_preview.text.lower())
+        self.assertIn("review this change before approving", enable_preview.text.lower())
         enabled = orchestrator.handle_message("yes", "user1")
         self.assertEqual(["v2f_authorization"], enabled.data["used_tools"])
         self.assertIn("permission preview is required", enabled.text)
@@ -7095,7 +7097,7 @@ class TestOrchestrator(unittest.TestCase):
         grant_plan = orchestrator.handle_message("yes", "user1")
         self.assertEqual(["managed_adapter_permission_grant"], grant_plan.data["used_tools"])
         self.assertIn("selected-file permission plan", grant_plan.text.lower())
-        self.assertIn("plan mode confirmation", grant_plan.text.lower())
+        self.assertIn("review this change before approving", grant_plan.text.lower())
         grant_response = orchestrator.handle_message("yes", "user1")
         self.assertEqual(["v2f_authorization"], grant_response.data["used_tools"])
         self.assertIn("permission metadata recorded", grant_response.text.lower())
@@ -7675,7 +7677,8 @@ Workflow:
 
         import_plan = orchestrator.handle_message("yes", "user1")
         self.assertEqual(["capability_gap_import"], import_plan.data["used_tools"])
-        self.assertIn("plan mode confirmation", import_plan.text.lower())
+        self.assertIn("review this change before approving", import_plan.text.lower())
+        self.assertNotIn("executor id:", import_plan.text.lower())
         imported = orchestrator.handle_message("yes", "user1")
         self.assertEqual(["v2f_authorization"], imported.data["used_tools"])
         self.assertEqual(1, len(install_calls))
@@ -10981,7 +10984,8 @@ Workflow:
         response = orchestrator._llm_chat("user1", "please do something unsupported")
         self.assertIn("failure_code: tool_unsupported", response.text)
         self.assertIn("component: orchestrator.tool_executor", response.text)
-        self.assertIn("next_action:", response.text)
+        self.assertIn("Next: Run: python -m agent doctor", response.text)
+        self.assertIn("Diagnostic details (for support):", response.text)
 
     def test_execute_tool_request_allows_read_only_in_degraded(self) -> None:
         orchestrator = Orchestrator(
@@ -11121,7 +11125,7 @@ Workflow:
         response = orchestrator.handle_message("yes", "user1")
         self.assertIn("failure_code: followup_ambiguous", response.text)
         self.assertIn("trace_id:", response.text)
-        self.assertIn("next_action:", response.text)
+        self.assertIn("Next: Reply with the exact question", response.text)
 
     def test_followup_yes_without_pending_returns_no_resumable_error(self) -> None:
         orchestrator = self._orchestrator()

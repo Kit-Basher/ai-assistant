@@ -1,6 +1,6 @@
 {
   "schema": "personal-agent.mutation-file-classification.v2b",
-  "reviewed_count": 157,
+  "reviewed_count": 158,
   "required_fields": [
     "path",
     "disposition",
@@ -2370,6 +2370,21 @@
       "confirmation_requirements": "explicit --write invocation",
       "rollback_scope": "single checked-in generated inventory file",
       "audit_evidence": "Audit v2F deterministic write/check comparison",
+      "contract_identity": "not_applicable"
+    },
+    {
+      "path": "scripts/end_user_ux_audit.py",
+      "disposition": "offline_tool",
+      "capability": "developer.inventory",
+      "entry_point": "explicit command-line main",
+      "actor": "developer/release operator",
+      "target_resources": "checked-in Audit 3 claim/journey inventory only when run without --check",
+      "mutation_type": "deterministic offline inventory generation",
+      "policy_path": "not imported by shipping runtime; explicit operator invocation",
+      "executor": "script-owned deterministic JSON renderer",
+      "confirmation_requirements": "explicit command invocation without --check",
+      "rollback_scope": "single checked-in generated Audit 3 inventory file",
+      "audit_evidence": "Audit 3 deterministic regeneration and exact-comparison test",
       "contract_identity": "not_applicable"
     }
   ]

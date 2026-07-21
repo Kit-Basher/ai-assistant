@@ -64,8 +64,9 @@ local activation marker; purge uninstall remains unsupported.
   confirmation-gated and are not arbitrary shell access.
 - Approval-gated: mutating actions preview first and execute only after explicit
   confirmation.
-- Safe external pack ingestion: downloaded third-party packs are quarantined,
-  scanned, normalized, and denied permissions by default.
+- Safe local text-pack ingestion: a user-provided local directory is quarantined,
+  scanned, normalized, and denied permissions by default. Catalog discovery is
+  metadata-only; arbitrary remote pack acquisition is currently unavailable.
 
 ## What It Won't Do
 - It will not run arbitrary shell commands.
@@ -91,9 +92,11 @@ local activation marker; purge uninstall remains unsupported.
 ### Controlled Mode
 - Explicit override only.
 - Entered or exited through `GET/POST /llm/control_mode`.
-- Enables explicit remote switching and explicit acquisition/install flows when
-  provider/model policy allows them.
-- Nothing switches or installs automatically here either.
+- Makes eligible higher-risk proposals, such as remote model switching or
+  model acquisition, available when policy and runtime health allow them.
+- It is not unrestricted mode: every supported change still receives a bounded
+  preview and requires explicit confirmation. Nothing switches or installs
+  automatically.
 
 ### Local Control Plane
 - A tiny loopback-only file-backed service lives at the repo-local `control/`
@@ -190,19 +193,18 @@ local activation marker; purge uninstall remains unsupported.
   - these surfaces are loopback/operator-only
 - Discovery metadata is untrusted and advisory only.
 - Discovery cache is performance-only and remains untrusted metadata.
-- Preview is not install. Nothing becomes locally usable until an explicit
-  fetch/install request goes through quarantine and review.
-- Missing capability requests should not dead-end: the assistant should explain
-  what is missing and guide the user to the next safe step, such as previewing a
-  discovered pack or scaffold.
+- Preview is not installation. Catalog metadata can be inspected, but the
+  product does not currently fetch arbitrary remote pack content.
+- Missing capability requests should not dead-end: the assistant explains what
+  is missing, may show untrusted catalog metadata, and can guide the user to a
+  local text-pack inspection or safe scaffold when that path is available.
 - A pack is usable only after the relevant approval, enablement,
   configuration, and permission gates are complete.
-- `POST /packs/install` ingests either:
-  - a local downloaded pack snapshot
-  - a supported remote archive source over `https`
-- Remote fetch fills quarantine only, then goes through:
+- `POST /packs/install` accepts a local text-pack directory only. URL fields and
+  remote archive source kinds fail closed before network access.
+- Local ingestion goes through:
   - quarantine
-  - safe remote fetch / archive validation
+  - archive and path validation where applicable
   - classification
   - static risk scan
   - normalization
@@ -212,7 +214,8 @@ local activation marker; purge uninstall remains unsupported.
   - optional `references/`, `assets/`, `AGENTS.md`, and metadata files
 - Foreign code or plugin packs are discovered and audited, but they are not
   executed.
-- GitHub/archive sources are provenance-stamped and pinned where possible.
+- Local pack provenance and content are fingerprinted for review. Future remote
+  fetch-to-quarantine, if implemented, remains a separate authorization stage.
 - Imported external packs get no granted permissions by default.
 - Canonical pack identity is content-derived:
   - same safe normalized content from different URLs collapses to the same
@@ -228,7 +231,8 @@ local activation marker; purge uninstall remains unsupported.
   - `GET /packs/compare?from=<canonical_id>&to=<canonical_id>`
 
 ### Intentionally Not Supported
-- `rm`/delete/remove flows.
+- Arbitrary filesystem delete or shell `rm` flows. Registered pack removal is
+  supported through its exact, confirmation-gated lifecycle operation.
 - Unrestricted disk access.
 - Automatic installs or switches.
 - Automatic adoption of discovery proposals.
@@ -378,7 +382,8 @@ Useful local commands:
 - `GET /pack_sources/<source_id>/search?q=...`
   - read-only search over untrusted registry metadata
 - `GET /pack_sources/<source_id>/packs/<remote_id>/preview`
-  - preview one external listing and generate a safe install handoff
+  - inspect one untrusted external metadata listing; this does not generate a
+    remote download or install handoff
 - `PUT /pack_sources/catalog/<source_id>`
   - operator-only discovery source catalog update surface
 - `GET /pack_sources/<source_id>/policy`
@@ -397,8 +402,8 @@ Useful local commands:
   - read-only structured diff and plain-language change summary between two
     normalized pack versions
 - `POST /packs/install`
-  - quarantined external pack ingestion for downloaded snapshots or supported
-    remote archives
+  - quarantined ingestion from an explicitly provided local text-pack directory;
+    arbitrary remote archive acquisition is denied
 
 These are the product-facing surfaces worth learning first. The repo contains
 additional internal/operator endpoints, but they are not the core publishable

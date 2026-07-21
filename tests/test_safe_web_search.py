@@ -715,7 +715,7 @@ class TestSafeWebSearchRuntime(unittest.TestCase):
         self.assertEqual("action_tool", meta.get("route"))
         self.assertIn("managed_local_service_setup_preview", meta.get("used_tools", []))
         self.assertIn("Search is not currently working", text)
-        self.assertIn("Plan Mode confirmation", text)
+        self.assertIn("Review this change before approving", text)
 
     def test_search_setup_plan_rejects_non_loopback_endpoint(self) -> None:
         runtime = self._runtime(search_enabled=False)
@@ -757,7 +757,7 @@ class TestSafeWebSearchRuntime(unittest.TestCase):
         self.assertIn("Search is not currently working", text)
         self.assertIn("direct local SearXNG page will refuse connection", text)
         self.assertIn("I can start or repair the managed search service for you", text)
-        self.assertIn("Plan Mode confirmation", text)
+        self.assertIn("Review this change before approving", text)
         self.assertNotIn("Web search is not set up yet", text)
         self.assertNotIn("missing Podman", text)
 
@@ -840,7 +840,7 @@ class TestSafeWebSearchRuntime(unittest.TestCase):
         self.assertEqual("action_tool", meta.get("route"))
         self.assertIn("managed_local_service_setup_preview", meta.get("used_tools", []))
         self.assertIn("I can start or repair the managed search service for you", text)
-        self.assertIn("Plan Mode confirmation", text)
+        self.assertIn("Review this change before approving", text)
         self.assertNotIn("podman run", text.lower())
         self.assertNotIn("docker run", text.lower())
 

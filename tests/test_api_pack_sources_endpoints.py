@@ -240,7 +240,7 @@ class TestAPIPackSourceEndpoints(unittest.TestCase):
         with open(audit_path, "r", encoding="utf-8") as handle:
             return [json.loads(line) for line in handle.read().splitlines() if line.strip()]
 
-    def test_pack_source_list_search_preview_and_install_handoff(self) -> None:
+    def test_pack_source_list_search_preview_has_no_remote_install_handoff(self) -> None:
         remote_url = "https://github.com/example/docs-skill/archive/main.zip"
         with open(self.catalog_path, "w", encoding="utf-8") as handle:
             json.dump(
@@ -307,9 +307,8 @@ class TestAPIPackSourceEndpoints(unittest.TestCase):
         self.assertEqual(before_preview_count, after_preview_count)
         self.assertFalse(preview_payload["preview"]["fetched"])
         self.assertIn("Nothing has been fetched yet.", preview_payload["preview"]["source_hints"])
-        handoff = preview_payload["preview"]["install_handoff"]
-        self.assertEqual(remote_url, handoff["source"])
-        self.assertEqual("github_archive", handoff["source_kind"])
+        self.assertIsNone(preview_payload["preview"]["install_handoff"])
+        self.assertIn("remote pack acquisition is unavailable", preview_payload["preview"]["summary"].lower())
 
         archive = _zip_bytes(
             {
@@ -322,7 +321,10 @@ class TestAPIPackSourceEndpoints(unittest.TestCase):
             opener=_FakeOpener({remote_url: _FakeResponse(archive, url=remote_url)}),
         )
         with mock.patch("agent.packs.external_ingestion.RemotePackFetcher", return_value=fake_fetcher):
-            install_status, install_payload = self._post("/packs/install/plan", handoff)
+            install_status, install_payload = self._post(
+                "/packs/install/plan",
+                {"source": remote_url, "source_kind": "github_archive", "source_id": "local-registry"},
+            )
 
         self.assertEqual(400, install_status)
         self.assertEqual("remote_pack_fetch_stage_unimplemented_denied", install_payload["error"])

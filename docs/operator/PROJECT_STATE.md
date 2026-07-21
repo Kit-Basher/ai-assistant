@@ -6,21 +6,30 @@ marketing copy and it is not a final release claim.
 ## Current Checkpoint
 
 - Version: `v0.2.5`
-- Audit baseline commit: `12723f56b2b2f24e6c6b2009f38bae59899619df`
+- Audit 3 baseline commit: `a324ff65d7614bcd7955306f35252302b4c6ece3`
 - Fresh Debian VM proof: not run
-- Release status: Recovery and Installation Audit v1 is complete; the fresh
-  Debian VM proof remains the final release gate
+- Release status: universal authorization is checkpointed within its documented
+  boundary; End-User Behavior and UX Audit 3 has completed its verification
+  checkpoint. Fresh Debian VM proof remains deferred.
 
-## Active Audit: Architecture and Safety Audit v2
+## Active Audit: End-User Behavior and UX Audit 3
 
-Audit v2 preserves the single Web/Telegram assistant path and closes a
-high-severity Executor Registry confirmation-boundary gap. Migrated execution
-requires an existing Universal Mutation Plan plus durable, scope-bound,
-single-use confirmation metadata; automatic Plan synthesis is removed. After
-v2E, the machine inventory records 94 public/reachable surfaces, including ten
-`legacy_unmigrated` and seven older domain-confirmed pack/search surfaces.
-Central authorization is not complete. See
-`docs/operator/ARCHITECTURE_SAFETY_AUDIT_V2E.md`.
+Audit 3 reconciles public claims and behavior with RuntimeTruthService and the
+v2F authorization inventory. Remote pack discovery is metadata-only, registered
+pack removal is supported, confirmations use plain language, indeterminate
+outcomes prohibit blind retry, SAFE/Controlled Mode wording is consistent, and
+Web chat gains explicit operation-state and accessibility semantics. See
+`docs/operator/END_USER_BEHAVIOR_UX_AUDIT_3.md` and the deterministic
+`END_USER_UX_INVENTORY_AUDIT_3.json`. This is not a release or fresh-VM
+acceptance claim.
+
+## Completed Audit: Architecture and Safety Audit v2
+
+Audit v2 preserves the single Web/Telegram assistant path and closes the
+Executor Registry confirmation boundary. After v2F, all inventoried public
+mutation surfaces have central-authorized or explicit-denial dispositions and
+legacy/unclassified counts are zero within the documented boundary. Process
+isolation from already-running trusted Python is not claimed.
 
 ## Active Audit: Recovery and Installation Audit v1
 

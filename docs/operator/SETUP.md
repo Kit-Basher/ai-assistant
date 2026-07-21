@@ -4,6 +4,12 @@ Canonical product/runtime source: `docs/product/PROJECT_INTENT.md`.
 This setup guide is the canonical install/runtime path document.
 Current checkpoint and proof status: `docs/operator/PROJECT_STATE.md`.
 
+First-run UX rule: explain setup through normal assistant language. SAFE MODE is
+the default; setup/status checks are read-only, while supported changes show a
+plain-language preview and require explicit confirmation. Controlled Mode is
+not unrestricted and does not make setup automatic. Catalog pack discovery is
+metadata-only; remote pack download is unavailable.
+
 Canonical first-run command:
 
 - `python -m agent setup`

@@ -31,10 +31,15 @@ Personal Agent can preview and apply a bounded SearXNG setup as the first
 managed local service:
 
 - `POST /search/setup/plan` returns a confirmation-gated plan.
-- `POST /search/setup/apply` requires the confirmation token before mutation.
+- `POST /search/setup/apply` consumes the durable, scoped approval associated
+  with the current preview before mutation.
 - User-provided setup accepts loopback SearXNG URLs only.
 - Managed container setup uses the approved `personal-agent-searxng` container
   and binds only to `127.0.0.1`.
+- The configured SearXNG image is currently tag-based. Preview/apply bind that
+  exact tag plus local image/container/config state, and local drift invalidates
+  approval. Upstream tag movement cannot be ruled out; immutable digest pinning
+  remains release hardening and is not claimed.
 - The first managed SearXNG install seeds and validates an owned minimal
   `settings.yml` before bind-mounting `/etc/searxng`. Empty config mounts and
   arbitrary settings content are rejected.
@@ -131,7 +136,10 @@ When approved/trusted external-pack catalogs have no candidate, pack acquisition
 - does not approve sources
 - does not trust GitHub or any other domain by name
 
-A lead can only point to a later source approval review. Source approval is still required before any future fetch/import path, and fetched content must still go through quarantine and review.
+A lead can only point to source/catalog metadata review. Source policy may permit
+metadata queries, but remote pack acquisition is unavailable. Any future fetch
+would require a new, separately authorized quarantine stage and content-bound
+review; current approval does not pre-authorize it.
 
 ## Status
 

@@ -11,7 +11,7 @@ test("ChatExperience pins the actual transcript container without scrollIntoView
   assert.match(chatExperience, /function scrollToBottom\(container\)/);
   assert.match(chatExperience, /container\.scrollTop = container\.scrollHeight/);
   assert.doesNotMatch(chatExperience, /\.scrollIntoView\s*\(/);
-  assert.match(chatExperience, /className="chat-transcript" onScroll=\{updateStickiness\} ref=\{transcriptRef\}/);
+  assert.match(chatExperience, /className="chat-transcript" onScroll=\{updateStickiness\} ref=\{transcriptRef\} role="log"/);
 });
 
 test("ChatExperience force-scrolls after user send and preserves passive reading", () => {
@@ -27,6 +27,16 @@ test("ChatExperience exposes busy and approval states without enabling duplicate
   assert.match(chatExperience, /disabled=\{chatBusy \|\| !draft\.trim\(\)\}/);
   assert.match(chatExperience, /disabled=\{disabled\} onClick=\{\(\) => onReply\(confirmation\.approveCommand\)\}/);
   assert.match(chatExperience, /disabled=\{disabled\} onClick=\{\(\) => onReply\(confirmation\.cancelCommand\)\}/);
+});
+
+test("ChatExperience uses one polite live log and explicit cancellation semantics", () => {
+  assert.match(chatExperience, /aria-live="polite" aria-relevant="additions"/);
+  assert.equal((chatExperience.match(/aria-live="polite"/g) || []).length, 1);
+  assert.doesNotMatch(chatExperience, /role="status"/);
+  assert.match(chatExperience, /aria-label="Cancel this proposed change"/);
+  assert.match(chatExperience, /Attachments are not available/);
+  assert.match(chatExperience, /Inspect metadata/);
+  assert.match(chatExperience, /remote pack download is unavailable/i);
 });
 
 test("App surfaces send failure and supports transcript export", () => {

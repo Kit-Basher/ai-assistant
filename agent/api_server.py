@@ -1289,7 +1289,7 @@ class AgentRuntime:
             return build_failure_recovery(
                 "pack_not_installed",
                 reason=why or message,
-                next_step=next_action or "Open the preview, then install it if you want to use it.",
+                next_step=next_action or "Inspect a local text-pack directory if you have one; remote acquisition is unavailable and catalog metadata cannot download it.",
             )
         if error_key in {"invalid_manifest", "invalid_metadata"} or kind_key in {"bad_request"}:
             return build_failure_recovery(
@@ -1325,7 +1325,13 @@ class AgentRuntime:
             return build_failure_recovery(
                 "confirm_downstream_failed",
                 reason=why or message,
-                next_step=next_action or "Fix the downstream blocker, then retry the plan.",
+                next_step=next_action or "Check the operation status first. Retry only if it says retry is safe.",
+            )
+        if error_key in {"indeterminate", "execution_indeterminate", "delivery_indeterminate"} or kind_key == "indeterminate":
+            return build_failure_recovery(
+                "execution_indeterminate",
+                reason=why or message,
+                next_step=next_action or "Do not repeat it blindly. Check current state and reconcile the operation.",
             )
         if error_key in {"confirm_plan_missing", "missing_pending_plan"} or kind_key in {"needs_clarification"}:
             return build_failure_recovery(
@@ -2319,8 +2325,8 @@ class AgentRuntime:
             return self._pack_error(
                 error="bad_request",
                 error_kind="bad_request",
-                message="pack source path or remote url is required",
-                next_question="Provide a local downloaded pack path or a supported remote https archive source.",
+                message="A local text-pack directory is required. Remote pack acquisition is unavailable.",
+                next_question="Provide a local text-pack directory to inspect, or continue with catalog metadata only.",
             )
         try:
             ingestor = ExternalPackIngestor(self.pack_store.external_storage_root())

@@ -129,7 +129,7 @@ class TestChatBehaviorAudit(unittest.TestCase):
             "what model am i using": ("model_status", ("model", "configured")),
             "is memory on": ("agent_memory", ("memory", "separate from system ram")),
             "why arent you working": ("runtime_status", ("chat target", "runtime")),
-            "what can you do": ("capability_policy", ("capability policy", "requires confirmation")),
+            "what can you do": ("capability_policy", ("preview-and-approval", "show a bounded preview")),
             "install a skill that lets you browse": ("action_tool", ("browser", "preview")),
             "fix yourself": ("runtime_status", ("diagnostics", "code changes")),
             "use the best local model": ("model_status", ("local", "model")),
@@ -358,9 +358,9 @@ class TestChatBehaviorAudit(unittest.TestCase):
         lowered = text.lower()
         self.assertEqual("assistant_capabilities", meta.get("route"))
         self.assertIn("safe web search", lowered)
-        self.assertIn("external skill acquisition", lowered)
-        self.assertIn("source approval", lowered)
-        self.assertIn("quarantine", lowered)
+        self.assertIn("skill-pack metadata", lowered)
+        self.assertIn("cannot download an arbitrary remote pack", lowered)
+        self.assertIn("local text pack", lowered)
 
     def test_resource_prompts_after_operational_status_route_to_operational_status(self) -> None:
         prompts = (

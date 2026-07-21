@@ -391,7 +391,11 @@ def normalize_available_pack_truth(source: dict[str, Any] | None, listing: dict[
                 or listing_row.get("policy_hint")
                 or "current policy blocks it"
             ),
-            "next_action": "Open the preview before installing." if installable else "Review the blocker before installing.",
+            "next_action": (
+                "Inspect the metadata, or provide a local text-pack directory for reviewed installation."
+                if installable
+                else "Review the blocker; catalog metadata cannot install this pack."
+            ),
             "badges": badges,
             "capabilities": tags or ([artifact_type] if artifact_type and artifact_type != "unknown" else []),
             "summary_label": "Available" if installable else "Blocked",

@@ -267,3 +267,13 @@ discoverability. Remote two-stage quarantine fetch, immutable SearXNG image
 digest resolution, notification indeterminate reconciliation UX, and stronger
 process/OS isolation remain explicit engineering roadmap items. Fresh-VM
 acceptance remains a later final-release gate, not Audit 3.
+
+## After Audit 3
+
+Checkpoint the reviewed UX diff and rerun the complete proof set without
+changing live services. The next release phase is fresh Debian VM acceptance:
+validate packaged first launch, Web keyboard/screen-reader basics, model/setup
+truth, restart continuity, backup/restore, and preserve-data uninstall. Keep
+remote pack acquisition unavailable, notification indeterminate reconciliation
+manual/unavailable, and SearXNG digest pinning as explicit blockers or release
+hardening until implemented and proven.

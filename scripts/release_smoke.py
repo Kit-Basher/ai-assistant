@@ -28,7 +28,7 @@ MAIN_TEST_NODES: tuple[str, ...] = (
     "tests/test_memory_hardening.py::TestMemoryHardening::test_memory_v2_selection_failure_degrades_clearly_without_breaking_chat",
     "tests/test_api_server.py::TestAPIServerRuntime::test_health_is_explicit_before_and_after_process_restart_with_deferred_warmup",
     "tests/test_doctor_cli.py::TestDoctorCLI::test_collect_diagnostics_writes_redacted_bundle_with_recovery_manifest",
-    "tests/test_api_pack_sources_endpoints.py::TestAPIPackSourceEndpoints::test_pack_source_list_search_preview_and_install_handoff",
+    "tests/test_api_pack_sources_endpoints.py::TestAPIPackSourceEndpoints::test_pack_source_list_search_preview_has_no_remote_install_handoff",
     "tests/test_api_pack_sources_endpoints.py::TestAPIPackSourceEndpoints::test_pack_source_policy_blocks_list_search_and_preview_consistently",
     "tests/test_api_packs_endpoints.py::TestAPIPacksEndpoints::test_install_native_code_pack_is_blocked_but_recorded",
 )

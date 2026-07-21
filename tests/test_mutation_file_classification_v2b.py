@@ -22,7 +22,7 @@ def test_mutation_file_inventory_is_exact_and_field_complete() -> None:
     payload = json.loads(audit.CLASSIFICATION_PATH.read_text(encoding="utf-8"))
     rows = payload["classifications"]
     indexed = {row["path"]: row for row in rows}
-    assert len(rows) == len(indexed) == payload["reviewed_count"] == 157
+    assert len(rows) == len(indexed) == payload["reviewed_count"] == 158
     assert set(indexed) == _detected_paths()
     for path, row in indexed.items():
         assert audit.REQUIRED_CLASSIFICATION_FIELDS == set(row)

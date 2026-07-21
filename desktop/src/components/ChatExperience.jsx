@@ -16,17 +16,19 @@ function ApprovalCard({ confirmation, disabled, onReply }) {
   if (!confirmation) return null;
 
   return (
-    <div className="inline-action-card">
+    <div aria-label="Proposed change awaiting approval" className="inline-action-card" role="group">
       <div className="inline-action-copy">
-        <p className="inline-action-eyebrow">Approval needed</p>
+        <p className="inline-action-eyebrow">{confirmation.statusLabel || "Waiting for your approval"}</p>
         <p className="inline-action-title">{confirmation.title}</p>
+        {confirmation.actionSummary ? <p className="inline-action-text">{confirmation.actionSummary}</p> : null}
         <p className="inline-action-text">{confirmation.description || "I will wait for your okay before continuing."}</p>
+        {confirmation.riskSummary ? <p className="inline-action-text">{confirmation.riskSummary}</p> : null}
       </div>
       <div className="inline-action-buttons">
-        <button className="button-primary" disabled={disabled} onClick={() => onReply(confirmation.approveCommand)} type="button">
+        <button aria-label={confirmation.approveLabel} className="button-primary" disabled={disabled} onClick={() => onReply(confirmation.approveCommand)} type="button">
           {confirmation.approveLabel}
         </button>
-        <button disabled={disabled} onClick={() => onReply(confirmation.cancelCommand)} type="button">
+        <button aria-label="Cancel this proposed change" disabled={disabled} onClick={() => onReply(confirmation.cancelCommand)} type="button">
           {confirmation.cancelLabel}
         </button>
       </div>
@@ -62,7 +64,7 @@ function CapabilityCard({ capability, disabled, onReply }) {
           <p className="inline-action-eyebrow">Capability rescue</p>
           <p className="inline-action-title">{capability.title}</p>
           <p className="inline-action-text">
-            Search is limited to approved pack sources. Preview is required before any import.
+            These are untrusted catalog descriptions only. Discovery is not installation, and remote pack download is unavailable.
           </p>
         </div>
         {capability.candidates.length > 0 ? (
@@ -92,7 +94,7 @@ function CapabilityCard({ capability, disabled, onReply }) {
         {capability.candidates.length > 0 ? (
           <div className="inline-action-buttons">
             <button className="button-primary" disabled={disabled} onClick={() => onReply(capability.previewCommand)} type="button">
-              Show preview
+              Inspect metadata
             </button>
             <button disabled={disabled} onClick={() => onReply(capability.cancelCommand)} type="button">
               Cancel
@@ -146,7 +148,7 @@ function MessageBubble({ busy, message, onReply }) {
 
   return (
     <div className={`chat-message-row ${message.role === "user" ? "chat-message-user" : "chat-message-assistant"}`}>
-      <div className={bubbleClass}>
+      <div aria-label={message.role === "user" ? "You" : `Assistant response: ${String(message.ui?.operationState || "complete").replaceAll("_", " ")}`} className={bubbleClass}>
         <p className="chat-message-copy">{message.content}</p>
         <ClarificationCard clarification={message.ui?.clarification} />
         <CapabilityCard capability={message.ui?.capability} disabled={busy} onReply={onReply} />
@@ -299,7 +301,7 @@ export default function ChatExperience({
               </div>
             </div>
           ) : (
-            <div className="chat-transcript" onScroll={updateStickiness} ref={transcriptRef}>
+            <div aria-label="Conversation" aria-live="polite" aria-relevant="additions" className="chat-transcript" onScroll={updateStickiness} ref={transcriptRef} role="log">
               {!status.ready ? <p className="chat-surface-note">{status.description}</p> : null}
               {messages.map((message, index) => (
                 <MessageBubble busy={chatBusy} key={`${message.role}-${index}-${message.content.slice(0, 24)}`} message={message} onReply={handleSendMessage} />
@@ -326,7 +328,7 @@ export default function ChatExperience({
               handleSendMessage();
             }}
           >
-            <button className="attachment-button" disabled type="button">
+            <button aria-label="Attachments are not available" className="attachment-button" disabled type="button">
               +
             </button>
             <textarea

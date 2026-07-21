@@ -2043,13 +2043,13 @@ class PackRegistryDiscoveryService:
         badges = self._badge_set(listing, related_local_pack=related_local_pack).badges
         artifact_type = str(listing.get("artifact_type_hint") or "unknown")
         if artifact_type == "portable_text_skill":
-            policy_hint = "This looks like a text-based skill pack and is likely compatible with safe import."
+            policy_hint = "This looks like a text-based skill pack, but metadata alone cannot establish compatibility or safety."
         elif artifact_type == "native_code_pack":
             policy_hint = "This appears to be a code or plugin package and would be blocked by current policy."
         elif artifact_type == "experience_pack":
             policy_hint = "This looks like an experience pack and is not currently importable as a safe local pack."
         else:
-            policy_hint = "This entry is incomplete or ambiguous, so I would treat it as unknown until fetched and classified."
+            policy_hint = "This entry is incomplete or ambiguous, so it remains unknown metadata."
         appears_to_do = str(listing.get("summary") or f"{listing.get('name')} from a discovery registry.").strip()
         source_hints = [
             "Registry metadata is untrusted.",
@@ -2065,28 +2065,18 @@ class PackRegistryDiscoveryService:
                 "likely_changed_upstream": self._listing_indicates_changed_upstream(listing, related_local_pack),
                 "message": (
                     "A local version of this pack already exists. To inspect whether it changed, "
-                    "fetch a new snapshot and compare it safely."
+                    "provide a separately obtained local snapshot and compare it safely."
                 ),
             }
         install_handoff: dict[str, Any] | None = None
-        if listing.get("source_url"):
-            source_kind_hint = str(listing.get("source_kind_hint") or "").strip().lower() or "generic_archive_url"
-            install_handoff = {
-                "source": str(listing.get("source_url") or ""),
-                "source_kind": source_kind_hint,
-                "source_id": source.id,
-            }
-            latest_ref_hint = str(listing.get("latest_ref_hint") or "").strip()
-            if latest_ref_hint:
-                install_handoff["ref"] = latest_ref_hint
         summary = (
-            "Read-only preview: metadata only for now. If you install it, I will fetch it into quarantine, "
-            "scan it, and normalize the snapshot before anything becomes usable. "
+            "Read-only preview: this is untrusted catalog metadata, not an install handoff. "
+            "Remote pack acquisition is unavailable; a local text-pack directory is required for reviewed ingestion. "
         )
         summary += policy_hint + " "
         if related_local_pack is not None:
             summary += "A local version exists, but identity is tied to content, not this listing. "
-        summary += "The fetched snapshot is what would be scanned and normalized."
+        summary += "No URL is opened and no remote snapshot is fetched by this preview."
         preview = RegistryPackPreview(
             source=source.to_dict(),
             listing=listing,
@@ -2113,7 +2103,6 @@ class PackRegistryDiscoveryService:
             install_handoff=install_handoff,
             choices=(
                 "preview details",
-                "fetch for inspection",
                 "compare with local version if available",
                 "ignore",
             ),

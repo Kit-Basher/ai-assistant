@@ -5,6 +5,12 @@ Date: 2026-06-20
 This audit describes the current Personal Agent memory surfaces before the
 fresh Debian VM proof. It is an operator map, not a release claim.
 
+Audit 3 UX rule: tell users whether information is only current conversation
+context or durably saved. Inferred/model-generated memory is advisory and cannot
+authorize promotion, correction, deletion, or reset. Destructive reset explains
+scope and rollback limits without repeating private content in Plan, receipt,
+ledger, log, error, or support output.
+
 ## Architecture
 
 Primary durable state lives in the SQLite database configured by `AGENT_DB_PATH`

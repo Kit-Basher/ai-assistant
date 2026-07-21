@@ -28,8 +28,11 @@ Every chat-native Plan Mode preview now exposes a canonical Plan object with:
 - `executor_id` for Universal Plan Mode migrated actions
 - `target_fingerprint` and `plan_fingerprint` for migrated actions
 
-The same fields are included in the user-visible preview text and in the
-structured chat payload. `executor_status` is important: `enabled` means a
+The structured payload retains these diagnostic/security fields. The ordinary
+user-visible preview instead derives a plain-language summary of what happens,
+what is created/changed/deleted, external effects, risk, rollback limits,
+expiry, and how to approve or cancel; capability/executor IDs and fingerprints
+are not primary UI copy. `executor_status` is important: `enabled` means a
 bounded apply path may exist through the executor registry, while
 `preview_only` means confirmation is still blocked from real execution and
 returns `executor_not_enabled` with `mutated=false`.
@@ -42,8 +45,9 @@ Missing, altered, cross-scope, expired, or replayed confirmation fails closed.
 The registry no longer synthesizes a Universal Mutation Plan for callers that
 omit one.
 
-Capability Policy v1 extends Plan Mode for representative migrated actions:
-package install, cleanup execution, system update, and system uninstall. The
+Capability Policy v1 extends Plan Mode across the inventoried supported public
+mutation boundary. Package install, cleanup execution, system update, and
+system uninstall remain representative examples. The
 confirmation is bound to capability id, policy version, Plan fingerprint,
 target fingerprint, executor id, expiry, and thread/session. A changed target,
 stale Plan, policy version change, or missing local uninstall activation fails

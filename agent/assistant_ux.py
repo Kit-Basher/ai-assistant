@@ -70,8 +70,9 @@ def build_user_facing_capability_answer(*, search_available: bool | None = None,
     text = (
         "I can help with everyday questions, project planning, coding, writing, research, "
         "and local checks on this machine. I can use connected tools for memory, files, "
-        "runtime status, safe web search, external skill acquisition suggestions with source approval "
-        "and quarantine review, and system inspection when they are available.\n\n"
+        "runtime status, safe web search, installed local text skills, and system inspection "
+        "when they are available. I can discover untrusted skill-pack metadata, but I cannot "
+        "download an arbitrary remote pack; installing a local text pack is a separate reviewed action.\n\n"
         f"{search_clause}\n\n"
         "For anything that changes files, sends messages, edits settings, or affects your system, "
         "I’ll explain the plan and ask before doing it.\n\n"
@@ -79,7 +80,10 @@ def build_user_facing_capability_answer(*, search_available: bool | None = None,
         f"{examples}"
     )
     if safe_mode:
-        text += "\n\nSafe mode is on, so background automation and remote fallback stay paused."
+        text += (
+            "\n\nSAFE MODE is the normal default. It keeps higher-risk remote, download, import, "
+            "and install actions blocked; supported local changes still get a clear preview and need your approval."
+        )
     return normalize_persona_text(text)
 
 

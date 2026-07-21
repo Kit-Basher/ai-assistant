@@ -143,9 +143,9 @@ class SourceApprovalController:
         registry_kind = _registry_kind_for_source_kind(source_kind)
         message = (
             f"Source approval preview for {title}. The source is still untrusted. "
-            "Approval only records explicit trust for this source id and allows a future fetch/preview into quarantine. "
+            "Approval only records that this source id may be queried for metadata under policy. "
             "GitHub or any other domain does not make the content safe. No pages were fetched, no archives were downloaded, and no pack was imported. "
-            "If you confirm, the next safe step is preview/fetch into quarantine."
+            "Remote pack acquisition is unavailable."
         )
         return SourceApprovalPreview(
             ok=True,
@@ -155,7 +155,7 @@ class SourceApprovalController:
             title=title,
             url=display_url,
             base_url=base_url,
-            fetch_allowed_after_approval=True,
+            fetch_allowed_after_approval=False,
             user_message=message,
             provenance=provenance,
         )
@@ -329,8 +329,8 @@ class SourceApprovalController:
         self._persist_managed_action_journal(journal, status="verified")
         message = (
             f"I recorded source approval for {source_id}. No pack was fetched, imported, installed, approved, enabled, or granted permissions. "
-            "The source content remains hostile and must still go through preview/fetch into quarantine, normalization, review, approval, enablement, and any required permissions before use. "
-            "Next safe step: preview/fetch into quarantine."
+            "The source content remains hostile. This approval permits metadata queries only; remote pack acquisition is unavailable. "
+            "Next safe step: inspect untrusted catalog metadata, or use a separately obtained local text-pack directory."
         )
         return SourceApprovalResult(
             ok=True,
@@ -447,7 +447,7 @@ def _approval_notes(*, source_kind: str, title: str, provenance: Any) -> str:
         "approved_by_user=true",
         f"remote_source_kind={source_kind}",
         "content_remains_hostile=true",
-        "approval permits future fetch/preview into quarantine only",
+        "approval permits metadata queries only; remote acquisition unavailable",
         "no content was fetched during source approval",
     ]
     if title:

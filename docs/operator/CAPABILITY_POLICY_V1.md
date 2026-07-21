@@ -5,15 +5,16 @@ Checkpoint truth:
 - Tag: `v0.2.2-executor-authorization-migration-v1`
 - Commit: `e5e097b48761d1218c218bca079933ce92ad3f5e`
 
-Capability Policy v1 is the first foundation checkpoint for centrally enforced
-assistant tool authorization. It does not migrate every executor. It defines the
-schema, registry, decision model, representative executor bindings, receipt
-metadata, and audit surface needed for the broader authorization roadmap.
+Capability Policy v1 began as the foundation checkpoint for centrally enforced
+assistant tool authorization. Audit v2F completed final dispositions for the
+inventoried mutation boundary: supported public mutations are central,
+registered internal writers are bounded, and unsupported operations are denied.
+This does not claim process isolation from malicious trusted in-process Python.
 
-Audit v2 qualification: this schema is authoritative for migrated
-capabilities, but it does not cover every public mutation surface. The current
-machine inventory explicitly identifies remaining `legacy_unmigrated` and
-`plan_gated_legacy` paths. Migrated executors receive `confirmed=true` only
+Audit v2 qualification: this schema is authoritative for inventoried supported
+capabilities. Current machine inventories report zero `legacy_unmigrated`,
+`plan_gated_legacy`, or unclassified mutation surfaces. Executors receive
+`confirmed=true` only
 after the Executor Registry validates an exact, scope-bound confirmation
 object; a caller-supplied boolean is not authorization.
 

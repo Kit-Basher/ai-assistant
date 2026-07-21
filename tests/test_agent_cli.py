@@ -521,7 +521,8 @@ class TestAgentCLI(unittest.TestCase):
         text = output.getvalue()
         self.assertIn("trace_id:", text)
         self.assertIn("component: agent.cli.health", text)
-        self.assertIn("next_action: run `agent doctor`", text)
+        self.assertIn("Next: run `agent doctor`", text)
+        self.assertIn("Diagnostic details (for support):", text)
 
     def test_health_subcommand_prefers_ready_embedded_llm_payload(self) -> None:
         output = io.StringIO()

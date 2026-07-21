@@ -1,5 +1,19 @@
 # Release Ledger
 
+## End-User Behavior and UX Audit 3 (checkpoint; no release)
+
+- Baseline: `a324ff65d7614bcd7955306f35252302b4c6ece3`.
+- Reconciled remote-pack acquisition, registered removal, mode, confirmation,
+  delivery, SearXNG image, and process-isolation claims with runtime truth.
+- Removed the remote install handoff from catalog preview and retained
+  metadata-only discovery plus reviewed local text-pack ingestion.
+- Added plain-language confirmation/recovery semantics, explicit indeterminate
+  handling, Web operation-state/accessibility markup, and deterministic claim
+  and journey evidence.
+- No service, Telegram connection, recovery artifact, release, or fresh VM was
+  touched. Packaged assistive-technology testing remains pending for fresh-VM
+  acceptance.
+
 ## Architecture and Safety Audit v2 (working tree; no release)
 
 - Baseline: `d911b9b95ce5df9b71cd9c78e28fa13e8767e79a`.

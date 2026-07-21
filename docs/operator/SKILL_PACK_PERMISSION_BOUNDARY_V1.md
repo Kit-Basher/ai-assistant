@@ -1,5 +1,11 @@
 # Skill-Pack Permission Boundary v1
 
+Audit 3 UX rule: present each permission first as its plain-language consequence
+(what the pack may read, change, contact, or send), with the exact technical
+scope available as detail. Installation, review approval, enablement, and
+permission grant remain separate; external packs start with zero permissions
+and cannot approve or grant themselves.
+
 Checkpoint truth:
 
 - Tag: `v0.2.2-communications-migration-v1`

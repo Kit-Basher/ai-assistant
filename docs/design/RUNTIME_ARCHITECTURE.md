@@ -10,6 +10,14 @@ selector, or execution path. See
 
 This document describes the current runtime architecture of Personal Agent.
 
+User-visible status and recovery semantics are shared too: RuntimeTruthService
+determines availability and mode; the canonical mutation Plan determines the
+meaning of approval; the durable transaction determines waiting, executing,
+succeeded, failed, or indeterminate truth. Web, CLI, and Telegram may format
+that truth differently but may not invent availability, treat Controlled Mode
+as automatic authority, or convert an indeterminate operation to success or
+failure. See `docs/operator/END_USER_BEHAVIOR_UX_AUDIT_3.md`.
+
 Source of truth is the code, not older handoff notes. The most relevant code
 paths are:
 

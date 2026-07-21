@@ -183,11 +183,22 @@ function extractConfirmationUi(text, payload) {
     return null;
   }
 
+  const setup = payload?.setup && typeof payload.setup === "object" ? payload.setup : {};
+  const plan = setup?.plan_mode && typeof setup.plan_mode === "object" ? setup.plan_mode : {};
+  const resources = plan?.resources && typeof plan.resources === "object" ? plan.resources : {};
+  const deleted = Array.isArray(resources.deleted) ? resources.deleted.length : 0;
+  const actionType = String(plan.action_type || "").replaceAll("_", " ").replaceAll(".", " ").trim();
+  const rollback = plan.rollback_supported === true
+    ? "A separately approved rollback may be available within the stated scope."
+    : "There is no automatic rollback; review the preview carefully.";
   const approveCommand = explicitMatch?.[1] || genericMatch?.[1] || "confirm";
   return {
-    title: "Approve this step?",
+    title: deleted > 0 ? "Review this destructive change" : "Review this change",
     description: text || "The agent needs your approval before it continues.",
-    approveLabel: "Approve",
+    actionSummary: actionType ? `Proposed action: ${actionType}.` : "Nothing changes until you approve.",
+    riskSummary: deleted > 0 ? `This will delete ${deleted} listed item${deleted === 1 ? "" : "s"}. ${rollback}` : rollback,
+    statusLabel: "Waiting for your approval",
+    approveLabel: deleted > 0 ? "Approve destructive change" : "Approve change",
     approveCommand,
     cancelLabel: "Cancel",
     cancelCommand: "cancel"
@@ -340,15 +351,17 @@ export function buildAssistantMessage(payload) {
   const clarification = confirmation ? null : extractClarificationUi(text, payload);
   const errorKind = String(payload?.error_kind || "").trim();
   const setupFailed = setup?.type === "provider_test_result" && setup?.ok === false;
+  const failed = setupFailed || Boolean(errorKind && errorKind !== "needs_clarification");
 
   return {
     role: "assistant",
     content: text,
-    tone: (!payload?.ok && errorKind && errorKind !== "needs_clarification") || setupFailed ? "error" : "default",
+    tone: failed ? "error" : "default",
     ui: {
       confirmation,
       clarification,
-      capability
+      capability,
+      operationState: confirmation ? "waiting_for_confirmation" : failed ? "failed" : "complete"
     }
   };
 }

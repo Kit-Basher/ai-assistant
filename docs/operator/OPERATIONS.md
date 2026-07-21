@@ -31,6 +31,13 @@ SAFE MODE is the clean-install baseline. Verify `control_mode.mode` is `safe`
 on `/ready`; a systemd drop-in is allowed as defense in depth but must not be
 required to turn a clean runtime from Controlled Mode into SAFE MODE.
 
+In user-facing language, SAFE MODE is the normal default, not an error state.
+Controlled Mode only makes eligible higher-risk previews available; it does not
+execute them and does not replace explicit confirmation. If an operation is
+`indeterminate`, do not repeat it: inspect current target/delivery state and the
+durable receipt first. Telegram disabled by choice is neutral and needs no
+recovery action.
+
 ## Quick Health Cadence
 
 ### After startup or deploy
@@ -408,10 +415,11 @@ Lifecycle truth:
 If search is missing, preview setup with:
 
 - `POST /search/setup/plan`
-- `POST /search/setup/apply` with the returned confirmation token
+- `POST /search/setup/apply` with the durable approval for that exact preview
 - `POST /search/setup/prerequisite/plan` for the narrow Podman prerequisite
   plan when Podman is missing
-- `POST /search/setup/prerequisite/apply` with the returned confirmation token
+- `POST /search/setup/prerequisite/apply` with the durable approval for that
+  exact prerequisite preview
 
 The managed setup path accepts only loopback SearXNG URLs or the approved local
 `personal-agent-searxng` container plan. It must not install Podman, Docker,

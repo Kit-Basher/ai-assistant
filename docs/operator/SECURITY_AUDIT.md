@@ -234,3 +234,15 @@ Scheduled notification sends persist redacted intent before transport I/O.
 Interrupted sends become indeterminate and cannot be automatically retried.
 Malicious Python already inside the trusted process remains outside this
 authorization threat boundary.
+
+## Audit 3 user-visible safety semantics
+
+Public copy now matches this boundary: source allowlisting permits untrusted
+metadata queries only, arbitrary remote pack acquisition is unavailable, and a
+registered pack removal is distinct from denied arbitrary deletion. Approval
+copy is derived from the canonical Plan but hides capability/executor IDs and
+fingerprints from the primary explanation. Indeterminate execution is not
+reported as success or failure and is not blindly retried. Controlled Mode is
+not described as unrestricted. Exactly-once notification delivery, immutable
+SearXNG image pinning, and process isolation from trusted in-process Python are
+not claimed.

@@ -45,8 +45,9 @@ class TestFailureRecoveryUx(unittest.TestCase):
         preview = build_failure_recovery("pack_available_previewable")
         self.assertEqual("pack_available_previewable", preview["kind"])
         self.assertEqual("Available", preview["state_label"])
-        self.assertIn("preview", preview["summary"].lower())
-        self.assertIn("install", preview["next_step"].lower())
+        self.assertIn("metadata", preview["summary"].lower())
+        self.assertIn("local text-pack", preview["next_step"].lower())
+        self.assertIn("remote acquisition is unavailable", preview["reason"].lower())
 
         unconfirmed = build_failure_recovery("pack_task_unconfirmed")
         self.assertEqual("pack_task_unconfirmed", unconfirmed["kind"])
@@ -154,7 +155,7 @@ class TestFailureRecoveryUx(unittest.TestCase):
             self.assertIn("preview", installed["Studio Voice"]["recovery"]["next_step"].lower())
 
             self.assertEqual("pack_available_previewable", available["Voice Preview"]["recovery"]["kind"])
-            self.assertIn("Open the preview", available["Voice Preview"]["recovery"]["next_step"])
+            self.assertIn("Inspect the metadata", available["Voice Preview"]["recovery"]["next_step"])
 
             self.assertEqual("pack_blocked", available["Voice Blocked"]["recovery"]["kind"])
             self.assertIn("blocked", available["Voice Blocked"]["recovery"]["reason"].lower())
@@ -182,12 +183,13 @@ class TestFailureRecoveryUx(unittest.TestCase):
             "confirm_plan_missing": "confirm_plan_missing",
             "confirm_token_mismatch": "confirm_token_mismatch",
             "confirm_downstream_failed": "confirm_downstream_failed",
+            "execution_indeterminate": "execution_indeterminate",
         }
         for error, expected_kind in cases.items():
             with self.subTest(error=error):
                 recovery = AgentRuntime._failure_recovery_for_error(
                     error=error,
-                    error_kind="needs_clarification",
+                    error_kind="indeterminate" if error == "execution_indeterminate" else "needs_clarification",
                     message="message",
                     next_action="Request a new preview.",
                     why="why",

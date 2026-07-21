@@ -15,11 +15,12 @@ class TestErrorMessageUX(unittest.TestCase):
         )
         lines = text.splitlines()
         self.assertEqual("❌ LLM provider unavailable", lines[0])
-        self.assertEqual("trace_id: abcd1234", lines[1])
-        self.assertEqual("component: llm_client", lines[2])
-        self.assertEqual("next_action: run `agent doctor`", lines[3])
+        self.assertEqual("I did not assume that the requested change succeeded.", lines[1])
+        self.assertEqual("Next: run `agent doctor`", lines[2])
+        self.assertEqual("Diagnostic details (for support):", lines[3])
+        self.assertEqual("trace_id: abcd1234", lines[4])
+        self.assertEqual("component: llm_client", lines[5])
 
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -22,8 +22,8 @@ For capability requests, the assistant must say what is missing and what the nex
 
 Allowed v1 outcomes:
 
-- trusted catalog candidate found: show preview before fetch/import.
-- remote source untrusted: stop at the source-trust gate and explain that approval is required before fetch/import.
+- trusted catalog candidate found: show untrusted metadata only; do not offer remote fetch/import.
+- remote source found: explain that remote acquisition is unavailable. Source policy may allow metadata queries only.
 - safe web-search leads found: show untrusted source leads only. Leads are not source approval, are not trusted, and cannot be fetched/imported until the separate source approval gate is completed.
 - source approval preview: advisory only in the assistant compatibility flow. Source catalog creation and query-policy changes are separate centrally authorized operations.
 - approved-source fetch confirmation: explicitly unavailable. Old approval/fetch confirmations cannot open a URL or import content.
@@ -37,7 +37,10 @@ Each confirmation advances one gate only. Repeated `yes` must not skip approval,
 
 ## Safety Boundaries
 
-Remote content remains hostile even when a source is approved. Source trust only permits preview/fetch into quarantine. Catalog metadata, archives, manifests, README, and `SKILL.md` content remain untrusted until normalized and reviewed.
+Remote content remains hostile even when a source is allowlisted. Source policy
+permits metadata queries only; it does not permit fetch into quarantine.
+Catalog metadata, archives, manifests, README, and `SKILL.md` content remain
+untrusted. A future fetch stage must be separately authorized and digest-bound.
 
 Safe web-search lead discovery is metadata-only. Result URLs, titles, snippets, and engine/source labels are untrusted search metadata. The assistant must not fetch result pages, download archives, call `/packs/install`, import packs, enable packs, or infer safety from GitHub or any other domain. Leads only point to the separate source approval gate.
 

@@ -1,5 +1,10 @@
 # Telegram Thin Adapter Plan
 
+Audit 3 status: Telegram remains optional and deliberately disabled. Direct
+status reports this neutrally and does not dominate unrelated assistant UX.
+No token, poller, message send, or live service change was used in Audit 3;
+semantic consistency is exercised through mocked transport paths only.
+
 Canonical target is defined in [PRODUCT_RUNTIME_SPEC.md](/home/c/personal-agent/PRODUCT_RUNTIME_SPEC.md).
 
 ## Objective
