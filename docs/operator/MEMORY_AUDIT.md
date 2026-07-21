@@ -151,3 +151,11 @@ Useful commands:
 
 Before sharing logs or bundles, run the existing redaction path and still review
 the output as sensitive local data.
+
+## Authorization update (Audit v2E)
+
+Explicit remember/forget, organization commands, graph/anchor/preference
+changes, and destructive reset now preview before mutation on shipping runtime
+paths. Retrieved memory and remembered instructions are untrusted context.
+Plans contain opaque content fingerprints; stale record/table state invalidates
+apply. Ordinary conversation-event persistence remains bounded bookkeeping.

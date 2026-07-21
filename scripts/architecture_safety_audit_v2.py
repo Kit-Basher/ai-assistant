@@ -55,6 +55,14 @@ DOMAIN_CENTRAL_AUTHORIZED = {
     "/modelops/execute",
     "/authorized/provider-model/preview",
     "/authorized/provider-model/apply",
+    "/done",
+    "/memory/reset",
+    "/semantic/documents/ingest",
+    "/semantic/rebuild",
+    "/semantic/repair",
+    "/llm/notifications/test",
+    "/llm/notifications/mark_read",
+    "/llm/notifications/prune",
 }
 
 CENTRAL_PLAN_APPLY = {
@@ -104,8 +112,8 @@ NON_API_SURFACES = [
     {
         "surface": "cli.legacy_builtin_skill_writes",
         "kind": "cli_command",
-        "status": "legacy_unmigrated",
-        "path": "AgentOrchestrator._call_skill (db:write/ops permissions)",
+        "status": "central_authorized",
+        "path": "AgentOrchestrator._call_skill -> v2E preview -> durable confirmation -> organization executor",
     },
     {
         "surface": "cli.secret_set",

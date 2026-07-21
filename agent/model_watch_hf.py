@@ -11,6 +11,9 @@ import tempfile
 import time
 from typing import Any, Iterable
 
+from agent.capability_policy import stable_fingerprint
+from agent.internal_writer_authority import perform_registered_internal_write
+
 
 _HF_STATE_SCHEMA_VERSION = 1
 _GGUF_RE = re.compile(r"\.gguf$", re.IGNORECASE)
@@ -171,9 +174,34 @@ def load_hf_watch_state(path: Path) -> dict[str, Any]:
     return _normalize_hf_state(parsed)
 
 
-def save_hf_watch_state(path: Path, state: dict[str, Any]) -> dict[str, Any]:
+def save_hf_watch_state(
+    path: Path,
+    state: dict[str, Any],
+    *,
+    internal_trigger: str | None = None,
+    operation_id: str | None = None,
+) -> dict[str, Any]:
     normalized = _normalize_hf_state(state)
-    return _write_json_atomic(path, normalized)
+    if internal_trigger is None:
+        return _write_json_atomic(path, normalized)
+    saved: dict[str, Any] | None = None
+
+    def _write() -> None:
+        nonlocal saved
+        saved = _write_json_atomic(path, normalized)
+
+    perform_registered_internal_write(
+        writer_id="model_watch_hf",
+        operation="persist_scan_state",
+        resource_type="hf_watch_state",
+        target_scope="state:model_watch_hf",
+        arguments={"state_hash": stable_fingerprint(normalized)},
+        callback=_write,
+        journal_path=path.with_name(f"{path.name}.internal-writer.sqlite3"),
+        trigger=internal_trigger,
+        operation_id=str(operation_id or f"hf-watch:{stable_fingerprint(normalized)}"),
+    )
+    return saved if saved is not None else load_hf_watch_state(path)
 
 
 def _load_hf_api() -> Any:
@@ -339,6 +367,7 @@ def scan_hf_watch(
     *,
     client: Any | None = None,
     now_epoch: int | None = None,
+    trigger: str = "manual",
 ) -> dict[str, Any]:
     path = hf_watch_state_path_for_runtime(runtime)
     state = load_hf_watch_state(path)
@@ -370,7 +399,7 @@ def scan_hf_watch(
         state["last_run_ts"] = now
         state["last_error"] = None
         state["discovered_count"] = 0
-        save_hf_watch_state(path, state)
+        save_hf_watch_state(path, state, internal_trigger="scheduler" if trigger == "scheduler" else None, operation_id=f"hf-watch:{now}:disabled")
         return {
             "ok": True,
             "enabled": False,
@@ -387,7 +416,7 @@ def scan_hf_watch(
         state["last_run_ts"] = now
         state["last_error"] = None
         state["discovered_count"] = 0
-        save_hf_watch_state(path, state)
+        save_hf_watch_state(path, state, internal_trigger="scheduler" if trigger == "scheduler" else None, operation_id=f"hf-watch:{now}:empty")
         return {
             "ok": True,
             "enabled": True,
@@ -496,7 +525,7 @@ def scan_hf_watch(
         state["last_run_ts"] = now
         state["last_error"] = None
         state["discovered_count"] = len(updates)
-        save_hf_watch_state(path, state)
+        save_hf_watch_state(path, state, internal_trigger="scheduler" if trigger == "scheduler" else None, operation_id=f"hf-watch:{now}:success")
 
         updates.sort(
             key=lambda item: (
@@ -520,7 +549,7 @@ def scan_hf_watch(
     except Exception as exc:
         state["last_run_ts"] = now
         state["last_error"] = str(exc.__class__.__name__)
-        save_hf_watch_state(path, state)
+        save_hf_watch_state(path, state, internal_trigger="scheduler" if trigger == "scheduler" else None, operation_id=f"hf-watch:{now}:failed")
         return {
             "ok": False,
             "enabled": True,
@@ -738,4 +767,3 @@ __all__ = [
     "save_hf_watch_state",
     "scan_hf_watch",
 ]
-

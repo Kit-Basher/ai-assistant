@@ -12,6 +12,7 @@ from agent.config import Config
 from agent.llm.providers.base import Provider
 from agent.llm.registry import DefaultsConfig, ModelConfig, ProviderConfig, Registry
 from agent.llm.types import EmbeddingResponse, Request, Response, Usage
+from agent.mutation_plan import build_mutation_confirmation
 from agent.semantic_memory.service import SemanticMemoryService
 from agent.semantic_memory.types import SemanticSourceKind
 
@@ -207,6 +208,24 @@ class TestAPIServerSemanticMemory(unittest.TestCase):
         finally:
             conn.close()
 
+    def _authorized_post(self, path: str, payload: dict[str, object]) -> tuple[_HandlerForTest, dict[str, object]]:
+        preview_handler = _HandlerForTest(self.runtime, path, payload)
+        preview_handler.do_POST()
+        self.assertEqual(200, preview_handler.status_code)
+        preview = json.loads(preview_handler.body.decode("utf-8"))
+        plan = preview["plan"]
+        apply_handler = _HandlerForTest(
+            self.runtime,
+            path,
+            {
+                **payload,
+                "mutation_plan": plan,
+                "confirmation": build_mutation_confirmation(plan, confirmation_id=f"semantic:{path}"),
+            },
+        )
+        apply_handler.do_POST()
+        return apply_handler, json.loads(apply_handler.body.decode("utf-8"))
+
     def test_semantic_status_surface_reports_recovery_state(self) -> None:
         handler = _HandlerForTest(self.runtime, "/semantic/status")
         handler.do_GET()
@@ -221,14 +240,10 @@ class TestAPIServerSemanticMemory(unittest.TestCase):
     def test_document_ingest_endpoint_accepts_file_path(self) -> None:
         doc_path = Path(self.tmpdir.name) / "guide.md"
         doc_path.write_text("cats document ingestion path", encoding="utf-8")
-        handler = _HandlerForTest(
-            self.runtime,
-            "/semantic/documents/ingest",
-            {"path": str(doc_path), "title": "Guide"},
+        handler, payload = self._authorized_post(
+            "/semantic/documents/ingest", {"path": str(doc_path), "title": "Guide"}
         )
-        handler.do_POST()
         self.assertEqual(200, handler.status_code)
-        payload = json.loads(handler.body.decode("utf-8"))
         self.assertTrue(payload["ok"])
         self.assertEqual(SemanticSourceKind.DOCUMENT.value, payload["source_kind"])
         self.assertTrue(self.runtime._semantic_memory_service.status().healthy)  # noqa: SLF001
@@ -236,27 +251,19 @@ class TestAPIServerSemanticMemory(unittest.TestCase):
     def test_rebuild_endpoint_repairs_partial_index(self) -> None:
         doc_path = Path(self.tmpdir.name) / "repair.md"
         doc_path.write_text("cats repair flow and provenance", encoding="utf-8")
-        ingest_handler = _HandlerForTest(
-            self.runtime,
-            "/semantic/documents/ingest",
-            {"path": str(doc_path), "title": "Repair"},
+        ingest_handler, ingest_payload = self._authorized_post(
+            "/semantic/documents/ingest", {"path": str(doc_path), "title": "Repair"}
         )
-        ingest_handler.do_POST()
-        ingest_payload = json.loads(ingest_handler.body.decode("utf-8"))
         source_id = str(ingest_payload["source_id"])
 
         self._delete_vectors_for_source(source_id)
         stale_status = self.runtime.semantic_memory_status()
         self.assertIn(stale_status["recovery"]["state"], {"index_state_mismatch", "partial_index"})
 
-        rebuild_handler = _HandlerForTest(
-            self.runtime,
-            "/semantic/rebuild",
-            {"scope": f"document:{doc_path}"},
+        rebuild_handler, rebuild_payload = self._authorized_post(
+            "/semantic/rebuild", {"scope": f"document:{doc_path}"}
         )
-        rebuild_handler.do_POST()
         self.assertEqual(200, rebuild_handler.status_code)
-        rebuild_payload = json.loads(rebuild_handler.body.decode("utf-8"))
         self.assertTrue(rebuild_payload["ok"])
         self.assertEqual("ready", rebuild_payload["status"])
         self.assertEqual(1, len(rebuild_payload["rebuilt_sources"]))
@@ -269,13 +276,9 @@ class TestAPIServerSemanticMemory(unittest.TestCase):
     def test_semantic_doctor_is_read_only_and_repair_requires_confirmation(self) -> None:
         doc_path = Path(self.tmpdir.name) / "doctor.md"
         doc_path.write_text("cats doctor repair flow", encoding="utf-8")
-        ingest_handler = _HandlerForTest(
-            self.runtime,
-            "/semantic/documents/ingest",
-            {"path": str(doc_path), "title": "Doctor"},
+        ingest_handler, ingest_payload = self._authorized_post(
+            "/semantic/documents/ingest", {"path": str(doc_path), "title": "Doctor"}
         )
-        ingest_handler.do_POST()
-        ingest_payload = json.loads(ingest_handler.body.decode("utf-8"))
         source_id = str(ingest_payload["source_id"])
         self._delete_vectors_for_source(source_id)
         before = self.semantic_service.store.stats()
@@ -290,13 +293,22 @@ class TestAPIServerSemanticMemory(unittest.TestCase):
 
         repair_preview = _HandlerForTest(self.runtime, "/semantic/repair", {"scope": f"document:{doc_path}"})
         repair_preview.do_POST()
-        self.assertEqual(400, repair_preview.status_code)
+        self.assertEqual(200, repair_preview.status_code)
         preview_payload = json.loads(repair_preview.body.decode("utf-8"))
         self.assertTrue(preview_payload["requires_confirmation"])
         self.assertFalse(preview_payload["mutated"])
         self.assertEqual(before, self.semantic_service.store.stats())
 
-        repair_apply = _HandlerForTest(self.runtime, "/semantic/repair", {"scope": f"document:{doc_path}", "confirm": True})
+        plan = preview_payload["plan"]
+        repair_apply = _HandlerForTest(
+            self.runtime,
+            "/semantic/repair",
+            {
+                "scope": f"document:{doc_path}",
+                "mutation_plan": plan,
+                "confirmation": build_mutation_confirmation(plan, confirmation_id="semantic-repair"),
+            },
+        )
         repair_apply.do_POST()
         self.assertEqual(200, repair_apply.status_code)
         repair_payload = json.loads(repair_apply.body.decode("utf-8"))

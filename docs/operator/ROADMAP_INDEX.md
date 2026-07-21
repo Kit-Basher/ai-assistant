@@ -252,3 +252,9 @@ security/release blocker; hostname validation alone is not complete SSRF
 protection. Audit v2E
 should migrate memory, project, task, reminder, and notification writes. Audit
 3 remains end-user behavior/UX, not fresh-VM acceptance.
+
+Audit v2E is implemented in the working tree. Audit v2F must close pack-source,
+pack-lifecycle, general-permission, managed-search compatibility, and remaining
+alias groups; it must also reserve scheduled notification delivery before
+transport I/O or explicitly deny retry after an uncertain outcome. Only then
+can universal authorization be reassessed. Audit 3 remains behavior/UX.

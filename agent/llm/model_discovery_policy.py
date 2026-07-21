@@ -6,6 +6,9 @@ from pathlib import Path
 import tempfile
 from typing import Any
 
+from agent.capability_policy import stable_fingerprint
+from agent.internal_writer_authority import perform_registered_internal_write
+
 
 _DISCOVERY_POLICY_SCHEMA_VERSION = 1
 _POLICY_STATUSES = {"known_good", "known_stale", "avoid"}
@@ -106,6 +109,34 @@ class ModelDiscoveryPolicyStore:
                 pass
         self.state = normalized
         return dict(self.state)
+
+    def persist_effective_policy_internal(
+        self,
+        document: dict[str, Any],
+        *,
+        operation_id: str,
+        trigger: str = "runtime",
+    ) -> dict[str, Any]:
+        """Bounded cache persistence; public policy edits must continue through v2D."""
+        normalized = normalize_model_discovery_policy(document)
+        saved: dict[str, Any] | None = None
+
+        def _write() -> None:
+            nonlocal saved
+            saved = self.save(normalized)
+
+        perform_registered_internal_write(
+            writer_id="llm_model_discovery_policy",
+            operation="persist_effective_policy",
+            resource_type="model_discovery_policy",
+            target_scope="state:model_discovery_policy",
+            arguments={"policy_hash": stable_fingerprint(normalized)},
+            callback=_write,
+            journal_path=self.path.with_name(f"{self.path.name}.internal-writer.sqlite3"),
+            trigger=trigger,
+            operation_id=operation_id,
+        )
+        return saved if saved is not None else dict(self.state)
 
     def list_entries(self) -> list[dict[str, Any]]:
         entries = self.state.get("entries") if isinstance(self.state.get("entries"), dict) else {}

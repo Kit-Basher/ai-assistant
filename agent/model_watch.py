@@ -11,6 +11,9 @@ import time
 from typing import Any
 import urllib.request
 
+from agent.capability_policy import stable_fingerprint
+from agent.internal_writer_authority import perform_registered_internal_write
+
 
 _SIZE_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*[bB]")
 _BATCH_STATUSES = frozenset({"new", "notified", "acked", "dismissed", "deferred"})
@@ -138,6 +141,27 @@ class ModelWatchStore:
             except OSError:
                 pass
         return normalized
+
+    def save_internal(self, state: dict[str, Any], *, operation_id: str, trigger: str = "scheduler") -> dict[str, Any]:
+        normalized = normalize_model_watch_state(state if isinstance(state, dict) else {})
+        saved: dict[str, Any] | None = None
+
+        def _write() -> None:
+            nonlocal saved
+            saved = self.save(normalized)
+
+        perform_registered_internal_write(
+            writer_id="model_watch",
+            operation="persist_watch_state",
+            resource_type="model_watch_state",
+            target_scope="state:model_watch",
+            arguments={"state_hash": stable_fingerprint(normalized)},
+            callback=_write,
+            journal_path=self.path.with_name(f"{self.path.name}.internal-writer.sqlite3"),
+            trigger=trigger,
+            operation_id=operation_id,
+        )
+        return saved if saved is not None else self.load()
 
 
 def default_provider_catalog_state_document() -> dict[str, Any]:

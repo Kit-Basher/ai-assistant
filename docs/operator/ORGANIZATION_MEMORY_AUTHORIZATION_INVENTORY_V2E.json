@@ -1,0 +1,1099 @@
+{
+  "assistant_commands": [
+    "anchor",
+    "anchors_reset",
+    "checkpoint",
+    "done",
+    "focus_node",
+    "focus_node_clear",
+    "graph_clear",
+    "graph_clone",
+    "graph_import",
+    "graph_pack_import",
+    "link",
+    "memory_policy_forget",
+    "memory_policy_store",
+    "node",
+    "node_alias",
+    "node_delete",
+    "node_rename",
+    "node_unalias",
+    "open_loop_add",
+    "open_loop_complete",
+    "prefs_reset",
+    "prefs_set",
+    "prefs_thread_reset",
+    "prefs_thread_set",
+    "project_mode",
+    "project_new",
+    "relation_add",
+    "relation_constraint_add",
+    "relation_constraint_remove",
+    "relation_mode",
+    "relation_remove",
+    "remember",
+    "remind",
+    "task_add",
+    "thread_label",
+    "thread_new",
+    "thread_unlabel"
+  ],
+  "bounded_internal_writers": [
+    {
+      "operation": "record_delivery",
+      "scope": "delivery metadata only",
+      "writer_id": "llm_notifications"
+    },
+    {
+      "operation": "persist_watch_state",
+      "scope": "scheduler state only",
+      "writer_id": "model_watch"
+    },
+    {
+      "operation": "persist_scan_state",
+      "scope": "scheduler scan state only",
+      "writer_id": "model_watch_hf"
+    },
+    {
+      "operation": "persist_effective_policy",
+      "scope": "effective-policy cache only",
+      "writer_id": "llm_model_discovery_policy"
+    }
+  ],
+  "central_authorized": [
+    {
+      "action_type": "memory.reset",
+      "capability_id": "memory.forget",
+      "disposition": "central_authorized",
+      "executor_id": "memory.reset.v1",
+      "operation": "memory.reset",
+      "rollback_available": false,
+      "surfaces": [
+        "POST /memory/reset"
+      ]
+    },
+    {
+      "action_type": "notification.mark_read",
+      "capability_id": "notification.mark_read",
+      "disposition": "central_authorized",
+      "executor_id": "notification.mark_read.v1",
+      "operation": "notification.mark_read",
+      "rollback_available": true,
+      "surfaces": [
+        "POST /llm/notifications/mark_read"
+      ]
+    },
+    {
+      "action_type": "notification.prune",
+      "capability_id": "notification.prune",
+      "disposition": "central_authorized",
+      "executor_id": "notification.prune.v1",
+      "operation": "notification.prune",
+      "rollback_available": false,
+      "surfaces": [
+        "POST /llm/notifications/prune"
+      ]
+    },
+    {
+      "action_type": "notification.test",
+      "capability_id": "notification.external.send",
+      "disposition": "central_authorized",
+      "executor_id": "notification.test.v1",
+      "operation": "notification.test",
+      "rollback_available": false,
+      "surfaces": [
+        "POST /llm/notifications/test"
+      ]
+    },
+    {
+      "action_type": "semantic.ingest",
+      "capability_id": "memory.semantic.manage",
+      "disposition": "central_authorized",
+      "executor_id": "semantic.ingest.v1",
+      "operation": "semantic.ingest",
+      "rollback_available": true,
+      "surfaces": [
+        "POST /semantic/documents/ingest"
+      ]
+    },
+    {
+      "action_type": "semantic.rebuild",
+      "capability_id": "memory.semantic.manage",
+      "disposition": "central_authorized",
+      "executor_id": "semantic.rebuild.v1",
+      "operation": "semantic.rebuild",
+      "rollback_available": false,
+      "surfaces": [
+        "POST /semantic/rebuild"
+      ]
+    },
+    {
+      "action_type": "semantic.repair",
+      "capability_id": "memory.semantic.manage",
+      "disposition": "central_authorized",
+      "executor_id": "semantic.repair.v1",
+      "operation": "semantic.repair",
+      "rollback_available": false,
+      "surfaces": [
+        "POST /semantic/repair"
+      ]
+    },
+    {
+      "action_type": "assistant.anchor",
+      "argument_schema": "nonempty_private_text",
+      "audit_description": "Create one thread anchor.",
+      "capability_id": "organization.thread.manage",
+      "command": "anchor",
+      "create_operation": true,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.anchor.v1",
+      "operation": "assistant.anchor",
+      "resource_types": [
+        "thread_anchor"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command anchor",
+        "Telegram thin-transport alias anchor",
+        "CLI/native command alias anchor"
+      ],
+      "target_tables": [
+        "thread_anchors"
+      ]
+    },
+    {
+      "action_type": "assistant.anchors_reset",
+      "argument_schema": "no_arguments",
+      "audit_description": "Clear anchors for one active thread.",
+      "capability_id": "organization.thread.manage",
+      "command": "anchors_reset",
+      "create_operation": false,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.anchors_reset.v1",
+      "operation": "assistant.anchors_reset",
+      "resource_types": [
+        "thread_anchor"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command anchors_reset",
+        "Telegram thin-transport alias anchors_reset",
+        "CLI/native command alias anchors_reset"
+      ],
+      "target_tables": [
+        "thread_anchors"
+      ]
+    },
+    {
+      "action_type": "assistant.checkpoint",
+      "argument_schema": "nonempty_private_text",
+      "audit_description": "Create one thread checkpoint.",
+      "capability_id": "organization.thread.manage",
+      "command": "checkpoint",
+      "create_operation": true,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.checkpoint.v1",
+      "operation": "assistant.checkpoint",
+      "resource_types": [
+        "thread_anchor"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command checkpoint",
+        "Telegram thin-transport alias checkpoint",
+        "CLI/native command alias checkpoint"
+      ],
+      "target_tables": [
+        "thread_anchors"
+      ]
+    },
+    {
+      "action_type": "assistant.done",
+      "argument_schema": "positive_task_id",
+      "audit_description": "Complete one exact task version.",
+      "capability_id": "organization.task.manage",
+      "command": "done",
+      "create_operation": false,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.done.v1",
+      "operation": "assistant.done",
+      "resource_types": [
+        "task"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command done",
+        "Telegram thin-transport alias done",
+        "CLI/native command alias done",
+        "POST /done"
+      ],
+      "target_tables": [
+        "tasks"
+      ]
+    },
+    {
+      "action_type": "assistant.focus_node",
+      "argument_schema": "one_nonempty_argument",
+      "audit_description": "Set one thread focus node.",
+      "capability_id": "organization.graph.manage",
+      "command": "focus_node",
+      "create_operation": false,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.focus_node.v1",
+      "operation": "assistant.focus_node",
+      "resource_types": [
+        "thread_focus",
+        "graph_node"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command focus_node",
+        "Telegram thin-transport alias focus_node",
+        "CLI/native command alias focus_node"
+      ],
+      "target_tables": [
+        "thread_focus",
+        "graph_nodes"
+      ]
+    },
+    {
+      "action_type": "assistant.focus_node_clear",
+      "argument_schema": "no_arguments",
+      "audit_description": "Clear one thread focus node.",
+      "capability_id": "organization.graph.manage",
+      "command": "focus_node_clear",
+      "create_operation": false,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.focus_node_clear.v1",
+      "operation": "assistant.focus_node_clear",
+      "resource_types": [
+        "thread_focus"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command focus_node_clear",
+        "Telegram thin-transport alias focus_node_clear",
+        "CLI/native command alias focus_node_clear"
+      ],
+      "target_tables": [
+        "thread_focus"
+      ]
+    },
+    {
+      "action_type": "assistant.graph_clear",
+      "argument_schema": "no_arguments",
+      "audit_description": "Clear the active thread graph.",
+      "capability_id": "organization.graph.manage",
+      "command": "graph_clear",
+      "create_operation": false,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.graph_clear.v1",
+      "operation": "assistant.graph_clear",
+      "resource_types": [
+        "graph"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command graph_clear",
+        "Telegram thin-transport alias graph_clear",
+        "CLI/native command alias graph_clear"
+      ],
+      "target_tables": [
+        "graph_nodes",
+        "graph_edges"
+      ]
+    },
+    {
+      "action_type": "assistant.graph_clone",
+      "argument_schema": "thread_id_optional_merge",
+      "audit_description": "Clone one graph into the active thread.",
+      "capability_id": "organization.graph.manage",
+      "command": "graph_clone",
+      "create_operation": false,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.graph_clone.v1",
+      "operation": "assistant.graph_clone",
+      "resource_types": [
+        "graph",
+        "thread"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command graph_clone",
+        "Telegram thin-transport alias graph_clone",
+        "CLI/native command alias graph_clone"
+      ],
+      "target_tables": [
+        "graph_nodes",
+        "graph_edges",
+        "graph_aliases",
+        "graph_relation_types",
+        "graph_relation_mode",
+        "graph_relation_constraints",
+        "thread_focus"
+      ]
+    },
+    {
+      "action_type": "assistant.graph_import",
+      "argument_schema": "bounded_graph_json",
+      "audit_description": "Import one bounded graph payload.",
+      "capability_id": "organization.graph.manage",
+      "command": "graph_import",
+      "create_operation": false,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.graph_import.v1",
+      "operation": "assistant.graph_import",
+      "resource_types": [
+        "graph"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command graph_import",
+        "Telegram thin-transport alias graph_import",
+        "CLI/native command alias graph_import"
+      ],
+      "target_tables": [
+        "graph_nodes",
+        "graph_edges",
+        "graph_aliases",
+        "graph_relation_types",
+        "graph_relation_mode",
+        "graph_relation_constraints",
+        "thread_focus"
+      ]
+    },
+    {
+      "action_type": "assistant.graph_pack_import",
+      "argument_schema": "bounded_graph_pack_json",
+      "audit_description": "Import one bounded graph pack payload.",
+      "capability_id": "organization.graph.manage",
+      "command": "graph_pack_import",
+      "create_operation": false,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.graph_pack_import.v1",
+      "operation": "assistant.graph_pack_import",
+      "resource_types": [
+        "graph"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command graph_pack_import",
+        "Telegram thin-transport alias graph_pack_import",
+        "CLI/native command alias graph_pack_import"
+      ],
+      "target_tables": [
+        "graph_nodes",
+        "graph_edges",
+        "graph_aliases",
+        "graph_relation_types",
+        "graph_relation_mode",
+        "graph_relation_constraints",
+        "thread_focus"
+      ]
+    },
+    {
+      "action_type": "assistant.link",
+      "argument_schema": "exactly_three_shell_tokens",
+      "audit_description": "Create one graph edge.",
+      "capability_id": "organization.graph.manage",
+      "command": "link",
+      "create_operation": true,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.link.v1",
+      "operation": "assistant.link",
+      "resource_types": [
+        "graph_edge",
+        "graph_node"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command link",
+        "Telegram thin-transport alias link",
+        "CLI/native command alias link"
+      ],
+      "target_tables": [
+        "graph_nodes",
+        "graph_edges"
+      ]
+    },
+    {
+      "action_type": "assistant.memory_policy_forget",
+      "argument_schema": "inferred_memory_forget",
+      "audit_description": "Forget one explicitly classified memory policy value.",
+      "capability_id": "memory.store",
+      "command": "memory_policy_forget",
+      "create_operation": false,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.memory_policy_forget.v1",
+      "operation": "assistant.memory_policy_forget",
+      "resource_types": [
+        "saved_memory_policy"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command memory_policy_forget",
+        "Telegram thin-transport alias memory_policy_forget",
+        "CLI/native command alias memory_policy_forget"
+      ],
+      "target_tables": [
+        "user_prefs"
+      ]
+    },
+    {
+      "action_type": "assistant.memory_policy_store",
+      "argument_schema": "inferred_memory_store",
+      "audit_description": "Store one explicitly classified memory policy value.",
+      "capability_id": "memory.store",
+      "command": "memory_policy_store",
+      "create_operation": false,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.memory_policy_store.v1",
+      "operation": "assistant.memory_policy_store",
+      "resource_types": [
+        "saved_memory_policy"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command memory_policy_store",
+        "Telegram thin-transport alias memory_policy_store",
+        "CLI/native command alias memory_policy_store"
+      ],
+      "target_tables": [
+        "user_prefs"
+      ]
+    },
+    {
+      "action_type": "assistant.node",
+      "argument_schema": "at_least_two_shell_tokens",
+      "audit_description": "Create one graph node.",
+      "capability_id": "organization.graph.manage",
+      "command": "node",
+      "create_operation": true,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.node.v1",
+      "operation": "assistant.node",
+      "resource_types": [
+        "graph_node"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command node",
+        "Telegram thin-transport alias node",
+        "CLI/native command alias node"
+      ],
+      "target_tables": [
+        "graph_nodes"
+      ]
+    },
+    {
+      "action_type": "assistant.node_alias",
+      "argument_schema": "exactly_two_shell_tokens",
+      "audit_description": "Add one graph-node alias.",
+      "capability_id": "organization.graph.manage",
+      "command": "node_alias",
+      "create_operation": true,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.node_alias.v1",
+      "operation": "assistant.node_alias",
+      "resource_types": [
+        "graph_node_alias"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command node_alias",
+        "Telegram thin-transport alias node_alias",
+        "CLI/native command alias node_alias"
+      ],
+      "target_tables": [
+        "graph_aliases"
+      ]
+    },
+    {
+      "action_type": "assistant.node_delete",
+      "argument_schema": "one_nonempty_argument",
+      "audit_description": "Delete one graph node and bounded incident edges.",
+      "capability_id": "organization.graph.manage",
+      "command": "node_delete",
+      "create_operation": false,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.node_delete.v1",
+      "operation": "assistant.node_delete",
+      "resource_types": [
+        "graph_node",
+        "graph_edge"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command node_delete",
+        "Telegram thin-transport alias node_delete",
+        "CLI/native command alias node_delete"
+      ],
+      "target_tables": [
+        "graph_nodes",
+        "graph_edges"
+      ]
+    },
+    {
+      "action_type": "assistant.node_rename",
+      "argument_schema": "at_least_two_shell_tokens",
+      "audit_description": "Rename one graph node.",
+      "capability_id": "organization.graph.manage",
+      "command": "node_rename",
+      "create_operation": false,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.node_rename.v1",
+      "operation": "assistant.node_rename",
+      "resource_types": [
+        "graph_node"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command node_rename",
+        "Telegram thin-transport alias node_rename",
+        "CLI/native command alias node_rename"
+      ],
+      "target_tables": [
+        "graph_nodes"
+      ]
+    },
+    {
+      "action_type": "assistant.node_unalias",
+      "argument_schema": "one_nonempty_argument",
+      "audit_description": "Remove one graph-node alias.",
+      "capability_id": "organization.graph.manage",
+      "command": "node_unalias",
+      "create_operation": false,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.node_unalias.v1",
+      "operation": "assistant.node_unalias",
+      "resource_types": [
+        "graph_node_alias"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command node_unalias",
+        "Telegram thin-transport alias node_unalias",
+        "CLI/native command alias node_unalias"
+      ],
+      "target_tables": [
+        "graph_aliases"
+      ]
+    },
+    {
+      "action_type": "assistant.open_loop_add",
+      "argument_schema": "inferred_open_loop_add",
+      "audit_description": "Create one open loop.",
+      "capability_id": "organization.task.manage",
+      "command": "open_loop_add",
+      "create_operation": true,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.open_loop_add.v1",
+      "operation": "assistant.open_loop_add",
+      "resource_types": [
+        "open_loop"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command open_loop_add",
+        "Telegram thin-transport alias open_loop_add",
+        "CLI/native command alias open_loop_add"
+      ],
+      "target_tables": [
+        "open_loops"
+      ]
+    },
+    {
+      "action_type": "assistant.open_loop_complete",
+      "argument_schema": "inferred_open_loop_complete",
+      "audit_description": "Complete one exact open loop.",
+      "capability_id": "organization.task.manage",
+      "command": "open_loop_complete",
+      "create_operation": false,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.open_loop_complete.v1",
+      "operation": "assistant.open_loop_complete",
+      "resource_types": [
+        "open_loop"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command open_loop_complete",
+        "Telegram thin-transport alias open_loop_complete",
+        "CLI/native command alias open_loop_complete"
+      ],
+      "target_tables": [
+        "open_loops"
+      ]
+    },
+    {
+      "action_type": "assistant.prefs_reset",
+      "argument_schema": "no_arguments",
+      "audit_description": "Reset allowlisted global preferences.",
+      "capability_id": "organization.preference.manage",
+      "command": "prefs_reset",
+      "create_operation": false,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.prefs_reset.v1",
+      "operation": "assistant.prefs_reset",
+      "resource_types": [
+        "preference"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command prefs_reset",
+        "Telegram thin-transport alias prefs_reset",
+        "CLI/native command alias prefs_reset"
+      ],
+      "target_tables": [
+        "preferences"
+      ]
+    },
+    {
+      "action_type": "assistant.prefs_set",
+      "argument_schema": "preference_toggle",
+      "audit_description": "Set one allowlisted global preference.",
+      "capability_id": "organization.preference.manage",
+      "command": "prefs_set",
+      "create_operation": false,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.prefs_set.v1",
+      "operation": "assistant.prefs_set",
+      "resource_types": [
+        "preference"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command prefs_set",
+        "Telegram thin-transport alias prefs_set",
+        "CLI/native command alias prefs_set"
+      ],
+      "target_tables": [
+        "preferences"
+      ]
+    },
+    {
+      "action_type": "assistant.prefs_thread_reset",
+      "argument_schema": "no_arguments",
+      "audit_description": "Reset allowlisted preferences for one thread.",
+      "capability_id": "organization.preference.manage",
+      "command": "prefs_thread_reset",
+      "create_operation": false,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.prefs_thread_reset.v1",
+      "operation": "assistant.prefs_thread_reset",
+      "resource_types": [
+        "thread_preference"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command prefs_thread_reset",
+        "Telegram thin-transport alias prefs_thread_reset",
+        "CLI/native command alias prefs_thread_reset"
+      ],
+      "target_tables": [
+        "thread_prefs"
+      ]
+    },
+    {
+      "action_type": "assistant.prefs_thread_set",
+      "argument_schema": "preference_toggle",
+      "audit_description": "Set one allowlisted thread preference.",
+      "capability_id": "organization.preference.manage",
+      "command": "prefs_thread_set",
+      "create_operation": false,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.prefs_thread_set.v1",
+      "operation": "assistant.prefs_thread_set",
+      "resource_types": [
+        "thread_preference"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command prefs_thread_set",
+        "Telegram thin-transport alias prefs_thread_set",
+        "CLI/native command alias prefs_thread_set"
+      ],
+      "target_tables": [
+        "thread_prefs"
+      ]
+    },
+    {
+      "action_type": "assistant.project_mode",
+      "argument_schema": "on_or_off",
+      "audit_description": "Set project mode for one thread.",
+      "capability_id": "organization.preference.manage",
+      "command": "project_mode",
+      "create_operation": false,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.project_mode.v1",
+      "operation": "assistant.project_mode",
+      "resource_types": [
+        "thread_preference"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command project_mode",
+        "Telegram thin-transport alias project_mode",
+        "CLI/native command alias project_mode"
+      ],
+      "target_tables": [
+        "thread_prefs"
+      ]
+    },
+    {
+      "action_type": "assistant.project_new",
+      "argument_schema": "project_name_optional_pitch",
+      "audit_description": "Create one project.",
+      "capability_id": "organization.project.manage",
+      "command": "project_new",
+      "create_operation": true,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.project_new.v1",
+      "operation": "assistant.project_new",
+      "resource_types": [
+        "project"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command project_new",
+        "Telegram thin-transport alias project_new",
+        "CLI/native command alias project_new"
+      ],
+      "target_tables": [
+        "projects"
+      ]
+    },
+    {
+      "action_type": "assistant.relation_add",
+      "argument_schema": "one_nonempty_argument",
+      "audit_description": "Add one graph relation type.",
+      "capability_id": "organization.graph.manage",
+      "command": "relation_add",
+      "create_operation": true,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.relation_add.v1",
+      "operation": "assistant.relation_add",
+      "resource_types": [
+        "graph_relation"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command relation_add",
+        "Telegram thin-transport alias relation_add",
+        "CLI/native command alias relation_add"
+      ],
+      "target_tables": [
+        "graph_relation_types"
+      ]
+    },
+    {
+      "action_type": "assistant.relation_constraint_add",
+      "argument_schema": "relation_acyclic_pair",
+      "audit_description": "Add one acyclic graph constraint.",
+      "capability_id": "organization.graph.manage",
+      "command": "relation_constraint_add",
+      "create_operation": true,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.relation_constraint_add.v1",
+      "operation": "assistant.relation_constraint_add",
+      "resource_types": [
+        "graph_constraint"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command relation_constraint_add",
+        "Telegram thin-transport alias relation_constraint_add",
+        "CLI/native command alias relation_constraint_add"
+      ],
+      "target_tables": [
+        "graph_relation_constraints"
+      ]
+    },
+    {
+      "action_type": "assistant.relation_constraint_remove",
+      "argument_schema": "relation_acyclic_pair",
+      "audit_description": "Remove one acyclic graph constraint.",
+      "capability_id": "organization.graph.manage",
+      "command": "relation_constraint_remove",
+      "create_operation": false,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.relation_constraint_remove.v1",
+      "operation": "assistant.relation_constraint_remove",
+      "resource_types": [
+        "graph_constraint"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command relation_constraint_remove",
+        "Telegram thin-transport alias relation_constraint_remove",
+        "CLI/native command alias relation_constraint_remove"
+      ],
+      "target_tables": [
+        "graph_relation_constraints"
+      ]
+    },
+    {
+      "action_type": "assistant.relation_mode",
+      "argument_schema": "strict_or_open",
+      "audit_description": "Set graph relation policy for one thread.",
+      "capability_id": "organization.graph.manage",
+      "command": "relation_mode",
+      "create_operation": false,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.relation_mode.v1",
+      "operation": "assistant.relation_mode",
+      "resource_types": [
+        "graph_policy"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command relation_mode",
+        "Telegram thin-transport alias relation_mode",
+        "CLI/native command alias relation_mode"
+      ],
+      "target_tables": [
+        "graph_relation_mode"
+      ]
+    },
+    {
+      "action_type": "assistant.relation_remove",
+      "argument_schema": "one_nonempty_argument",
+      "audit_description": "Remove one graph relation type.",
+      "capability_id": "organization.graph.manage",
+      "command": "relation_remove",
+      "create_operation": false,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.relation_remove.v1",
+      "operation": "assistant.relation_remove",
+      "resource_types": [
+        "graph_relation"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command relation_remove",
+        "Telegram thin-transport alias relation_remove",
+        "CLI/native command alias relation_remove"
+      ],
+      "target_tables": [
+        "graph_relation_types",
+        "graph_edges"
+      ]
+    },
+    {
+      "action_type": "assistant.remember",
+      "argument_schema": "nonempty_private_text",
+      "audit_description": "Store one explicit user note.",
+      "capability_id": "memory.store",
+      "command": "remember",
+      "create_operation": true,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.remember.v1",
+      "operation": "assistant.remember",
+      "resource_types": [
+        "note"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command remember",
+        "Telegram thin-transport alias remember",
+        "CLI/native command alias remember"
+      ],
+      "target_tables": [
+        "notes"
+      ]
+    },
+    {
+      "action_type": "assistant.remind",
+      "argument_schema": "reminder_time_pipe_text",
+      "audit_description": "Create one reminder.",
+      "capability_id": "organization.reminder.manage",
+      "command": "remind",
+      "create_operation": true,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.remind.v1",
+      "operation": "assistant.remind",
+      "resource_types": [
+        "reminder"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command remind",
+        "Telegram thin-transport alias remind",
+        "CLI/native command alias remind"
+      ],
+      "target_tables": [
+        "reminders"
+      ]
+    },
+    {
+      "action_type": "assistant.task_add",
+      "argument_schema": "task_title_or_project_pipe",
+      "audit_description": "Create one task, optionally linked to one project.",
+      "capability_id": "organization.task.manage",
+      "command": "task_add",
+      "create_operation": true,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.task_add.v1",
+      "operation": "assistant.task_add",
+      "resource_types": [
+        "task",
+        "project"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command task_add",
+        "Telegram thin-transport alias task_add",
+        "CLI/native command alias task_add"
+      ],
+      "target_tables": [
+        "tasks",
+        "projects"
+      ]
+    },
+    {
+      "action_type": "assistant.thread_label",
+      "argument_schema": "nonempty_private_text",
+      "audit_description": "Set one active-thread label.",
+      "capability_id": "organization.thread.manage",
+      "command": "thread_label",
+      "create_operation": false,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.thread_label.v1",
+      "operation": "assistant.thread_label",
+      "resource_types": [
+        "thread_label"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command thread_label",
+        "Telegram thin-transport alias thread_label",
+        "CLI/native command alias thread_label"
+      ],
+      "target_tables": [
+        "thread_labels"
+      ]
+    },
+    {
+      "action_type": "assistant.thread_new",
+      "argument_schema": "nonempty_private_text",
+      "audit_description": "Create one thread with bounded initial metadata.",
+      "capability_id": "organization.thread.manage",
+      "command": "thread_new",
+      "create_operation": true,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.thread_new.v1",
+      "operation": "assistant.thread_new",
+      "resource_types": [
+        "thread",
+        "thread_preferences",
+        "thread_anchor"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command thread_new",
+        "Telegram thin-transport alias thread_new",
+        "CLI/native command alias thread_new"
+      ],
+      "target_tables": [
+        "thread_labels",
+        "thread_prefs",
+        "thread_anchors"
+      ]
+    },
+    {
+      "action_type": "assistant.thread_unlabel",
+      "argument_schema": "no_arguments",
+      "audit_description": "Clear one active-thread label.",
+      "capability_id": "organization.thread.manage",
+      "command": "thread_unlabel",
+      "create_operation": false,
+      "disposition": "central_authorized",
+      "executor_id": "assistant.thread_unlabel.v1",
+      "operation": "assistant.thread_unlabel",
+      "resource_types": [
+        "thread_label"
+      ],
+      "rollback_available": false,
+      "rollback_hint": "No automatic rollback is available; any supported inverse requires a new scoped Plan.",
+      "surfaces": [
+        "assistant command thread_unlabel",
+        "Telegram thin-transport alias thread_unlabel",
+        "CLI/native command alias thread_unlabel"
+      ],
+      "target_tables": [
+        "thread_labels"
+      ]
+    }
+  ],
+  "deferred_v2f": [
+    "pack sources",
+    "pack lifecycle",
+    "pack permissions",
+    "search setup compatibility cleanup"
+  ],
+  "read_only": [
+    "GET /memory/status",
+    "POST /semantic/doctor",
+    "GET /llm/notifications",
+    "GET /llm/notifications/status",
+    "GET /llm/notifications/policy",
+    "assistant list/search/status/recall commands"
+  ],
+  "schema": "personal-agent.organization-memory-authorization-inventory.v2e",
+  "source_checkpoint": "35d9a91eb2bac763cbeda4bb49ba81875a3c873f",
+  "summary": {
+    "assistant_commands": 37,
+    "central_operations": 44,
+    "denied_groups": 5,
+    "internal_writers": 4,
+    "public_aliases": 119,
+    "read_only_groups": 6
+  },
+  "unimplemented_denied": [
+    "notification.retry_or_resend (no public surface; denied)",
+    "notification.delivery_policy_write (no public surface; denied)",
+    "semantic.remote_url_ingest (not implemented)",
+    "semantic.executable_or_macro_ingest (denied)",
+    "memory plaintext in Plan/receipt/journal (denied)"
+  ],
+  "validation": {
+    "missing_aliases": [],
+    "stale_aliases": []
+  }
+}

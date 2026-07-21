@@ -407,3 +407,17 @@ proof as mandatory:
   and the Telegram direct recovery helper. Confirmed assistant and Telegram
   mutations now reuse the durable provider/model authorization service; missing
   adapters and bare confirmations fail closed.
+
+## 2026-07-20 — Audit v2E working tree (unreleased)
+
+- Centralized 37 command-specific assistant operations plus seven memory,
+  semantic, and notification operations. The compatibility resolver has no
+  broad capability or executor.
+- Added opaque private-content binding, stale task/document rejection,
+  descriptor-based semantic TOCTOU containment, durable create idempotency,
+  and registered mixed-writer persistence leaves.
+- Reduced `legacy_unmigrated` from 19 to ten. No commit, tag, release, service
+  change, Telegram enablement, recovery-artifact change, or fresh-VM run.
+- Verification: 632 focused domain/security tests and 74 release-smoke tests
+  passed; capability, Plan, internal-writer, adversarial, transaction, and pack
+  proofs passed; full pytest finished at 2,563 passed and 22 named skips.

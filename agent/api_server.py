@@ -31,6 +31,7 @@ import urllib.request
 from agent.config import Config, default_registry_root_path, load_config, packaged_asset_root_path, runtime_instance
 from agent.capability_policy import TrustedInvocationContext
 from agent.chat_response_serializer import serialize_orchestrator_chat_response
+from agent.commands import parse_command
 from agent.error_kind import classify_error_kind
 from agent.error_response_ux import (
     bad_request_next_question,
@@ -91,6 +92,7 @@ from agent.skill_governance_store import SkillGovernanceStore
 from agent.version import read_build_info, read_git_commit, read_packaged_build_info, read_version
 from agent.runtime_truth_service import RuntimeTruthService
 from agent.provider_model_authorization import ProviderModelAuthorizationService
+from agent.organization_memory_authorization import MUTATING_ASSISTANT_COMMANDS, OrganizationMemoryAuthorizationService
 from agent.runtime_lifecycle import RuntimeLifecyclePhase, derive_runtime_lifecycle_phase
 from agent.runtime_events import RuntimeEventRecorder
 from agent.runtime_contract import (
@@ -798,6 +800,10 @@ class AgentRuntime:
         self._llm_fixit_store = LLMFixitWizardStore(path=llm_fixit_state_path)
         self._runtime_truth_service = RuntimeTruthService(self)
         self._provider_model_authorization = ProviderModelAuthorizationService(
+            self,
+            state_root=Path(self.config.db_path).expanduser().resolve().parent,
+        )
+        self._organization_memory_authorization = OrganizationMemoryAuthorizationService(
             self,
             state_root=Path(self.config.db_path).expanduser().resolve().parent,
         )
@@ -9618,6 +9624,39 @@ class AgentRuntime:
         """Route one public provider/model/setup write through the central stack."""
         return self._provider_model_authorization.route(operation, dict(payload or {}))
 
+    def route_organization_memory_mutation(
+        self,
+        operation: str,
+        payload: dict[str, Any] | None = None,
+    ) -> tuple[bool, dict[str, Any]]:
+        """Route a v2E user mutation through durable central authorization."""
+        return self._organization_memory_authorization.route(operation, dict(payload or {}))
+
+    def execute_authorized_assistant_mutation(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        """Executor-only bridge back into the one canonical assistant command path."""
+        command = str(payload.get("command") or "").strip().lower()
+        text = str(payload.get("private_content") or "").strip()
+        user_id = str(payload.get("user_id") or "").strip()
+        thread_id = str(payload.get("thread_id") or "").strip()
+        if not command or not text or not user_id:
+            return False, {"ok": False, "error": "authorized_assistant_mutation_payload_invalid", "mutated": False}
+        parsed = parse_command(text)
+        inferred_commands = {"memory_policy_store", "memory_policy_forget", "open_loop_add", "open_loop_complete"}
+        if command not in MUTATING_ASSISTANT_COMMANDS or (
+            command not in inferred_commands
+            and (parsed is None or str(parsed.name or "").strip().lower() != command)
+        ):
+            return False, {"ok": False, "error": "authorized_assistant_mutation_command_mismatch", "mutated": False}
+        with self._orchestrator_lock:
+            response = self._ensure_chat_runtime_bootstrapped().execute_authorized_organization_mutation(
+                text=text,
+                user_id=user_id,
+                thread_id=thread_id,
+            )
+        data = dict(response.data) if isinstance(response.data, dict) else {}
+        ok = bool(data.get("ok", True))
+        return ok, {"ok": ok, "message": str(response.text or "Mutation completed."), "result": redact_audit_value(data)}
+
     def _record_memory_issue(
         self,
         *,
@@ -14346,7 +14385,13 @@ class AgentRuntime:
             reason=sanitize_notification_text(reason),
             error_kind=error_kind,
         )
-        _saved_state, append_verified = self._notification_store.append_verified(
+        internal_delivery_bookkeeping = str(trigger or "").strip().lower() == "scheduler"
+        append_delivery = (
+            self._notification_store.append_verified_internal
+            if internal_delivery_bookkeeping
+            else self._notification_store.append_verified
+        )
+        delivery_kwargs = dict(
             ts=now_epoch,
             message=message,
             dedupe_hash=dedupe_hash,
@@ -14357,6 +14402,14 @@ class AgentRuntime:
             modified_ids=modified_ids,
             mark_sent=mark_sent,
         )
+        if internal_delivery_bookkeeping:
+            _saved_state, append_verified = append_delivery(
+                operation_id=f"notification-delivery:{dedupe_hash}:{now_epoch}:{outcome}:{reason}:{before_count}",
+                trigger="scheduler",
+                **delivery_kwargs,
+            )
+        else:
+            _saved_state, append_verified = append_delivery(**delivery_kwargs)
         after_count = int((self._notification_store.status() or {}).get("stored_count") or 0)
         journal.record_step(
             "record_notification_history",
@@ -14506,7 +14559,12 @@ class AgentRuntime:
             error_kind=error_kind,
         )
 
-        _saved_state, append_verified = self._notification_store.append_verified(
+        append_delivery = (
+            self._notification_store.append_verified_internal
+            if str(trigger or "").strip().lower() == "scheduler"
+            else self._notification_store.append_verified
+        )
+        delivery_kwargs = dict(
             ts=now_epoch,
             message=message,
             dedupe_hash=dedupe_hash,
@@ -14517,6 +14575,14 @@ class AgentRuntime:
             modified_ids=modified_ids,
             mark_sent=mark_sent,
         )
+        if str(trigger or "").strip().lower() == "scheduler":
+            _saved_state, append_verified = append_delivery(
+                operation_id=f"notification-delivery:{dedupe_hash}:{now_epoch}:{outcome}:{reason}:{before_count}",
+                trigger="scheduler",
+                **delivery_kwargs,
+            )
+        else:
+            _saved_state, append_verified = append_delivery(**delivery_kwargs)
         after_status = self._notification_store.status()
         after_count = int((after_status or {}).get("stored_count") or 0)
         journal.record_step(
@@ -20086,7 +20152,7 @@ class AgentRuntime:
         persist_proposal: bool = True,
     ) -> tuple[bool, dict[str, Any]]:
         actor = "system" if trigger == "scheduler" else "user"
-        scan_payload = scan_hf_watch(self)
+        scan_payload = scan_hf_watch(self, trigger=trigger)
         self._set_model_watch_hf_status_cache(model_watch_hf_status(self))
         scan_ok = bool(scan_payload.get("ok", False))
         discovered_count = int(scan_payload.get("discovered_count") or 0)
@@ -25694,27 +25760,27 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/llm/notifications/test":
-                ok, body = self.runtime.llm_notifications_test(payload)
+                ok, body = self.runtime.route_organization_memory_mutation("notification.test", payload)
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/llm/notifications/mark_read":
-                ok, body = self.runtime.llm_notifications_mark_read(payload)
+                ok, body = self.runtime.route_organization_memory_mutation("notification.mark_read", payload)
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/llm/notifications/prune":
-                ok, body = self.runtime.llm_notifications_prune(payload)
+                ok, body = self.runtime.route_organization_memory_mutation("notification.prune", payload)
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/semantic/documents/ingest":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                ok, body = self.runtime.semantic_memory_ingest(payload)
+                ok, body = self.runtime.route_organization_memory_mutation("semantic.ingest", payload)
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/semantic/rebuild":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                ok, body = self.runtime.semantic_memory_rebuild(payload)
+                ok, body = self.runtime.route_organization_memory_mutation("semantic.rebuild", payload)
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/semantic/doctor":
@@ -25726,15 +25792,15 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if path == "/semantic/repair":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                ok, body = self.runtime.semantic_memory_repair(payload)
+                ok, body = self.runtime.route_organization_memory_mutation("semantic.repair", payload)
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/memory/reset":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                ok, body = self.runtime.memory_reset(
-                    payload,
-                    changed_by=self._request_client_host() or "loopback_operator",
+                ok, body = self.runtime.route_organization_memory_mutation(
+                    "memory.reset",
+                    {**payload, "actor_id": self._request_client_host() or "loopback_operator"},
                 )
                 self._send_json(200 if ok else 400, body)
                 return

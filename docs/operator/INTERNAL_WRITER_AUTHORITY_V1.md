@@ -90,3 +90,10 @@ Manual watch, HF scan, proposal, policy, autopilot, and maintenance entry points
 are public mutations and use central authorization. Read-only discovery remains
 immediate. Scheduled catalog/health/scout/watch bookkeeping retains only bounded
 internal identities and cannot invoke the new public mutation executors.
+
+Audit v2E enforces the formerly mixed persistence leaves:
+`llm_model_discovery_policy.persist_effective_policy`,
+`model_watch.persist_watch_state`, `model_watch_hf.persist_scan_state`, and
+`llm_notifications.record_delivery`. The notification identity records an
+already-decided result only; it cannot send, retry, select arguments, enable a
+transport, or stand in for public confirmation.

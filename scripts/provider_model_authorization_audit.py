@@ -83,11 +83,11 @@ UNIMPLEMENTED_DENIED = [
 ]
 
 MIXED_WRITERS = [
-    {"writer": "llm_model_discovery_policy", "public": "model.policy central_authorized", "internal": "persist_effective_policy", "disposition": "blocked_internal_leaf_contract", "blocker": "mixed module does not yet require InternalWriterAuthority at its persistence leaf; internal authority remains denied"},
-    {"writer": "llm_notifications", "public": "notification routes assigned to Audit v2E", "internal": "enqueue/delivery bookkeeping", "disposition": "deferred_v2e", "blocker": "notification public migration is explicitly outside v2D"},
+    {"writer": "llm_model_discovery_policy", "public": "model.policy central_authorized", "internal": "persist_effective_policy", "disposition": "resolved_v2e", "blocker": None},
+    {"writer": "llm_notifications", "public": "notification test/mark-read/prune central_authorized in v2E", "internal": "delivery-result bookkeeping only", "disposition": "resolved_v2e", "blocker": None},
     {"writer": "model_scout", "public": "proposal inspection read_only; adoption uses model.policy", "internal": "scheduled_model_scout wrapper", "disposition": "bounded_by_scheduled_parent", "blocker": None},
-    {"writer": "model_watch", "public": "manual run/refresh central_authorized", "internal": "scheduler watch persistence", "disposition": "blocked_internal_leaf_contract", "blocker": "runtime scheduler still reaches the mixed persistence helper without leaf authority validation"},
-    {"writer": "model_watch_hf", "public": "manual scan central_authorized", "internal": "nested scheduled scan persistence", "disposition": "blocked_internal_leaf_contract", "blocker": "nested scheduled scan lacks its own exact internal-writer leaf contract"},
+    {"writer": "model_watch", "public": "manual run/refresh central_authorized", "internal": "scheduler watch persistence", "disposition": "resolved_v2e", "blocker": None},
+    {"writer": "model_watch_hf", "public": "manual scan central_authorized", "internal": "nested scheduled scan persistence", "disposition": "resolved_v2e", "blocker": None},
 ]
 
 

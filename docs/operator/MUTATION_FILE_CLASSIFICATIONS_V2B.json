@@ -1,6 +1,6 @@
 {
   "schema": "personal-agent.mutation-file-classification.v2b",
-  "reviewed_count": 153,
+  "reviewed_count": 155,
   "required_fields": [
     "path",
     "disposition",
@@ -45,6 +45,21 @@
       "confirmation_requirements": "actor/thread/session/capability/executor/target bound and durable single-use",
       "rollback_scope": "operation-specific receipt; secrets never journal old plaintext",
       "audit_evidence": "Audit v2D manual review and tests/test_provider_model_authorization.py",
+      "contract_identity": "not_applicable"
+    },
+    {
+      "path": "agent/organization_memory_authorization.py",
+      "disposition": "central_authorized",
+      "capability": "seven narrow assistant capability families, memory.forget, memory.semantic.manage, notification.*",
+      "entry_point": "v2E preview/apply service reached by API and canonical assistant path",
+      "actor": "scope-bound local user through API, assistant, Telegram, or CLI alias",
+      "target_resources": "bounded organization records, selected memory scopes, semantic sources, notification state",
+      "mutation_type": "centrally authorized v2E public mutation",
+      "policy_path": "Universal Mutation Plan -> durable scoped confirmation -> capability policy -> Executor Registry",
+      "executor": "one unique executor per assistant command plus operation-specific memory/semantic/notification executors",
+      "confirmation_requirements": "actor/thread/session/capability/executor/target bound and single-use",
+      "rollback_scope": "operation-specific and declared honestly in Plan/receipt",
+      "audit_evidence": "Audit v2E domain service, deterministic inventory, direct-bypass and race regression tests",
       "contract_identity": "not_applicable"
     },
     {
@@ -274,7 +289,7 @@
     },
     {
       "path": "agent/llm/model_discovery_policy.py",
-      "disposition": "supported_pending_migration",
+      "disposition": "internal_authorized",
       "capability": "internal.state.persist",
       "entry_point": "bounded runtime service callback",
       "actor": "declared Personal Agent runtime/scheduler",
@@ -284,7 +299,7 @@
       "executor": "fixed module-owned writer",
       "confirmation_requirements": "no user confirmation; scheduler/service identity required",
       "rollback_scope": "module-owned record/file only",
-      "audit_evidence": "manual review of model_discovery_policy.py: writes are module-owned bookkeeping and are not a public executor choice; v2C disposition=mixed_internal_and_public_pending, contract_identity=llm_model_discovery_policy",
+      "audit_evidence": "Audit v2E persist_effective_policy_internal requires the llm_model_discovery_policy registry identity; public policy edits remain centrally authorized",
       "contract_identity": "llm_model_discovery_policy"
     },
     {
@@ -304,7 +319,7 @@
     },
     {
       "path": "agent/llm/notifications.py",
-      "disposition": "supported_pending_migration",
+      "disposition": "internal_authorized",
       "capability": "internal.state.persist",
       "entry_point": "bounded runtime service callback",
       "actor": "declared Personal Agent runtime/scheduler",
@@ -314,7 +329,7 @@
       "executor": "fixed module-owned writer",
       "confirmation_requirements": "no user confirmation; scheduler/service identity required",
       "rollback_scope": "module-owned record/file only",
-      "audit_evidence": "manual review of notifications.py: writes are module-owned bookkeeping and are not a public executor choice; v2C disposition=mixed_internal_and_public_pending, contract_identity=llm_notifications",
+      "audit_evidence": "Audit v2E append_verified_internal allows only bounded delivery-result bookkeeping; public send/read/prune operations are centrally authorized",
       "contract_identity": "llm_notifications"
     },
     {
@@ -484,7 +499,7 @@
     },
     {
       "path": "agent/model_watch_hf.py",
-      "disposition": "supported_pending_migration",
+      "disposition": "internal_authorized",
       "capability": "internal.state.persist",
       "entry_point": "bounded runtime service callback",
       "actor": "declared Personal Agent runtime/scheduler",
@@ -494,12 +509,12 @@
       "executor": "fixed module-owned writer",
       "confirmation_requirements": "no user confirmation; scheduler/service identity required",
       "rollback_scope": "module-owned record/file only",
-      "audit_evidence": "manual review of model_watch_hf.py: writes are module-owned bookkeeping and are not a public executor choice; v2C disposition=mixed_internal_and_public_pending, contract_identity=model_watch_hf",
+      "audit_evidence": "Audit v2E scheduler persistence uses registered model_watch_hf authority; manual scan remains centrally authorized",
       "contract_identity": "model_watch_hf"
     },
     {
       "path": "agent/model_watch.py",
-      "disposition": "supported_pending_migration",
+      "disposition": "internal_authorized",
       "capability": "internal.state.persist",
       "entry_point": "bounded runtime service callback",
       "actor": "declared Personal Agent runtime/scheduler",
@@ -509,7 +524,7 @@
       "executor": "fixed module-owned writer",
       "confirmation_requirements": "no user confirmation; scheduler/service identity required",
       "rollback_scope": "module-owned record/file only",
-      "audit_evidence": "manual review of model_watch.py: writes are module-owned bookkeeping and are not a public executor choice; v2C disposition=mixed_internal_and_public_pending, contract_identity=model_watch",
+      "audit_evidence": "Audit v2E scheduler persistence uses registered model_watch authority; manual watch operations remain centrally authorized",
       "contract_identity": "model_watch"
     },
     {
@@ -2295,6 +2310,21 @@
       "confirmation_requirements": "explicit --write-inventory invocation",
       "rollback_scope": "single checked-in generated inventory file",
       "audit_evidence": "Audit v2D reviewed deterministic write/check behavior",
+      "contract_identity": "not_applicable"
+    },
+    {
+      "path": "scripts/organization_memory_authorization_audit.py",
+      "disposition": "offline_tool",
+      "capability": "developer.proof_or_build",
+      "entry_point": "explicit command-line main",
+      "actor": "developer/release operator",
+      "target_resources": "deterministic checked-in v2E inventory",
+      "mutation_type": "offline inventory regeneration",
+      "policy_path": "not imported by shipping runtime; explicit operator invocation",
+      "executor": "script-owned deterministic JSON writer",
+      "confirmation_requirements": "explicit --write command invocation",
+      "rollback_scope": "checked-in inventory file only",
+      "audit_evidence": "Audit v2E deterministic write/check comparison",
       "contract_identity": "not_applicable"
     },
     {

@@ -669,6 +669,43 @@ def _default_capabilities() -> list[CapabilityDefinition]:
             generic_bypass_forbidden=True,
         ),
         _capability("memory.inspect", "Inspect saved memory state", "read_only", "local_process", "reversible", "low", "allow"),
+        *[
+            _capability(
+                capability_id,
+                title,
+                "mutating",
+                "local_process",
+                "conditionally_reversible",
+                "medium",
+                "plan_and_confirm",
+                receipt_required=True,
+                runtime_revalidation_required=True,
+                target_binding_required=True,
+                generic_bypass_forbidden=True,
+            )
+            for capability_id, title in (
+                ("organization.project.manage", "Change one bounded project target"),
+                ("organization.task.manage", "Change one bounded task or open-loop target"),
+                ("organization.reminder.manage", "Change one bounded reminder target"),
+                ("organization.graph.manage", "Change one bounded graph target"),
+                ("organization.thread.manage", "Change one bounded thread target"),
+                ("organization.preference.manage", "Change one allowlisted preference target"),
+                ("memory.store", "Store or forget one explicit saved-memory value"),
+            )
+        ],
+        _capability(
+            "memory.semantic.manage",
+            "Ingest, rebuild, or repair bounded semantic memory",
+            "mutating",
+            "local_filesystem",
+            "conditionally_reversible",
+            "high",
+            "plan_and_confirm",
+            receipt_required=True,
+            runtime_revalidation_required=True,
+            target_binding_required=True,
+            generic_bypass_forbidden=True,
+        ),
         _capability(
             "memory.forget",
             "Forget saved memory",

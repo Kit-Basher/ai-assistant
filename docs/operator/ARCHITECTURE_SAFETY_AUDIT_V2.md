@@ -146,3 +146,8 @@ The provider/model/configuration/secret/setup domain moved from direct and
 domain-only confirmation to central authorization. The deterministic inventory
 now reports no `plan_gated_legacy` groups and 19 `legacy_unmigrated` surfaces,
 all assigned to later domains. Universal authorization still cannot be claimed.
+
+Audit v2E supersedes that count: organization, memory reset, semantic-memory,
+and notification public writes are centralized, leaving ten
+`legacy_unmigrated` and seven domain-confirmed pack/search surfaces. See
+`ARCHITECTURE_SAFETY_AUDIT_V2E.md`. Universal authorization remains incomplete.

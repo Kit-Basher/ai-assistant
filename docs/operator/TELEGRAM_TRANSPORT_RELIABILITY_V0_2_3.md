@@ -70,3 +70,10 @@ it would require explicit user intent to send or reply through Telegram.
 adapter path.
 - Repairs remain bounded service/config actions and must use the normal
 authorization/confirmation boundary when added or invoked.
+
+Audit v2E does not enable Telegram. Ordinary Telegram messages continue through
+the same assistant front door; organization/memory/notification mutations
+produce the same central Plan as Web/API aliases. The internal notification
+bookkeeping identity cannot send or enable Telegram. Scheduled delivery
+exactly-once behavior across a crash before receipt persistence remains a v2F
+release blocker.

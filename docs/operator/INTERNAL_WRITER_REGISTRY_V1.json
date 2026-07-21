@@ -247,7 +247,7 @@
     {
       "writer_id": "llm_model_discovery_policy",
       "module": "agent.llm.model_discovery_policy",
-      "disposition": "mixed_internal_and_public_pending",
+      "disposition": "scheduled_maintenance",
       "capability_id": "internal.llm.discovery_policy_cache",
       "allowed_operations": [
         "persist_effective_policy"
@@ -281,12 +281,12 @@
         "policy": "idempotent_replace",
         "durable_operation_id_required": true
       },
-      "evidence": "agent/llm/model_discovery_policy.py reviewed in Audit v2C"
+      "evidence": "agent/llm/model_discovery_policy.py persist_effective_policy_internal enforces the runtime-only leaf; public edits remain v2D-authorized"
     },
     {
       "writer_id": "llm_notifications",
       "module": "agent.llm.notifications",
-      "disposition": "mixed_internal_and_public_pending",
+      "disposition": "scheduled_maintenance",
       "capability_id": "internal.notification.bookkeeping",
       "allowed_operations": [
         "enqueue_internal",
@@ -322,7 +322,7 @@
         "policy": "idempotent_operation_id",
         "durable_operation_id_required": true
       },
-      "evidence": "agent/llm/notifications.py reviewed in Audit v2C"
+      "evidence": "agent/llm/notifications.py append_verified_internal records only bounded delivery metadata; public notification mutations use v2E authorization"
     },
     {
       "writer_id": "llm_registry",
@@ -485,7 +485,7 @@
     {
       "writer_id": "model_scout",
       "module": "agent.model_scout",
-      "disposition": "mixed_internal_and_public_pending",
+      "disposition": "mixed_internal_and_public_enforced",
       "capability_id": "internal.model_scout.state",
       "allowed_operations": [
         "persist_scout_state"
@@ -525,7 +525,7 @@
     {
       "writer_id": "model_watch",
       "module": "agent.model_watch",
-      "disposition": "mixed_internal_and_public_pending",
+      "disposition": "scheduled_maintenance",
       "capability_id": "internal.model_watch.state",
       "allowed_operations": [
         "persist_watch_state",
@@ -562,7 +562,7 @@
         "policy": "idempotent_operation_id",
         "durable_operation_id_required": true
       },
-      "evidence": "agent/model_watch.py reviewed in Audit v2C"
+      "evidence": "agent/model_watch.py save_internal is used only for scheduler persistence; manual watch operations remain v2D-authorized"
     },
     {
       "writer_id": "model_watch_catalog",
@@ -607,7 +607,7 @@
     {
       "writer_id": "model_watch_hf",
       "module": "agent.model_watch_hf",
-      "disposition": "mixed_internal_and_public_pending",
+      "disposition": "scheduled_maintenance",
       "capability_id": "internal.model_watch.hf_state",
       "allowed_operations": [
         "persist_scan_state"
@@ -642,7 +642,7 @@
         "policy": "idempotent_operation_id",
         "durable_operation_id_required": true
       },
-      "evidence": "agent/model_watch_hf.py reviewed in Audit v2C"
+      "evidence": "agent/model_watch_hf.py save_hf_watch_state requires registered authority for scheduler persistence; manual scans remain v2D-authorized"
     },
     {
       "writer_id": "modelops_seen_state",

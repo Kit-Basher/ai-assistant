@@ -11,6 +11,9 @@ import time
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from agent.capability_policy import stable_fingerprint
+from agent.internal_writer_authority import perform_registered_internal_write
+
 
 _SCHEMA_VERSION = 3
 _DEFAULT_MAX_RECENT = 50
@@ -546,6 +549,41 @@ class NotificationStore:
             for row in rows
         )
         return saved, verified
+
+    def append_verified_internal(
+        self,
+        *,
+        operation_id: str,
+        trigger: str = "scheduler",
+        **kwargs: Any,
+    ) -> tuple[dict[str, Any], bool]:
+        """Persist delivery metadata only; this authority cannot perform delivery."""
+        result: tuple[dict[str, Any], bool] | None = None
+
+        def _write() -> None:
+            nonlocal result
+            result = self.append_verified(**kwargs)
+
+        perform_registered_internal_write(
+            writer_id="llm_notifications",
+            operation="record_delivery",
+            resource_type="notification_state",
+            target_scope="state:notifications",
+            arguments={
+                "dedupe_hash": str(kwargs.get("dedupe_hash") or ""),
+                "outcome": str(kwargs.get("outcome") or ""),
+                "delivery_fingerprint": stable_fingerprint({
+                    "delivered_to": kwargs.get("delivered_to"),
+                    "deferred": kwargs.get("deferred"),
+                    "modified_ids": kwargs.get("modified_ids"),
+                }),
+            },
+            callback=_write,
+            journal_path=self.path.with_name(f"{self.path.name}.internal-writer.sqlite3"),
+            trigger=trigger,
+            operation_id=operation_id,
+        )
+        return result if result is not None else (self.snapshot(), True)
 
     def recent(self, limit: int = 20) -> list[dict[str, Any]]:
         rows = self.state.get("notifications") if isinstance(self.state.get("notifications"), list) else []

@@ -121,6 +121,7 @@ from agent.mutation_plan import (
     build_mutation_confirmation,
     build_mutation_plan,
 )
+from agent.organization_memory_authorization import MUTATING_ASSISTANT_COMMANDS
 import agent.opinion_gate as opinion_gate
 from agent.skills_loader import SkillLoader
 from agent.ask_timeframe import parse_timeframe
@@ -674,6 +675,8 @@ class Orchestrator:
         web_search_handler: Callable[[dict[str, Any]], tuple[bool, dict[str, Any]]] | None = None,
     ) -> None:
         self.db = db
+        self._organization_mutation_reentry_token = object()
+        self._organization_mutation_reentry_active = False
         self._skill_loader = SkillLoader(skills_path)
         self.skills = self._skill_loader.load_all()
         self._skill_governance_store = SkillGovernanceStore(db.db_path)
@@ -3628,6 +3631,46 @@ class Orchestrator:
                     "provider_model_session_id": domain_session_id,
                 }
             )
+        elif str(action_for_plan.get("organization_memory_domain_operation") or "").strip():
+            adapter = self._chat_runtime_adapter
+            route_mutation = getattr(adapter, "route_organization_memory_mutation", None)
+            if not callable(route_mutation):
+                return self._runtime_state_unavailable_response(
+                    route=route,
+                    reason="organization_memory_authorization_unavailable",
+                )
+            organization_operation = str(action_for_plan.get("organization_memory_domain_operation") or "").strip()
+            organization_request = dict(action_for_plan.get("organization_memory_domain_request")) if isinstance(action_for_plan.get("organization_memory_domain_request"), dict) else {}
+            organization_session_id = f"assistant:{active_thread_id or 'thread'}"
+            ok, body = route_mutation(
+                organization_operation,
+                {
+                    **organization_request,
+                    "actor_id": user_id,
+                    "thread_id": active_thread_id,
+                    "session_id": organization_session_id,
+                },
+            )
+            organization_plan = body.get("plan") if isinstance(body, dict) and isinstance(body.get("plan"), dict) else None
+            if not ok or organization_plan is None:
+                response_body = dict(body) if isinstance(body, dict) else {}
+                message = str(response_body.get("message") or "This mutation is not currently eligible.").strip()
+                return self._runtime_truth_response(
+                    text=message,
+                    route=route,
+                    used_tools=used_tools,
+                    used_memory=used_memory,
+                    used_runtime_state=True,
+                    ok=False,
+                    error_kind=str(response_body.get("error") or "mutation_preview_denied"),
+                    payload={**response_body, "mutated": False},
+                    skip_post_response_hooks=skip_post_response_hooks,
+                )
+            canonical_plan = organization_plan
+            action_for_plan.update({
+                "organization_memory_domain_request": organization_request,
+                "organization_memory_session_id": organization_session_id,
+            })
         else:
             canonical_plan = self._build_canonical_pending_plan(
                 pending_id=pending_id,
@@ -3916,6 +3959,45 @@ class Orchestrator:
                 confirmation_id=str(action.get("pending_id") or mutation_plan_id),
                 actor_id=user_id,
                 thread_id=str(action.get("thread_id") or ""),
+            )
+        organization_operation = str(action.get("organization_memory_domain_operation") or "").strip().lower()
+        if organization_operation:
+            adapter = self._chat_runtime_adapter
+            route_mutation = getattr(adapter, "route_organization_memory_mutation", None)
+            organization_plan = canonical_plan_for_status
+            organization_request = dict(action.get("organization_memory_domain_request")) if isinstance(action.get("organization_memory_domain_request"), dict) else {}
+            session_id = str(action.get("organization_memory_session_id") or "").strip()
+            if not callable(route_mutation) or not organization_plan:
+                return self._runtime_state_unavailable_response(route="action_tool", reason="organization_memory_authorization_unavailable")
+            confirmation = build_mutation_confirmation(
+                organization_plan,
+                confirmation_id=str(action.get("pending_id") or organization_plan.get("plan_id") or ""),
+                actor_id=user_id,
+                thread_id=str(action.get("thread_id") or ""),
+                session_id=session_id,
+            )
+            ok, body = route_mutation(
+                organization_operation,
+                {
+                    **organization_request,
+                    "actor_id": user_id,
+                    "thread_id": str(action.get("thread_id") or ""),
+                    "session_id": session_id,
+                    "mutation_plan": organization_plan,
+                    "confirmation": confirmation,
+                },
+            )
+            response_body = dict(body) if isinstance(body, dict) else {}
+            message = str(response_body.get("message") or ("Mutation completed." if ok else "Mutation was not completed.")).strip()
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_tools=["organization_memory_authorization"],
+                used_memory=True,
+                ok=bool(ok),
+                error_kind=None if ok else str(response_body.get("error_code") or response_body.get("error") or "mutation_failed"),
+                payload={**response_body, "type": "organization_memory_authorization_result", "operation": organization_operation},
+                skip_post_response_hooks=True,
             )
         domain_operation = str(action.get("provider_model_domain_operation") or "").strip().lower()
         if domain_operation:
@@ -21257,6 +21339,37 @@ class Orchestrator:
         confirmed: bool = False,
         read_only_mode: bool = False,
     ) -> OrchestratorResponse:
+        if (
+            skill_name == "core"
+            and function_name in {"remember_note", "add_reminder", "set_reminder"}
+            and callable(getattr(self._chat_runtime_adapter, "route_organization_memory_mutation", None))
+            and not self._organization_mutation_reentry_active
+        ):
+            if function_name == "remember_note":
+                command = "remember"
+                command_text = f"/remember {str(args.get('text') or '').strip()}"
+            else:
+                command = "remind"
+                command_text = f"/remind {str(args.get('when_local') or args.get('when') or '').strip()} | {str(args.get('text') or '').strip()}"
+            return self._confirmation_preview_response(
+                user_id,
+                route="plan_mode",
+                question="I prepared a bounded Plan for this requested write. Confirm to apply it.",
+                used_tools=["organization_memory_authorization"],
+                used_memory=True,
+                action={
+                    "operation": "v2e_assistant_mutation",
+                    "params": {"command": command},
+                    "organization_memory_domain_operation": "assistant.mutate",
+                    "organization_memory_domain_request": {
+                        "command": command, "private_content": command_text, "user_id": user_id,
+                        "thread_id": self._active_thread_id_for_user(user_id),
+                    },
+                },
+                title="Apply assistant write",
+                preview_payload={"command": command, "content": "[PRIVATE CONTENT REDACTED]"},
+                skip_post_response_hooks=True,
+            )
         skill = self.skills.get(skill_name)
         if not skill:
             blocked = self._blocked_skill_governance.get(skill_name)
@@ -21595,6 +21708,30 @@ class Orchestrator:
         final_data["orchestrator_timing_ms"] = merged_timing
         return OrchestratorResponse(final_response.text, final_data)
 
+    def execute_authorized_organization_mutation(
+        self,
+        *,
+        text: str,
+        user_id: str,
+        thread_id: str = "",
+    ) -> OrchestratorResponse:
+        """Trusted executor re-entry; the sentinel cannot be supplied by a transport payload."""
+        if self._organization_mutation_reentry_active:
+            return OrchestratorResponse("Nested authorized mutation was blocked.", {"ok": False, "error": "nested_authorized_mutation_blocked"})
+        self._organization_mutation_reentry_active = True
+        try:
+            return self.handle_message(
+                text,
+                user_id,
+                chat_context={
+                    "thread_id": thread_id,
+                    "_organization_mutation_reentry_token": self._organization_mutation_reentry_token,
+                    "skip_turn_memory_hooks": True,
+                },
+            )
+        finally:
+            self._organization_mutation_reentry_active = False
+
     @staticmethod
     def _memory_action_kind_for_response(*, text: str, response: OrchestratorResponse) -> str | None:
         command = parse_command(str(text or "").strip())
@@ -21743,11 +21880,45 @@ class Orchestrator:
                 )
             memory_disabled_for_turn, cleaned_text = memory_ingest.parse_memory_override(text)
             cmd = parse_command(text)
+            organization_reentry = context.pop("_organization_mutation_reentry_token", None)
+            organization_authorized = organization_reentry is self._organization_mutation_reentry_token
             if cmd and cmd.name == "nomem":
                 cmd = None
                 text = cleaned_text
                 memory_disabled_for_turn = True
             effective_user_text = cleaned_text if memory_disabled_for_turn else text
+            command_needs_preview = bool(cmd and cmd.name in MUTATING_ASSISTANT_COMMANDS)
+            if cmd and cmd.name == "done" and not str(cmd.args or "").strip().isdigit():
+                command_needs_preview = False
+            if cmd and cmd.name in {"remember", "project_new", "task_add", "remind"} and not str(cmd.args or "").strip():
+                command_needs_preview = False
+            if cmd and cmd.name == "remind" and "|" not in str(cmd.args or ""):
+                command_needs_preview = False
+            organization_authorization_available = callable(
+                getattr(self._chat_runtime_adapter, "route_organization_memory_mutation", None)
+            )
+            if cmd and command_needs_preview and organization_authorization_available and not organization_authorized:
+                return self._confirmation_preview_response(
+                    user_id,
+                    route="plan_mode",
+                    question=f"I prepared a bounded Plan for /{cmd.name}. Confirm to apply this exact change.",
+                    used_tools=["organization_memory_authorization"],
+                    used_memory=True,
+                    action={
+                        "operation": "v2e_assistant_mutation",
+                        "params": {"command": cmd.name},
+                        "organization_memory_domain_operation": "assistant.mutate",
+                        "organization_memory_domain_request": {
+                            "command": cmd.name,
+                            "private_content": text,
+                            "user_id": user_id,
+                            "thread_id": self._active_thread_id_for_user(user_id),
+                        },
+                    },
+                    title=f"Apply /{cmd.name}",
+                    preview_payload={"command": cmd.name, "content": "[PRIVATE CONTENT REDACTED]"},
+                    skip_post_response_hooks=True,
+                )
             if memory_disabled_for_turn:
                 context["memory_disabled_for_turn"] = True
                 if not str(effective_user_text or "").strip():
@@ -21896,7 +22067,11 @@ class Orchestrator:
                 return self._ambiguous_restart_target_response(user_id)
             if not cmd and looks_like_capability_question(effective_user_text):
                 return self._assistant_capabilities_response(effective_user_text)
-            memory_policy_response = self._assistant_memory_policy_response(user_id, effective_user_text)
+            memory_policy_response = (
+                self._assistant_memory_policy_response(user_id, effective_user_text)
+                if not cmd
+                else None
+            )
             if memory_policy_response is not None:
                 return memory_policy_response
             clarification = build_clarification_for_vague_request(effective_user_text)
@@ -25178,6 +25353,33 @@ class Orchestrator:
         decision = classify_memory_request(text)
         if decision is None:
             return None
+        if (
+            decision.kind in {"store", "forget"}
+            and callable(getattr(self._chat_runtime_adapter, "route_organization_memory_mutation", None))
+            and not self._organization_mutation_reentry_active
+        ):
+            command = "memory_policy_store" if decision.kind == "store" else "memory_policy_forget"
+            return self._confirmation_preview_response(
+                user_id,
+                route="plan_mode",
+                question="I prepared a private, bounded memory change. Confirm to apply it.",
+                used_tools=["organization_memory_authorization"],
+                used_memory=True,
+                action={
+                    "operation": "v2e_assistant_mutation",
+                    "params": {"command": command},
+                    "organization_memory_domain_operation": "assistant.mutate",
+                    "organization_memory_domain_request": {
+                        "command": command,
+                        "private_content": str(text or ""),
+                        "user_id": user_id,
+                        "thread_id": self._active_thread_id_for_user(user_id),
+                    },
+                },
+                title="Change saved memory",
+                preview_payload={"scope": "saved preference memory", "content": "[PRIVATE CONTENT REDACTED]"},
+                skip_post_response_hooks=True,
+            )
         if decision.kind == "store":
             if decision.key and decision.value:
                 self.db.set_user_pref(f"{decision.key}:{user_id}", decision.value)
@@ -25480,6 +25682,26 @@ class Orchestrator:
             return None
         title, due, priority = self._parse_open_loop_add(text)
         if title:
+            if callable(getattr(self._chat_runtime_adapter, "route_organization_memory_mutation", None)) and not self._organization_mutation_reentry_active:
+                return self._confirmation_preview_response(
+                    user_id,
+                    route="plan_mode",
+                    question="I prepared a bounded open-loop Plan. Confirm to save this exact item.",
+                    used_tools=["organization_memory_authorization"],
+                    used_memory=True,
+                    action={
+                        "operation": "v2e_assistant_mutation",
+                        "params": {"command": "open_loop_add"},
+                        "organization_memory_domain_operation": "assistant.mutate",
+                        "organization_memory_domain_request": {
+                            "command": "open_loop_add", "private_content": text, "user_id": user_id,
+                            "thread_id": self._active_thread_id_for_user(user_id),
+                        },
+                    },
+                    title="Add open loop",
+                    preview_payload={"scope": "open loops", "content": "[PRIVATE CONTENT REDACTED]"},
+                    skip_post_response_hooks=True,
+                )
             self.db.add_open_loop(title, due, priority=priority)
             payload = build_cards_payload(
                 [
@@ -25498,6 +25720,26 @@ class Orchestrator:
             return self._cards_response(user_id, payload)
         title_fragment = self._parse_open_loop_done(text)
         if title_fragment:
+            if callable(getattr(self._chat_runtime_adapter, "route_organization_memory_mutation", None)) and not self._organization_mutation_reentry_active:
+                return self._confirmation_preview_response(
+                    user_id,
+                    route="plan_mode",
+                    question="I prepared a bounded completion Plan. Confirm to complete the currently matched item.",
+                    used_tools=["organization_memory_authorization"],
+                    used_memory=True,
+                    action={
+                        "operation": "v2e_assistant_mutation",
+                        "params": {"command": "open_loop_complete"},
+                        "organization_memory_domain_operation": "assistant.mutate",
+                        "organization_memory_domain_request": {
+                            "command": "open_loop_complete", "private_content": text, "user_id": user_id,
+                            "thread_id": self._active_thread_id_for_user(user_id),
+                        },
+                    },
+                    title="Complete open loop",
+                    preview_payload={"scope": "open loops", "content": "[PRIVATE CONTENT REDACTED]"},
+                    skip_post_response_hooks=True,
+                )
             count = self.db.complete_open_loop_by_title(title_fragment)
             payload = build_cards_payload(
                 [

@@ -159,3 +159,12 @@ schema and are never repaired by fabricating confirmation context.
 Audit v2D uses this transaction boundary for provider, model, configuration,
 secret, and setup writes. Compatibility routes may return a new Universal
 Mutation Plan, but cannot accept their former boolean confirmation.
+
+Audit v2E applies the same rule to `/done`, `/memory/reset`, semantic
+ingest/rebuild/repair, notification test/mark-read/prune, and assistant
+organization writes. Plans bind private content through opaque fingerprints;
+bare `confirm:true`, local execution, compatibility aliases, or remembered
+instructions cannot manufacture confirmation. The compatibility name
+`assistant.mutate` resolves before Plan creation to one of 37 explicit
+`assistant.<command>` operations; unknown aliases, nested commands, extra
+fields, and caller-supplied batch payloads fail closed.

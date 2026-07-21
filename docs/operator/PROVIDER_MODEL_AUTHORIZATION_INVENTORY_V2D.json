@@ -423,17 +423,17 @@
   ],
   "mixed_writers": [
     {
-      "blocker": "mixed module does not yet require InternalWriterAuthority at its persistence leaf; internal authority remains denied",
-      "disposition": "blocked_internal_leaf_contract",
+      "blocker": null,
+      "disposition": "resolved_v2e",
       "internal": "persist_effective_policy",
       "public": "model.policy central_authorized",
       "writer": "llm_model_discovery_policy"
     },
     {
-      "blocker": "notification public migration is explicitly outside v2D",
-      "disposition": "deferred_v2e",
-      "internal": "enqueue/delivery bookkeeping",
-      "public": "notification routes assigned to Audit v2E",
+      "blocker": null,
+      "disposition": "resolved_v2e",
+      "internal": "delivery-result bookkeeping only",
+      "public": "notification test/mark-read/prune central_authorized in v2E",
       "writer": "llm_notifications"
     },
     {
@@ -444,15 +444,15 @@
       "writer": "model_scout"
     },
     {
-      "blocker": "runtime scheduler still reaches the mixed persistence helper without leaf authority validation",
-      "disposition": "blocked_internal_leaf_contract",
+      "blocker": null,
+      "disposition": "resolved_v2e",
       "internal": "scheduler watch persistence",
       "public": "manual run/refresh central_authorized",
       "writer": "model_watch"
     },
     {
-      "blocker": "nested scheduled scan lacks its own exact internal-writer leaf contract",
-      "disposition": "blocked_internal_leaf_contract",
+      "blocker": null,
+      "disposition": "resolved_v2e",
       "internal": "nested scheduled scan persistence",
       "public": "manual scan central_authorized",
       "writer": "model_watch_hf"
@@ -484,7 +484,7 @@
   "summary": {
     "central_operations": 31,
     "central_surfaces": 36,
-    "mixed_writer_blockers": 4,
+    "mixed_writer_blockers": 0,
     "read_only_surfaces": 15,
     "removed_surfaces": 2,
     "transport_aliases": 7,

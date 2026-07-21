@@ -810,3 +810,9 @@ Web/API compatibility aliases and CLI secret setup converge on
 the registry; apply re-snapshots them before the Executor Registry transaction.
 This is not a second chat or inference router; `route_inference()` ownership is
 unchanged.
+
+`OrganizationMemoryAuthorizationService` is the v2E sibling domain boundary.
+It does not route inference. Assistant writes preview there, then an authorized
+executor re-enters the same `AgentOrchestrator` command implementation through
+a private one-shot sentinel. Web and Telegram therefore keep one assistant
+entity and one orchestration path.

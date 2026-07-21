@@ -47,9 +47,9 @@
   },
   "summary": {
     "canonical_front_door": 2,
-    "central_authorized": 37,
+    "central_authorized": 46,
     "internal_state_write": 1,
-    "legacy_unmigrated": 19,
+    "legacy_unmigrated": 10,
     "plan_confirm_gated": 7,
     "read_only": 11,
     "read_only_preview": 14,
@@ -112,12 +112,12 @@
       "surface": "api.post:/defaults/rollback"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/done",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.post:/done"
     },
     {
@@ -319,30 +319,30 @@
       "surface": "api.post:/llm/models/switch_temporary"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/llm/notifications/mark_read",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.post:/llm/notifications/mark_read"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/llm/notifications/prune",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.post:/llm/notifications/prune"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/llm/notifications/test",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.post:/llm/notifications/test"
     },
     {
@@ -391,12 +391,12 @@
       "surface": "api.post:/llm/support/remediate/plan"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/memory/reset",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.post:/memory/reset"
     },
     {
@@ -724,30 +724,30 @@
       "surface": "api.post:/semantic/doctor"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/semantic/documents/ingest",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.post:/semantic/documents/ingest"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/semantic/rebuild",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.post:/semantic/rebuild"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/semantic/repair",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.post:/semantic/repair"
     },
     {
@@ -845,8 +845,8 @@
     },
     {
       "kind": "cli_command",
-      "path": "AgentOrchestrator._call_skill (db:write/ops permissions)",
-      "status": "legacy_unmigrated",
+      "path": "AgentOrchestrator._call_skill -> v2E preview -> durable confirmation -> organization executor",
+      "status": "central_authorized",
       "surface": "cli.legacy_builtin_skill_writes"
     },
     {

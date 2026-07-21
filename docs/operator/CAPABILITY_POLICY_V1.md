@@ -313,3 +313,15 @@ Audit v2D adds implemented `provider.configure`, `provider.secret.manage`,
 `secret.manage`, `model.configure`, `model.acquire`, `model.maintain`,
 `runtime.policy.configure`, and `setup.repair`. Each is Plan-and-confirm,
 target-bound, runtime-revalidated, receipt-required, and bypass-forbidden.
+
+Audit v2E adds seven narrow organization capability families:
+`organization.project.manage`, `organization.task.manage`,
+`organization.reminder.manage`, `organization.graph.manage`,
+`organization.thread.manage`, `organization.preference.manage`, and
+`memory.store`. Every assistant command has a distinct executor and operation
+binding; there is no generic `organization.manage` grant. Audit v2E also adds
+`memory.semantic.manage`. Existing `memory.forget`,
+`notification.external.send`, `notification.mark_read`, and
+`notification.prune` now protect the migrated v2E surfaces. SAFE MODE does not
+automatically authorize local writes; every supported mutation still requires
+the capability decision and scoped confirmation.

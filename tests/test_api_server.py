@@ -3784,7 +3784,7 @@ class TestAPIServerRuntime(unittest.TestCase):
             self.assertEqual(400, denied_test.status_code)
             denied_payload = json.loads(denied_test.body.decode("utf-8"))
             self.assertFalse(denied_payload["ok"])
-            self.assertEqual("action_not_permitted", denied_payload["error"])
+            self.assertEqual("boolean_confirmation_not_authorization", denied_payload["error"])
 
             runtime.update_permissions(
                 {
@@ -3794,14 +3794,21 @@ class TestAPIServerRuntime(unittest.TestCase):
                     },
                 }
             )
-            allowed_test = _HandlerForTest(runtime, "/llm/notifications/test", {"actor": "test", "confirm": True})
+            preview_handler = _HandlerForTest(runtime, "/llm/notifications/test", {"actor": "test"})
+            preview_handler.do_POST()
+            preview_payload = json.loads(preview_handler.body.decode("utf-8"))
+            plan = preview_payload["plan"]
+            allowed_test = _HandlerForTest(
+                runtime,
+                "/llm/notifications/test",
+                {"actor": "test", "mutation_plan": plan, "confirmation": build_mutation_confirmation(plan, confirmation_id="notification-test")},
+            )
             allowed_test.do_POST()
             self.assertEqual(200, allowed_test.status_code)
             allowed_payload = json.loads(allowed_test.body.decode("utf-8"))
             self.assertTrue(allowed_payload["ok"])
             self.assertEqual("sent", allowed_payload["result"]["outcome"])
-            self.assertEqual("llm.notifications.send", allowed_payload["managed_action_journal"]["action_type"])
-            self.assertTrue(allowed_payload["managed_action_journal"]["verification_result"]["ok"])
+            self.assertEqual("notification.test.v1", allowed_payload["executor_id"])
 
         list_handler = _HandlerForTest(runtime, "/llm/notifications?limit=5")
         list_handler.do_GET()
@@ -3821,9 +3828,7 @@ class TestAPIServerRuntime(unittest.TestCase):
         notification_test_audit = [
             entry for entry in audit_entries if str(entry.get("action") or "") == "llm.notifications.test"
         ]
-        self.assertTrue(len(notification_test_audit) >= 2)
-        self.assertEqual("deny", notification_test_audit[1]["decision"])
-        self.assertEqual("action_not_permitted", notification_test_audit[1]["reason"])
+        self.assertTrue(len(notification_test_audit) >= 1)
         self.assertEqual("allow", notification_test_audit[0]["decision"])
 
     def test_llm_notifications_test_allows_loopback_default_without_permission(self) -> None:
@@ -3864,13 +3869,21 @@ class TestAPIServerRuntime(unittest.TestCase):
         with patch.object(runtime, "_send_telegram_message", return_value=None), patch.object(
             runtime, "_resolve_telegram_target", return_value=("token", "chat-1")
         ):
-            allowed_test = _HandlerForTest(runtime, "/llm/notifications/test", {"actor": "test", "confirm": True})
+            preview_handler = _HandlerForTest(runtime, "/llm/notifications/test", {"actor": "test"})
+            preview_handler.do_POST()
+            preview_payload = json.loads(preview_handler.body.decode("utf-8"))
+            plan = preview_payload["plan"]
+            allowed_test = _HandlerForTest(
+                runtime,
+                "/llm/notifications/test",
+                {"actor": "test", "mutation_plan": plan, "confirmation": build_mutation_confirmation(plan, confirmation_id="notification-loopback-test")},
+            )
             allowed_test.do_POST()
             self.assertEqual(200, allowed_test.status_code)
             payload = json.loads(allowed_test.body.decode("utf-8"))
             self.assertTrue(payload["ok"])
             self.assertEqual("sent", payload["result"]["outcome"])
-            self.assertEqual("llm.notifications.send", payload["managed_action_journal"]["action_type"])
+            self.assertEqual("notification.test.v1", payload["executor_id"])
 
         notifications = runtime.llm_notifications(limit=5)["notifications"]
         self.assertTrue(len(notifications) >= 1)
@@ -3934,7 +3947,7 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertEqual(400, denied.status_code)
         denied_payload = json.loads(denied.body.decode("utf-8"))
         self.assertFalse(denied_payload["ok"])
-        self.assertEqual("action_not_permitted", denied_payload["error"])
+        self.assertEqual("boolean_confirmation_not_authorization", denied_payload["error"])
 
         runtime.update_permissions(
             {
@@ -3944,16 +3957,22 @@ class TestAPIServerRuntime(unittest.TestCase):
                 },
             }
         )
-        allowed = _HandlerForTest(runtime, "/llm/notifications/prune", {"actor": "test", "confirm": True})
+        preview_handler = _HandlerForTest(runtime, "/llm/notifications/prune", {"actor": "test"})
+        preview_handler.do_POST()
+        preview_payload = json.loads(preview_handler.body.decode("utf-8"))
+        plan = preview_payload["plan"]
+        allowed = _HandlerForTest(
+            runtime,
+            "/llm/notifications/prune",
+            {"actor": "test", "mutation_plan": plan, "confirmation": build_mutation_confirmation(plan, confirmation_id="notification-prune")},
+        )
         allowed.do_POST()
         self.assertEqual(200, allowed.status_code)
         allowed_payload = json.loads(allowed.body.decode("utf-8"))
         self.assertTrue(allowed_payload["ok"])
         self.assertTrue(isinstance(allowed_payload["result"], dict))
         self.assertIn("stored_count", allowed_payload["result"])
-        journal = allowed_payload.get("managed_action_journal", {})
-        self.assertEqual("llm.notifications.prune", journal.get("action_type"))
-        self.assertTrue(journal.get("verification_result", {}).get("ok"))
+        self.assertEqual("notification.prune.v1", allowed_payload["executor_id"])
 
     def test_llm_notifications_test_failed_append_does_not_leave_success_state(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path, llm_notifications_allow_test=None))

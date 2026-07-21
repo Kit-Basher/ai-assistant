@@ -15,12 +15,12 @@ marketing copy and it is not a final release claim.
 
 Audit v2 preserves the single Web/Telegram assistant path and closes a
 high-severity Executor Registry confirmation-boundary gap. Migrated execution
-now requires an existing Universal Mutation Plan plus scope-bound, single-use
-confirmation metadata; automatic Plan synthesis is removed. The machine
-inventory records 91 public/reachable surfaces, including 48 explicitly
-`legacy_unmigrated` and seven `plan_gated_legacy` surfaces. This is not a claim
-that central authorization migration is complete. See
-`docs/operator/ARCHITECTURE_SAFETY_AUDIT_V2.md`.
+requires an existing Universal Mutation Plan plus durable, scope-bound,
+single-use confirmation metadata; automatic Plan synthesis is removed. After
+v2E, the machine inventory records 94 public/reachable surfaces, including ten
+`legacy_unmigrated` and seven older domain-confirmed pack/search surfaces.
+Central authorization is not complete. See
+`docs/operator/ARCHITECTURE_SAFETY_AUDIT_V2E.md`.
 
 ## Active Audit: Recovery and Installation Audit v1
 
@@ -829,3 +829,15 @@ confirmation now enters `llm.fix` through the same boundary; Telegram cannot
 invoke the former direct fix helper. Ordinary read-only Telegram/assistant
 status remains immediate. These are transport aliases into the existing 36
 HTTP/CLI mutation surfaces, not parallel mutation surfaces or executors.
+
+## Audit v2E working-tree checkpoint
+
+Memory/project/task/reminder/preference/semantic-memory and notification writes
+now enter `OrganizationMemoryAuthorizationService`; private content is opaque in
+Plans and redacted in receipts. The assistant compatibility resolver maps all
+37 commands to distinct sub-operations and executors across seven narrow
+capability families. Semantic file execution uses allowed-root-relative,
+no-follow descriptor reads and ingests the exact verified bytes. The global
+legacy count falls from 19 to ten.
+Seven domain-confirmed pack/search groups remain for v2F, so universal public
+authorization is still incomplete. Telegram remains disabled and untouched.

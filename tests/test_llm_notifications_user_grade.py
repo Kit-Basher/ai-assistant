@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from agent.api_server import APIServerHandler, AgentRuntime
 from agent.config import Config
+from agent.mutation_plan import build_mutation_confirmation
 
 
 def _config(registry_path: str, db_path: str, **overrides: object) -> Config:
@@ -254,7 +255,20 @@ class TestLLMNotificationsUserGrade(unittest.TestCase):
         self.assertTrue(get_payload["found"])
         self.assertEqual("h-endpoint", get_payload["last_change"]["hash"])
 
-        post_handler = _HandlerForTest(runtime, "/llm/notifications/mark_read", {"hash": "h-endpoint"})
+        preview_handler = _HandlerForTest(runtime, "/llm/notifications/mark_read", {"hash": "h-endpoint"})
+        preview_handler.do_POST()
+        self.assertEqual(200, preview_handler.status_code)
+        preview_payload = json.loads(preview_handler.body.decode("utf-8"))
+        plan = preview_payload["plan"]
+        post_handler = _HandlerForTest(
+            runtime,
+            "/llm/notifications/mark_read",
+            {
+                "hash": "h-endpoint",
+                "mutation_plan": plan,
+                "confirmation": build_mutation_confirmation(plan, confirmation_id="mark-read-endpoint"),
+            },
+        )
         post_handler.do_POST()
         self.assertEqual(200, post_handler.status_code)
         post_payload = json.loads(post_handler.body.decode("utf-8"))

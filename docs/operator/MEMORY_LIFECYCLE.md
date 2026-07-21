@@ -73,3 +73,18 @@ Do not claim full memory lifecycle execution completion yet. Bounded executors
 for thread/global memory toggles, export, redaction, dedupe, forget-topic, and
 delete-all are still future work where not already implemented; they must keep
 Plan Mode confirmation and fail closed with `mutated=false` while preview-only.
+
+Audit v2E centrally authorizes the shipping `/memory/reset` surface and
+explicit assistant preference-memory store/forget paths. Reset remains
+irreversible and single-use. Existing preview-only lifecycle variants remain
+honestly preview-only; this audit does not invent missing restore/merge
+executors or silently treat them as internal bookkeeping.
+
+The reset component set is deliberately limited to continuity runtime keys,
+Memory v2 items/events/bootstrap state, and semantic sources/chunks/vectors/
+index state. It does not erase project/task graph records, general notes or
+preferences, prior exports, external backups, or recovery artifacts; no
+tombstone or automatic restoration contract is claimed. Restoring a backup can
+therefore reintroduce previously erased material and requires separate review
+and authorization. Indeterminate reset execution is never retried
+automatically.

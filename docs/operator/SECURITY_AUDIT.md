@@ -14,11 +14,11 @@ fresh Debian VM install proof passes.
 
 Architecture and Safety Audit v2 adds an important qualification: central
 authorization coverage is incomplete. Migrated Executor Registry actions now
-require an existing Universal Mutation Plan and scope-bound, expiring,
-single-use confirmation metadata. The inventory still records 48
-`legacy_unmigrated` and seven `plan_gated_legacy` surfaces; see
-`ARCHITECTURE_SAFETY_AUDIT_V2.md`. These surfaces must not be represented as
-covered by the central capability/executor contract.
+require an existing Universal Mutation Plan and durable, scope-bound,
+expiring, single-use confirmation metadata. After v2E, the 94-surface inventory
+records ten `legacy_unmigrated` and seven older domain-confirmed pack/search
+surfaces; see `ARCHITECTURE_SAFETY_AUDIT_V2E.md`. These remaining surfaces must
+not be represented as covered by the central capability/executor contract.
 
 ## Enforced Boundaries
 
@@ -206,3 +206,17 @@ output. DNS rebinding and malicious in-process Python remain limitations.
 Secret delete/import/repair and bulk configuration import/reset are not public
 surfaces and are explicitly recorded as unimplemented/denied rather than
 silently treated as authorized functionality.
+
+## Audit v2E additions
+
+Organization and memory Plans store keyed opaque content fingerprints, not
+plaintext. Semantic ingestion rejects out-of-root paths, symlink components,
+unsupported types, and files over 8 MiB. Execution opens each path relative to
+an allowed-root directory descriptor with no-follow semantics, verifies the
+regular-file identity before and after a bounded read, and ingests those exact
+verified bytes as untrusted data. `/done` and document apply reject target
+drift. The 37 assistant mutations have unique operation/executor bindings and
+seven narrow capability families rather than one generic organization grant. Notification public
+effects require durable confirmation. The scheduled delivery-before-receipt
+crash interval remains an explicit risk; exactly-once scheduled delivery is not
+claimed. Malicious Python already inside the process remains out of scope.

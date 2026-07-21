@@ -258,6 +258,7 @@ def run_model_watch_check(
     *,
     fetch_json: Callable[[str], Any] | None = None,
     now_epoch: int | None = None,
+    trigger: str = "manual",
 ) -> dict[str, Any]:
     fetch = fetch_json or (lambda url: _http_get_json(url, timeout_seconds=20.0))
     now = int(now_epoch if now_epoch is not None else time.time())
@@ -283,7 +284,12 @@ def run_model_watch_check(
     snapshot_path = snapshot_path_for_config(config)
     snapshot, snapshot_error = load_latest_snapshot(snapshot_path)
     if not isinstance(snapshot, dict):
-        saved = state_store.save(set_model_watch_last_run_at(state=next_state, last_run_at=now))
+        next_document = set_model_watch_last_run_at(state=next_state, last_run_at=now)
+        saved = (
+            state_store.save_internal(next_document, operation_id=f"model-watch:{now}:no-catalog", trigger="scheduler")
+            if trigger == "scheduler"
+            else state_store.save(next_document)
+        )
         return {
             "ok": True,
             "found": False,
@@ -368,7 +374,12 @@ def run_model_watch_check(
             },
         )
 
-    saved_state = state_store.save(set_model_watch_last_run_at(state=next_state, last_run_at=now))
+    next_document = set_model_watch_last_run_at(state=next_state, last_run_at=now)
+    saved_state = (
+        state_store.save_internal(next_document, operation_id=f"model-watch:{now}:{batch_id or 'none'}", trigger="scheduler")
+        if trigger == "scheduler"
+        else state_store.save(next_document)
+    )
     latest = summarize_model_watch_batch(latest_model_watch_batch(saved_state))
 
     return {
@@ -399,8 +410,7 @@ def run_watch_once_for_config(
     fetch_json: Callable[[str], Any] | None = None,
     now_epoch: int | None = None,
 ) -> dict[str, Any]:
-    _ = trigger
-    return run_model_watch_check(config, fetch_json=fetch_json, now_epoch=now_epoch)
+    return run_model_watch_check(config, fetch_json=fetch_json, now_epoch=now_epoch, trigger=trigger)
 
 
 __all__ = [

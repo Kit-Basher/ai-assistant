@@ -9,6 +9,7 @@ from unittest.mock import patch
 from agent.api_server import APIServerHandler, AgentRuntime
 from agent.config import Config
 from agent.memory_runtime import MemoryRuntime
+from agent.mutation_plan import build_mutation_confirmation
 from agent.working_memory import WorkingMemoryState, append_turn, default_budget, manage_working_memory
 from agent.memory_v2.storage import SQLiteMemoryStore
 from agent.semantic_memory.storage import SQLiteSemanticStore
@@ -432,7 +433,7 @@ class TestMemoryHardening(unittest.TestCase):
         preview_handler.do_POST()
         self.assertEqual(200, preview_handler.status_code)
         self.assertTrue(bool(preview_handler.response_payload.get("requires_confirmation")))
-        self.assertEqual("preview", preview_handler.response_payload.get("action"))
+        self.assertEqual("memory.reset", preview_handler.response_payload.get("operation"))
 
         status_before = runtime.memory_status()[1]
         self.assertEqual(1, ((status_before.get("continuity") or {}).get("user_count") or 0))
@@ -442,14 +443,19 @@ class TestMemoryHardening(unittest.TestCase):
             ((((status_before.get("semantic") or {}).get("tables") or {}).get("tables") or {}).get("semantic_sources") or {}).get("row_count"),
         )
 
+        plan = preview_handler.response_payload["plan"]
         confirm_handler = _PostHandler(
             runtime,
             "/memory/reset",
-            {"components": ["continuity", "memory_v2", "semantic"], "confirm": True},
+            {
+                "components": ["continuity", "memory_v2", "semantic"],
+                "mutation_plan": plan,
+                "confirmation": build_mutation_confirmation(plan, confirmation_id="memory-reset"),
+            },
         )
         confirm_handler.do_POST()
         self.assertEqual(200, confirm_handler.status_code)
-        self.assertEqual("reset", confirm_handler.response_payload.get("action"))
+        self.assertEqual("reset", confirm_handler.response_payload.get("action"), confirm_handler.response_payload)
         deleted = confirm_handler.response_payload.get("deleted") if isinstance(confirm_handler.response_payload.get("deleted"), dict) else {}
         self.assertEqual(1, ((deleted.get("continuity") or {}).get("user_pref_keys_deleted") or 0))
         self.assertEqual(1, ((deleted.get("memory_v2") or {}).get("memory_events_deleted") or 0))
@@ -471,7 +477,7 @@ class TestMemoryHardening(unittest.TestCase):
             db.close()
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
 
-        handler = _PostHandler(runtime, "/memory/reset", {"components": ["bogus"], "confirm": True})
+        handler = _PostHandler(runtime, "/memory/reset", {"components": ["bogus"]})
         handler.do_POST()
         self.assertEqual(400, handler.status_code)
         self.assertEqual("bad_request", handler.response_payload.get("error_kind"))

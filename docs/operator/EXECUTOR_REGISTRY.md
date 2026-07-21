@@ -324,3 +324,10 @@ Audit v2D registers one bounded executor per provider/model/setup operation.
 The registry shares the canonical confirmation database and journal. Callbacks
 validate trusted invocation context; direct invocation fails closed and
 receipts are redacted before return or persistence.
+
+Audit v2E registers one distinct executor for each of 37 allowlisted assistant
+sub-operations plus `memory.reset.v1`, `semantic.ingest.v1`,
+`semantic.rebuild.v1`, `semantic.repair.v1`, `notification.test.v1`,
+`notification.mark_read.v1`, and `notification.prune.v1`. A Plan for one
+assistant command cannot select another command's executor. They share the
+canonical transaction database; direct callback invocation fails closed.
