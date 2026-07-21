@@ -954,6 +954,8 @@ def _authority_state_backup_entries(backup_sources: dict[str, Any]) -> list[dict
     confirmation = Path(str(authority.get("confirmation_transactions") or "")).expanduser().resolve()
     raw_receipts = authority.get("internal_writer_receipts") if isinstance(authority.get("internal_writer_receipts"), list) else []
     candidates: list[tuple[str, Path, str]] = [("confirmation", confirmation, "confirmation_transactions")]
+    notification = Path(str(authority.get("notification_delivery_ledger") or "")).expanduser().resolve()
+    candidates.append(("notification_delivery", notification, "notification_deliveries"))
     for raw in raw_receipts[:64]:
         candidate = Path(str(raw or "")).expanduser().resolve()
         candidates.append(("internal_writer_receipt", candidate, "internal_writer_operations"))
@@ -966,8 +968,14 @@ def _authority_state_backup_entries(backup_sources: dict[str, Any]) -> list[dict
             raise ValueError("confirmation_transaction_path_not_canonical")
         if kind == "internal_writer_receipt" and not relative.endswith(".internal-writer.sqlite3"):
             raise ValueError("internal_writer_receipt_path_invalid")
+        if kind == "notification_delivery" and relative != "llm_notifications.json.delivery.sqlite3":
+            raise ValueError("notification_delivery_path_not_canonical")
         digest = hashlib.sha256(relative.encode("utf-8")).hexdigest()[:16]
-        backup_name = "confirmation_transactions.sqlite3" if kind == "confirmation" else f"internal_writer_receipt_{digest}.sqlite3"
+        backup_name = (
+            "confirmation_transactions.sqlite3" if kind == "confirmation"
+            else "notification_delivery.sqlite3" if kind == "notification_delivery"
+            else f"internal_writer_receipt_{digest}.sqlite3"
+        )
         entries.append(
             {
                 "kind": kind,
@@ -1386,14 +1394,16 @@ def _validate_restore_backup(path: Path) -> dict[str, Any]:
             or "\\" in name
             or target_relative.startswith(("/", "."))
             or ".." in Path(target_relative).parts
-            or kind not in {"confirmation", "internal_writer_receipt"}
-            or required_table not in {"confirmation_transactions", "internal_writer_operations"}
+            or kind not in {"confirmation", "internal_writer_receipt", "notification_delivery"}
+            or required_table not in {"confirmation_transactions", "internal_writer_operations", "notification_deliveries"}
         ):
             return {"valid": False, "error_code": "authority_manifest_scope_invalid"}
         if kind == "confirmation" and target_relative != "confirmation_transactions.sqlite3":
             return {"valid": False, "error_code": "authority_confirmation_target_invalid"}
         if kind == "internal_writer_receipt" and not target_relative.endswith(".internal-writer.sqlite3"):
             return {"valid": False, "error_code": "authority_receipt_target_invalid"}
+        if kind == "notification_delivery" and target_relative != "llm_notifications.json.delivery.sqlite3":
+            return {"valid": False, "error_code": "authority_notification_target_invalid"}
         if name in authority_by_name:
             return {"valid": False, "error_code": "authority_manifest_duplicate"}
         authority_by_name[name] = row
@@ -1616,6 +1626,10 @@ def _merge_authority_table(
                     values["state"] = "indeterminate"
                     values["finished_at"] = utc_now_iso()
                     values["receipt_json"] = json.dumps({"ok": False, "reason": "restored_uncertain_outcome"})
+                if table == "notification_deliveries" and values.get("state") in {"reserved", "executing"}:
+                    values["state"] = "failed" if values["state"] == "reserved" else "indeterminate"
+                    values["updated_at"] = int(datetime.now(tz=timezone.utc).timestamp())
+                    values["receipt_json"] = json.dumps({"reason": "restored_uncertain_outcome"})
                 changed = int(target_db.execute(
                     f"INSERT OR IGNORE INTO {table} ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",
                     tuple(values[column] for column in columns),
@@ -1631,6 +1645,11 @@ def _merge_authority_table(
                         target_db.execute(
                             "UPDATE internal_writer_operations SET state = 'indeterminate', finished_at = ?, receipt_json = ? WHERE operation_key = ? AND state = 'executing'",
                             (values["finished_at"], values["receipt_json"], values["operation_key"]),
+                        )
+                    elif table == "notification_deliveries":
+                        target_db.execute(
+                            "UPDATE notification_deliveries SET state = ?, updated_at = ?, receipt_json = ? WHERE operation_id = ? AND state = ?",
+                            (values["state"], values["updated_at"], values["receipt_json"], values["operation_id"], source_state),
                         )
             target_db.execute("COMMIT")
         except Exception:
@@ -1651,6 +1670,10 @@ def _restore_authority_state(*, validation: dict[str, Any], backup_path: Path, s
         "operation_key", "writer_id", "operation_id", "capability_id", "operation", "resource_type",
         "target_scope", "trigger", "state", "started_at", "finished_at", "request_json", "receipt_json",
     )
+    notification_columns = (
+        "operation_id", "transport", "target_fingerprint", "content_fingerprint", "state",
+        "created_at", "updated_at", "receipt_json",
+    )
     restored: list[dict[str, Any]] = []
     rows = validation.get("authority_state") if isinstance(validation.get("authority_state"), list) else []
     for row in rows:
@@ -1666,6 +1689,10 @@ def _restore_authority_state(*, validation: dict[str, Any], backup_path: Path, s
         elif kind == "internal_writer_receipt":
             inserted = _merge_authority_table(
                 source=source, target=target, table="internal_writer_operations", columns=receipt_columns
+            )
+        elif kind == "notification_delivery":
+            inserted = _merge_authority_table(
+                source=source, target=target, table="notification_deliveries", columns=notification_columns
             )
         else:
             raise ValueError("authority_restore_kind_invalid")

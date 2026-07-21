@@ -220,3 +220,17 @@ seven narrow capability families rather than one generic organization grant. Not
 effects require durable confirmation. The scheduled delivery-before-receipt
 crash interval remains an explicit risk; exactly-once scheduled delivery is not
 claimed. Malicious Python already inside the process remains out of scope.
+
+## Audit v2F closure boundary
+
+All inventoried public mutation surfaces now have a central authorization or
+explicit-denial disposition. Pack-source configuration grants no trust;
+permission changes cannot use wildcard or unknown capabilities; local external
+pack lifecycle stages are distinct and stale-state bound. Arbitrary remote pack
+fetch is denied pending connection-time destination validation and a separate
+digest-bound quarantine stage. This avoids a false DNS-rebinding claim.
+
+Scheduled notification sends persist redacted intent before transport I/O.
+Interrupted sends become indeterminate and cannot be automatically retried.
+Malicious Python already inside the trusted process remains outside this
+authorization threat boundary.

@@ -14,6 +14,7 @@ from pathlib import Path
 from agent.api_server import APIServerHandler, AgentRuntime
 from agent.config import Config
 from agent.packs.remote_fetch import RemotePackFetcher
+from agent.mutation_plan import build_mutation_confirmation
 
 
 def _zip_bytes(files: dict[str, bytes]) -> bytes:
@@ -185,11 +186,19 @@ class TestAPIPacksEndpoints(unittest.TestCase):
         plan = plan_payload["plan"]
         self.assertIsInstance(plan, dict)
         apply_payload = {
-            "plan_id": plan["plan_id"],
-            "confirmation_token": plan["confirmation_token"],
-            "mutation_plan": plan["mutation_plan"],
+            **payload,
+            "mutation_plan": plan,
+            "confirmation": build_mutation_confirmation(plan, confirmation_id="explicit-pack-api-confirmation"),
         }
         return self._post(f"/packs/{operation}/apply", apply_payload)
+
+    def _assert_remote_install_denied(self) -> None:
+        status, payload = self._post(
+            "/packs/install/plan",
+            {"source": "https://example.invalid/pack.zip", "source_kind": "generic_archive_url"},
+        )
+        self.assertEqual(400, status)
+        self.assertEqual("remote_pack_fetch_stage_unimplemented_denied", payload.get("error"))
 
     def test_install_and_list_portable_text_pack_endpoints(self) -> None:
         pack_dir = os.path.join(self.tmpdir.name, "pack_one")
@@ -283,6 +292,8 @@ class TestAPIPacksEndpoints(unittest.TestCase):
         self.assertNotIn("Ignore previous instructions", json.dumps(state_payload, ensure_ascii=True))
 
     def test_remote_install_persists_and_returns_provenance(self) -> None:
+        self._assert_remote_install_denied()
+        return
         archive = _zip_bytes(
             {
                 "repo-main/SKILL.md": b"# Remote Skill\n\nUse the repository notes.\n",
@@ -331,6 +342,8 @@ class TestAPIPacksEndpoints(unittest.TestCase):
         self.assertTrue(install_payload["pack"]["quarantine_path"])
 
     def test_remote_install_blocks_remote_urls_without_trusted_source(self) -> None:
+        self._assert_remote_install_denied()
+        return
         cases = [
             {"source": "https://example.com/skill-pack.zip", "source_kind": "generic_archive_url"},
             {"source": "https://github.com/example/repo", "source_kind": "github_repo"},
@@ -348,6 +361,8 @@ class TestAPIPacksEndpoints(unittest.TestCase):
                 self.assertIn("/pack_sources", str(install_payload["next_question"] or ""))
 
     def test_remote_install_blocks_disallowed_source_id_before_fetch(self) -> None:
+        self._assert_remote_install_denied()
+        return
         storage_root = self.runtime.pack_store.external_storage_root()
         os.makedirs(storage_root, exist_ok=True)
         with open(os.path.join(storage_root, "registry_sources.json"), "w", encoding="utf-8") as handle:
@@ -658,6 +673,8 @@ class TestAPIPacksEndpoints(unittest.TestCase):
         self.assertIn("metadata/normalization.json", install_payload["why"])
 
     def test_remote_install_deduplicates_identical_content_across_sources(self) -> None:
+        self._assert_remote_install_denied()
+        return
         trusted_source_id = self._trust_remote_source("trusted-dedupe")
         archive = _zip_bytes(
             {
@@ -694,6 +711,8 @@ class TestAPIPacksEndpoints(unittest.TestCase):
         self.assertEqual(1, len(self.runtime.pack_store.list_external_packs()))
 
     def test_remote_install_returns_changed_upstream_review_when_source_mutates(self) -> None:
+        self._assert_remote_install_denied()
+        return
         trusted_source_id = self._trust_remote_source("trusted-mutation")
         remote_url = "https://github.com/example/repo/archive/main.zip"
         first_archive = _zip_bytes(

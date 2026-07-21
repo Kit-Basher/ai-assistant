@@ -14,6 +14,7 @@ from agent.policy import (
     mutator_confirmation_required_payload,
     validate_mutator_apply,
 )
+from agent.mutation_plan import build_mutation_confirmation, mutation_plan_fingerprint
 from tests.test_api_packs_endpoints import _config
 from tests.test_managed_local_services import _FakeSearchOpener
 
@@ -84,9 +85,9 @@ class TestPlanModePolicy(unittest.TestCase):
         plan = plan_payload["plan"]
         self.assertIsInstance(plan, dict)
         return {
-            "plan_id": plan["plan_id"],
-            "confirmation_token": plan["confirmation_token"],
-            "mutation_plan": plan["mutation_plan"],
+            **dict(plan_payload.get("operation_payload") or {}),
+            "mutation_plan": plan,
+            "confirmation": build_mutation_confirmation(plan, confirmation_id="explicit-plan-policy-confirmation"),
         }
 
     def test_unknown_operations_default_to_mutating(self) -> None:
@@ -149,25 +150,27 @@ class TestPlanModePolicy(unittest.TestCase):
         body = runtime.search_setup_plan({"base_url": "http://127.0.0.1:8888"})
 
         plan = body["plan"]
-        mutation_plan = plan["mutation_plan"]
-        self.assertEqual("managed_local_service.setup_apply", mutation_plan["action_type"])
-        self.assertEqual("mutating", mutation_plan["classification"])
-        self.assertEqual(plan["confirmation_token"], mutation_plan["confirmation_token"])
-        self.assertTrue(mutation_plan["rollback_supported"])
-        self.assertIn("runtime_search_config", mutation_plan["resources"]["changed"])
+        self.assertEqual("search.setup", plan["action_type"])
+        self.assertEqual("search.service.configure", plan["capability_id"])
+        self.assertEqual("search.setup.v1", plan["executor_id"])
+        self.assertTrue(plan["confirmation_requirement"]["required"])
+        self.assertTrue(plan["recovery"]["rollback_available"])
+        self.assertIn("service:personal-agent-searxng", str(plan["mutation_inventory"]))
 
     def test_managed_searxng_apply_rejects_tampered_policy_plan_before_executor(self) -> None:
         runtime = self._runtime()
         runtime._managed_local_service_executor = unittest.mock.Mock()  # noqa: SLF001
         plan_payload = runtime.search_setup_plan({"base_url": "http://127.0.0.1:8888"})
         plan = plan_payload["plan"]
-        stored = runtime._search_setup_confirmations[plan["plan_id"]]  # noqa: SLF001
-        stored["plan"]["mutation_plan"]["action_type"] = "external_pack.install"
-
-        result = runtime.apply_search_setup({"plan_id": plan["plan_id"], "confirmation_token": plan["confirmation_token"]})
+        tampered = dict(plan)
+        tampered["executor_id"] = "external_pack.install.v1"
+        result = runtime.apply_search_setup({
+            **dict(plan.get("operation_payload") or {}), "mutation_plan": tampered,
+            "confirmation": build_mutation_confirmation(plan, confirmation_id="tamper-search"),
+        })
 
         self.assertFalse(result["ok"])
-        self.assertEqual("plan_action_type_mismatch", result["error"])
+        self.assertIn(result["error"], {"mutation_plan_fingerprint_mismatch", "mutation_operation_scope_mismatch"})
         runtime._managed_local_service_executor.execute_from_pending.assert_not_called()  # type: ignore[union-attr]
 
     def test_managed_searxng_apply_journals_executed_steps_and_changed_resources(self) -> None:
@@ -176,7 +179,7 @@ class TestPlanModePolicy(unittest.TestCase):
         plan = plan_payload["plan"]
 
         with unittest.mock.patch("agent.search.safe_web_search.build_opener", return_value=_FakeSearchOpener({"results": []})):
-            result = runtime.apply_search_setup({"plan_id": plan["plan_id"], "confirmation_token": plan["confirmation_token"]})
+            result = runtime.apply_search_setup(self._plan_apply_payload(plan_payload))
 
         self.assertTrue(result["ok"])
         journal = result["managed_action_journal"]
@@ -208,13 +211,11 @@ class TestPlanModePolicy(unittest.TestCase):
         plan_payload = runtime.plan_pack_lifecycle("external_pack.install", {"source": pack_dir})
         self.assertTrue(plan_payload["ok"])
         plan = plan_payload["plan"]
-        mutation_plan = plan["mutation_plan"]
-        self.assertEqual("plan_mode", mutation_plan["policy_layer"])
-        self.assertEqual("external_pack.install", mutation_plan["action_type"])
-        self.assertEqual("mutating", mutation_plan["classification"])
-        self.assertTrue(mutation_plan["requires_confirmation"])
-        self.assertIn("external_pack_store", mutation_plan["resources"]["changed"])
-        self.assertEqual(plan["confirmation_token"], mutation_plan["confirmation_token"])
+        self.assertEqual("external_pack.install", plan["action_type"])
+        self.assertEqual("pack.lifecycle.install", plan["capability_id"])
+        self.assertEqual("external_pack.install.v1", plan["executor_id"])
+        self.assertTrue(plan["confirmation_requirement"]["required"])
+        self.assertIn("operation:external_pack.install", str(plan["mutation_inventory"]))
 
         result = runtime.apply_pack_lifecycle("external_pack.install", self._plan_apply_payload(plan_payload))
 
@@ -228,11 +229,10 @@ class TestPlanModePolicy(unittest.TestCase):
         handler.do_POST()
         payload = handler.json_payload()
 
-        self.assertEqual(400, handler.status_code)
-        self.assertFalse(payload["ok"])
-        self.assertEqual("confirmation_required", payload["error"])
-        self.assertTrue(payload["requires_plan"])
+        self.assertEqual(200, handler.status_code)
+        self.assertTrue(payload["ok"])
         self.assertTrue(payload["requires_confirmation"])
+        self.assertEqual("pack.lifecycle.install", payload["plan"]["capability_id"])
 
     def test_external_pack_plan_apply_rejects_tampering(self) -> None:
         runtime = self._runtime()
@@ -241,37 +241,38 @@ class TestPlanModePolicy(unittest.TestCase):
 
         missing_plan = dict(apply_payload)
         missing_plan.pop("mutation_plan")
-        self.assertEqual("plan_required", runtime.apply_pack_lifecycle("external_pack.install", missing_plan)["error"])
+        self.assertEqual("scoped_mutation_plan_and_confirmation_required", runtime.apply_pack_lifecycle("external_pack.install", missing_plan)["error"])
 
         bad_token = dict(apply_payload)
-        bad_token["confirmation_token"] = "confirm-wrong"
-        self.assertEqual("invalid_confirmation", runtime.apply_pack_lifecycle("external_pack.install", bad_token)["error"])
+        bad_token["confirmation"] = {**dict(apply_payload["confirmation"]), "plan_fingerprint": "wrong"}
+        self.assertEqual("mutation_confirmation_plan_fingerprint_mismatch", runtime.apply_pack_lifecycle("external_pack.install", bad_token)["error"])
 
         bad_action = dict(apply_payload)
         bad_action["mutation_plan"] = dict(apply_payload["mutation_plan"])
-        bad_action["mutation_plan"]["action_type"] = "external_pack.enable"
-        self.assertEqual("plan_action_type_mismatch", runtime.apply_pack_lifecycle("external_pack.install", bad_action)["error"])
+        bad_action["mutation_plan"]["capability_id"] = "pack.lifecycle.enable"
+        self.assertIn(runtime.apply_pack_lifecycle("external_pack.install", bad_action)["error"], {"mutation_plan_fingerprint_mismatch", "mutation_operation_scope_mismatch"})
 
         bad_resources = dict(apply_payload)
         bad_resources["mutation_plan"] = dict(apply_payload["mutation_plan"])
-        bad_resources["mutation_plan"]["resources"] = {"created": ["other"], "changed": [], "deleted": []}
-        self.assertEqual("plan_apply_mismatch", runtime.apply_pack_lifecycle("external_pack.install", bad_resources)["error"])
+        bad_resources["mutation_plan"]["mutation_inventory"] = [{"operation": "other", "resources": ["other"]}]
+        self.assertEqual("mutation_plan_fingerprint_mismatch", runtime.apply_pack_lifecycle("external_pack.install", bad_resources)["error"])
 
         bad_plan_id = dict(apply_payload)
         bad_plan_id["mutation_plan"] = dict(apply_payload["mutation_plan"])
         bad_plan_id["mutation_plan"]["plan_id"] = "other-plan"
-        self.assertEqual("plan_id_mismatch", runtime.apply_pack_lifecycle("external_pack.install", bad_plan_id)["error"])
+        self.assertEqual("mutation_plan_fingerprint_mismatch", runtime.apply_pack_lifecycle("external_pack.install", bad_plan_id)["error"])
 
     def test_external_pack_plan_apply_rejects_expired_plan(self) -> None:
         runtime = self._runtime()
         plan_payload = runtime.plan_pack_lifecycle("external_pack.install", {"source": self._make_pack_dir("expired-pack")})
         plan = plan_payload["plan"]
-        runtime._pack_lifecycle_confirmations[plan["plan_id"]]["expires_at"] = time.time() - 1  # noqa: SLF001
+        plan["expires_at"] = "2000-01-01T00:00:00+00:00"
+        plan["plan_fingerprint"] = mutation_plan_fingerprint(plan)
 
         result = runtime.apply_pack_lifecycle("external_pack.install", self._plan_apply_payload(plan_payload))
 
         self.assertFalse(result["ok"])
-        self.assertEqual("confirmation_expired", result["error"])
+        self.assertEqual("mutation_confirmation_expired", result["error"])
 
     def test_external_pack_approve_enable_grant_remove_use_plan_apply(self) -> None:
         runtime = self._runtime()

@@ -91,6 +91,16 @@ class SourceFetchController:
 
     def preview(self, source_id: str) -> SourceFetchPreview:
         source_id = str(source_id or "").strip()
+        return SourceFetchPreview(
+            ok=False,
+            source_id=source_id,
+            source_kind=None,
+            url=None,
+            blocked_reason="remote_pack_fetch_stage_unimplemented_denied",
+            user_message="Remote pack fetch-to-quarantine is unavailable. No content was fetched or imported.",
+        )
+        # Retained below as unreachable reference logic until a separately
+        # authorized, digest-bound quarantine-fetch stage is implemented.
         source_payload, blocked = self._approved_source_payload(source_id)
         if blocked is not None:
             return SourceFetchPreview(
@@ -134,6 +144,17 @@ class SourceFetchController:
     def fetch_import_for_review(self, preview: SourceFetchPreview | dict[str, Any]) -> SourceFetchResult:
         row = preview.to_dict() if isinstance(preview, SourceFetchPreview) else dict(preview or {})
         source_id = str(row.get("source_id") or "").strip()
+        return SourceFetchResult(
+            ok=False,
+            source_id=source_id,
+            source_kind=str(row.get("source_kind") or "") or None,
+            fetched_to_quarantine=False,
+            imported_for_review=False,
+            blocked_reason="remote_pack_fetch_stage_unimplemented_denied",
+            user_message="Remote pack fetch confirmation is unavailable. No content was fetched or imported.",
+        )
+        # Retained below as unreachable reference logic until a separately
+        # authorized, digest-bound quarantine-fetch stage is implemented.
         if not bool(row.get("ok")):
             reason = str(row.get("blocked_reason") or "source_fetch_preview_blocked")
             return SourceFetchResult(

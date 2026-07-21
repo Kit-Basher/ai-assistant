@@ -35,7 +35,7 @@
   ],
   "schema": "personal-agent.mutation-surface-inventory.v2",
   "scope": "public API mutations plus assistant, Telegram, CLI, skill-pack, executor, and background entry points",
-  "source_commit": "audit-v2d-working-tree-on-1521878e729aea5669a7adb67db711c2513ad718",
+  "source_commit": "audit-v2f-working-tree-on-724de3cbbbd25b2396d0f660fb0062b84d339944",
   "status_definitions": {
     "central_authorized": "central capability schema, policy, Universal Mutation Plan, confirmation, and Executor Registry",
     "internal_state_write": "bounded scheduled/runtime bookkeeping, not public authority",
@@ -47,16 +47,32 @@
   },
   "summary": {
     "canonical_front_door": 2,
-    "central_authorized": 46,
-    "internal_state_write": 1,
-    "legacy_unmigrated": 10,
-    "plan_confirm_gated": 7,
+    "central_authorized": 65,
+    "internal_state_write": 2,
     "read_only": 11,
     "read_only_preview": 14,
     "removed": 2,
-    "unimplemented_denied": 1
+    "unimplemented_denied": 2
   },
   "surfaces": [
+    {
+      "authority": "capability policy + Executor Registry",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "DELETE",
+      "route": "/pack_sources/catalog/{catalog_id}",
+      "status": "central_authorized",
+      "surface": "api.delete:/pack_sources/catalog/{catalog_id}"
+    },
+    {
+      "authority": "capability policy + Executor Registry",
+      "effect": "mutating",
+      "kind": "api_route",
+      "method": "DELETE",
+      "route": "/packs/{pack_id}",
+      "status": "central_authorized",
+      "surface": "api.delete:/packs/{pack_id}"
+    },
     {
       "authority": "runtime service",
       "effect": "read_only",
@@ -463,30 +479,30 @@
       "surface": "api.post:/models/refresh"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/pack_sources/catalog",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.post:/pack_sources/catalog"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/packs/approve",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.post:/packs/approve"
     },
     {
-      "authority": "domain Plan/apply controller",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/packs/approve/apply",
-      "status": "plan_confirm_gated",
+      "status": "central_authorized",
       "surface": "api.post:/packs/approve/apply"
     },
     {
@@ -499,21 +515,21 @@
       "surface": "api.post:/packs/approve/plan"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/packs/enable",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.post:/packs/enable"
     },
     {
-      "authority": "domain Plan/apply controller",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/packs/enable/apply",
-      "status": "plan_confirm_gated",
+      "status": "central_authorized",
       "surface": "api.post:/packs/enable/apply"
     },
     {
@@ -526,21 +542,21 @@
       "surface": "api.post:/packs/enable/plan"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/packs/grant",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.post:/packs/grant"
     },
     {
-      "authority": "domain Plan/apply controller",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/packs/grant/apply",
-      "status": "plan_confirm_gated",
+      "status": "central_authorized",
       "surface": "api.post:/packs/grant/apply"
     },
     {
@@ -553,21 +569,21 @@
       "surface": "api.post:/packs/grant/plan"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/packs/install",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.post:/packs/install"
     },
     {
-      "authority": "domain Plan/apply controller",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/packs/install/apply",
-      "status": "plan_confirm_gated",
+      "status": "central_authorized",
       "surface": "api.post:/packs/install/apply"
     },
     {
@@ -580,21 +596,21 @@
       "surface": "api.post:/packs/install/plan"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/packs/remove",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.post:/packs/remove"
     },
     {
-      "authority": "domain Plan/apply controller",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/packs/remove/apply",
-      "status": "plan_confirm_gated",
+      "status": "central_authorized",
       "surface": "api.post:/packs/remove/apply"
     },
     {
@@ -679,12 +695,12 @@
       "surface": "api.post:/search/query"
     },
     {
-      "authority": "domain Plan/apply controller",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/search/setup/apply",
-      "status": "plan_confirm_gated",
+      "status": "central_authorized",
       "surface": "api.post:/search/setup/apply"
     },
     {
@@ -697,12 +713,12 @@
       "surface": "api.post:/search/setup/plan"
     },
     {
-      "authority": "domain Plan/apply controller",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "POST",
       "route": "/search/setup/prerequisite/apply",
-      "status": "plan_confirm_gated",
+      "status": "central_authorized",
       "surface": "api.post:/search/setup/prerequisite/apply"
     },
     {
@@ -787,39 +803,39 @@
       "surface": "api.put:/defaults"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "PUT",
       "route": "/pack_sources/catalog/{catalog_id}",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.put:/pack_sources/catalog/{catalog_id}"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "PUT",
       "route": "/pack_sources/policy",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.put:/pack_sources/policy"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "PUT",
       "route": "/pack_sources/{source_id}/policy",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.put:/pack_sources/{source_id}/policy"
     },
     {
-      "authority": "legacy runtime/controller mutation",
+      "authority": "capability policy + Executor Registry",
       "effect": "mutating",
       "kind": "api_route",
       "method": "PUT",
       "route": "/permissions",
-      "status": "legacy_unmigrated",
+      "status": "central_authorized",
       "surface": "api.put:/permissions"
     },
     {
@@ -878,6 +894,18 @@
       "path": "external packs are normalized data/instructions only; executable fields and executable archives denied",
       "status": "unimplemented_denied",
       "surface": "external_pack.foreign_code"
+    },
+    {
+      "kind": "pack_network_effect",
+      "path": "combined remote fetch/install is denied until separate digest-bound quarantine fetch authorization exists",
+      "status": "unimplemented_denied",
+      "surface": "external_pack.remote_fetch"
+    },
+    {
+      "kind": "background_job",
+      "path": "durable operation identity -> reserved -> executing -> terminal/indeterminate; indeterminate never auto-resends",
+      "status": "internal_state_write",
+      "surface": "notification.scheduled_delivery"
     }
   ]
 }

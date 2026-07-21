@@ -57,7 +57,7 @@ class TestPackSourceFetchPreview(unittest.TestCase):
         preview = self._controller().preview("remote-pack")
 
         self.assertFalse(preview.ok)
-        self.assertEqual("source_not_approved_by_user", preview.blocked_reason)
+        self.assertEqual("remote_pack_fetch_stage_unimplemented_denied", preview.blocked_reason)
 
     def test_denied_source_cannot_fetch(self) -> None:
         source_id = self._approve_lead("https://example.com/pack.zip")
@@ -66,7 +66,7 @@ class TestPackSourceFetchPreview(unittest.TestCase):
         preview = self._controller().preview(source_id)
 
         self.assertFalse(preview.ok)
-        self.assertEqual("source_denied", preview.blocked_reason)
+        self.assertEqual("remote_pack_fetch_stage_unimplemented_denied", preview.blocked_reason)
 
     def test_generic_web_result_cannot_fetch(self) -> None:
         self.discovery.create_catalog_source(
@@ -86,9 +86,9 @@ class TestPackSourceFetchPreview(unittest.TestCase):
         preview = self._controller().preview("generic-page")
 
         self.assertFalse(preview.ok)
-        self.assertEqual("source_not_fetchable", preview.blocked_reason)
+        self.assertEqual("remote_pack_fetch_stage_unimplemented_denied", preview.blocked_reason)
 
-    def test_approved_archive_previews_are_allowed_but_hostile(self) -> None:
+    def test_approved_archive_previews_remain_denied(self) -> None:
         for url, kind in (
             ("https://github.com/acme/pack/archive/main.zip", "github_archive"),
             ("https://example.com/pack.zip", "generic_archive_url"),
@@ -96,13 +96,13 @@ class TestPackSourceFetchPreview(unittest.TestCase):
             with self.subTest(kind=kind):
                 source_id = self._approve_lead(url, kind=kind)
                 preview = self._controller().preview(source_id)
-                self.assertTrue(preview.ok)
-                self.assertEqual(kind, preview.source_kind)
+                self.assertFalse(preview.ok)
+                self.assertIsNone(preview.source_kind)
                 self.assertTrue(preview.content_remains_hostile)
-                self.assertIn("content remains hostile", preview.user_message.lower())
-                self.assertIn("no pack will be approved", preview.user_message.lower())
+                self.assertEqual("remote_pack_fetch_stage_unimplemented_denied", preview.blocked_reason)
+                self.assertIn("unavailable", preview.user_message.lower())
 
-    def test_fetch_import_result_is_review_only(self) -> None:
+    def test_fetch_import_result_is_explicitly_denied(self) -> None:
         url = "https://example.com/pack.zip"
         source_id = self._approve_lead(url)
         archive = _zip_bytes({"repo-main/SKILL.md": b"# Remote Skill\n\nUse as untrusted guidance.\n"})
@@ -115,23 +115,15 @@ class TestPackSourceFetchPreview(unittest.TestCase):
 
         result = controller.fetch_import_for_review(preview)
 
-        self.assertTrue(result.ok)
-        self.assertTrue(result.fetched_to_quarantine)
-        self.assertTrue(result.imported_for_review)
-        self.assertEqual("imported_for_review", result.lifecycle_state)
-        self.assertEqual("review_approve", result.next_step)
+        self.assertFalse(result.ok)
+        self.assertFalse(result.fetched_to_quarantine)
+        self.assertFalse(result.imported_for_review)
+        self.assertEqual("remote_pack_fetch_stage_unimplemented_denied", result.blocked_reason)
         self.assertFalse(result.did_approve)
         self.assertFalse(result.did_enable)
         self.assertFalse(result.did_grant_permissions)
         self.assertFalse(result.did_use_pack)
-        self.assertEqual("external_pack_import_record", result.managed_action_journal.get("action_type"))
-        self.assertTrue(result.managed_action_journal.get("verification_result", {}).get("ok"))
-        assert result.pack is not None
-        canonical = result.pack.get("canonical_pack") if isinstance(result.pack.get("canonical_pack"), dict) else {}
-        trust = canonical.get("trust_anchor") if isinstance(canonical.get("trust_anchor"), dict) else {}
-        runtime = canonical.get("runtime") if isinstance(canonical.get("runtime"), dict) else {}
-        self.assertEqual("unreviewed", trust.get("local_review_status"))
-        self.assertFalse(bool(runtime.get("enabled", False)))
+        self.assertIsNone(result.pack)
 
     def test_blocked_archive_hardening_still_blocks_malicious_archive(self) -> None:
         url = "https://example.com/bad.zip"
@@ -151,7 +143,7 @@ class TestPackSourceFetchPreview(unittest.TestCase):
         self.assertFalse(result.did_enable)
         self.assertFalse(result.did_grant_permissions)
         self.assertFalse(result.did_use_pack)
-        self.assertIn("blocked", result.user_message.lower())
+        self.assertEqual("remote_pack_fetch_stage_unimplemented_denied", result.blocked_reason)
 
     def test_repeated_yes_equivalent_does_not_skip_review_approval(self) -> None:
         url = "https://example.com/pack.zip"
@@ -170,14 +162,11 @@ class TestPackSourceFetchPreview(unittest.TestCase):
         )
         second = self._controller(remote_fetcher=second_fetcher).fetch_import_for_review(controller.preview(source_id))
 
-        self.assertTrue(first.ok)
-        self.assertTrue(second.ok)
-        for row in self.store.list_external_packs():
-            canonical = row.get("canonical_pack") if isinstance(row.get("canonical_pack"), dict) else {}
-            trust = canonical.get("trust_anchor") if isinstance(canonical.get("trust_anchor"), dict) else {}
-            runtime = canonical.get("runtime") if isinstance(canonical.get("runtime"), dict) else {}
-            self.assertEqual("unreviewed", trust.get("local_review_status"))
-            self.assertFalse(bool(runtime.get("enabled", False)))
+        self.assertFalse(first.ok)
+        self.assertFalse(second.ok)
+        self.assertEqual("remote_pack_fetch_stage_unimplemented_denied", first.blocked_reason)
+        self.assertEqual("remote_pack_fetch_stage_unimplemented_denied", second.blocked_reason)
+        self.assertEqual([], self.store.list_external_packs())
 
 
 if __name__ == "__main__":

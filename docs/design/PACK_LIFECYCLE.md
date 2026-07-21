@@ -9,9 +9,9 @@ Canonical external pack format: [`docs/design/EXTERNAL_PACK_FORMAT.md`](/home/c/
 
 `agent/packs/acquisition.py` is the assistant-facing workflow for missing capability requests. It searches approved/trusted catalog sources only, reports source-trust blockers, offers preview-only scaffold fallbacks, and hands each next step to lifecycle actions without skipping gates. See [`docs/design/PACK_ACQUISITION.md`](/home/c/personal-agent/docs/design/PACK_ACQUISITION.md).
 
-`agent/packs/source_approval.py` records explicit user trust for a source lead discovered through safe web-search metadata. Source approval is one gate only: it may create/update a source catalog and policy record, but it does not fetch, download, import, install, approve, enable, configure, grant permissions, or use a pack.
+`agent/packs/source_approval.py` retains offline preview/test primitives. Product source catalog and query-policy writes are separate centrally authorized operations; the legacy assistant confirmation is denied.
 
-`agent/packs/source_fetch_preview.py` handles the next gate after source approval: previewing and, after a separate confirmation, fetching an approved source into quarantine and importing it as a review-only candidate. It does not approve, enable, configure, grant permissions, use, or invoke the fetched pack.
+`agent/packs/source_fetch_preview.py` now fails closed with `remote_pack_fetch_stage_unimplemented_denied`. It cannot preview or apply a product fetch, including through stale assistant follow-ups.
 
 `agent/packs/lifecycle_actions.py` performs gated lifecycle continuations. It accepts a `PackLifecycleResult`, validates that the requested action matches the current state, and then calls an existing safe handler for exactly one transition. It refuses mismatched states, blocked/removed packs, missing handlers, and attempts to skip directly across review, enablement, configuration, or permission gates.
 
@@ -38,11 +38,11 @@ Canonical external pack format: [`docs/design/EXTERNAL_PACK_FORMAT.md`](/home/c/
 
 External packs are never bundled native abilities. Starter catalogs are discoverable sources only, not active capabilities.
 
-Remote external pack sources are hostile by default. GitHub repositories, GitHub archives, generic archive URLs, and online registries require explicit source policy or source approval before fetch/import. GitHub is not trusted by default, and a local starter catalog entry does not make a remote URL trusted.
+Remote external pack sources are hostile by default. Source policy permits metadata queries only. GitHub repositories, archives, generic archive URLs, and catalog entries cannot be acquired by the current product path.
 
-Safe web-search source leads remain untrusted until explicit source approval records a source id. Even after source approval, the content is still hostile; approval only permits a future fetch/preview into quarantine.
+Safe web-search source leads remain untrusted advisory metadata. Recording catalog/query policy does not permit fetch or preview into quarantine.
 
-Quarantine fetch/import-for-review is separate from source approval and separate from pack review approval. It may create an imported candidate row, but that row remains unreviewed and disabled. The next safe step after a successful import is review/approval.
+Future quarantine fetch/import-for-review must remain separate from source policy, pack review approval, enablement, grants, and installation. It is currently unavailable.
 
 `agent/packs/review_state_ux.py` renders the mandatory review-state checkpoint for imported candidates. Before approval continuation, assistant responses must show that the pack is imported for review only, not approved, not enabled, has no permissions granted, is not usable yet, and requires review/approval next. Review-state output is based on structured metadata and lifecycle results only; it must not dump raw imported documents, manifests, catalog entries, prompt material, secrets, private paths, or hostile text.
 
@@ -52,7 +52,7 @@ Enablement is also a separate explicit gate after review approval. The first con
 
 Configuration and permission are separate from enablement. For managed adapters, the assistant first shows the permission/configuration requirement, including adapter kind, scope, allowed file types, whether a local path is involved, and the remaining lifecycle gate. A later scoped grant preview is required before recording metadata/config. Recording a permission/configuration grant does not execute code, invoke a managed adapter, read or parse private files, or use the pack. If the lifecycle becomes `usable=true` after the grant, the assistant reports readiness and asks for the next specific input or action instead of running automatically.
 
-Approved source policy is not content trust. Catalog listings are validated with a strict schema, unknown or execution-implying fields are rejected, remote URLs must be HTTPS, local catalog paths must stay inside approved catalog roots, and catalog prose is treated as untrusted metadata. Archive fetches land in quarantine only, and extraction blocks traversal, symlinks, special files, hidden files, nested archives, executable bits, duplicate paths, oversized files, excessive member counts, excessive expansion, and unsafe post-write containment before normalization/scanning can proceed.
+Approved source policy is not content trust. Catalog listings are validated with a strict schema, unknown or execution-implying fields are rejected, remote URLs must be HTTPS, local catalog paths must stay inside approved catalog roots, and catalog prose is untrusted metadata. Remote archive acquisition is denied. Offline hostile-archive tests retain the quarantine extraction proof for traversal, links, special files, hidden files, nested archives, executable bits, duplicate paths, size/count/expansion bounds, and post-write containment required by any future fetch stage.
 
 Imported pack documents are untrusted guidance, never assistant authority. Normalized imported `SKILL.md` and prompt material are wrapped with an internal warning that runtime/system policy wins over pack text. Strong prompt-injection patterns in primary instruction files, including requests to ignore system/developer instructions, leak secrets, auto-approve/auto-enable, run shell or dependency installs, or disable safety gates, block the import and require manual rewrite/review.
 
@@ -108,3 +108,11 @@ Invocation is never automatic after permission grant. A user must ask for a spec
 `scripts/external_pack_safety_smoke.py` is the focused regression guard for hostile external-pack intake. It creates temporary malicious fixtures and checks the major gates together: remote source trust, strict catalog schema, archive extraction hardening, prompt-injection handling, lifecycle/managed-adapter gates, and support/tombstone redaction.
 
 Run this smoke before expanding online skill ecosystem support. Passing it does not make external content trusted; it only confirms the current hostile-by-default intake chain still blocks the known regression classes.
+
+## v2F lifecycle boundary
+
+Install, approve, enable, grant, remove, and permission policy changes are
+distinct centrally authorized operations. Approval does not enable; enablement
+does not grant; grants never exceed hard policy limits. Version/content/grant
+or policy drift invalidates pending confirmation. Foreign executable/plugin
+packs and dependency installation remain denied.

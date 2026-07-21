@@ -816,3 +816,12 @@ It does not route inference. Assistant writes preview there, then an authorized
 executor re-enters the same `AgentOrchestrator` command implementation through
 a private one-shot sentinel. Web and Telegram therefore keep one assistant
 entity and one orchestration path.
+
+## v2F mutation boundary
+
+Assistant, API, CLI, and Telegram aliases resolve to the same canonical
+operation before preview. `route_inference()` remains the sole inference
+orchestrator and Telegram remains a thin, disabled transport. RuntimeTruthService
+activation state is included in v2F target binding and revalidated before
+execution. Scheduled notification delivery is separate bounded bookkeeping,
+not public authorization.

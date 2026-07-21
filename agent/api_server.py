@@ -29,7 +29,7 @@ import urllib.parse
 import urllib.request
 
 from agent.config import Config, default_registry_root_path, load_config, packaged_asset_root_path, runtime_instance
-from agent.capability_policy import TrustedInvocationContext
+from agent.capability_policy import TrustedInvocationContext, stable_fingerprint
 from agent.chat_response_serializer import serialize_orchestrator_chat_response
 from agent.commands import parse_command
 from agent.error_kind import classify_error_kind
@@ -93,6 +93,7 @@ from agent.version import read_build_info, read_git_commit, read_packaged_build_
 from agent.runtime_truth_service import RuntimeTruthService
 from agent.provider_model_authorization import ProviderModelAuthorizationService
 from agent.organization_memory_authorization import MUTATING_ASSISTANT_COMMANDS, OrganizationMemoryAuthorizationService
+from agent.pack_search_authorization import PackSearchAuthorizationService
 from agent.runtime_lifecycle import RuntimeLifecyclePhase, derive_runtime_lifecycle_phase
 from agent.runtime_events import RuntimeEventRecorder
 from agent.runtime_contract import (
@@ -634,9 +635,6 @@ class AgentRuntime:
         self._telegram_status_cache_at = 0.0
         self._telegram_status_cache_ttl_seconds = 5.0
         self._managed_local_service_executor: ManagedLocalServiceExecutor | None = None
-        self._search_setup_confirmations: dict[str, dict[str, Any]] = {}
-        self._podman_prerequisite_confirmations: dict[str, dict[str, Any]] = {}
-        self._pack_lifecycle_confirmations: dict[str, dict[str, Any]] = {}
         self._prerequisite_command_finder: Callable[[str], str | None] = shutil.which
         self._prerequisite_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run
         self._search_runtime_config_error: str | None = None
@@ -785,8 +783,13 @@ class AgentRuntime:
             path=autopilot_state_path,
             max_recent_apply_ids=max(1, int(self.config.llm_autopilot_churn_recent_limit)),
         )
+        notification_store_path = self._runtime_state_path(
+            self.config,
+            self.config.autopilot_notify_store_path,
+            "llm_notifications.json",
+        )
         self._notification_store = NotificationStore(
-            path=self.config.autopilot_notify_store_path,
+            path=notification_store_path,
             max_recent=max(50, int(self.config.llm_notifications_max_items)),
             max_items=max(1, int(self.config.llm_notifications_max_items)),
             max_age_days=max(0, int(self.config.llm_notifications_max_age_days)),
@@ -804,6 +807,10 @@ class AgentRuntime:
             state_root=Path(self.config.db_path).expanduser().resolve().parent,
         )
         self._organization_memory_authorization = OrganizationMemoryAuthorizationService(
+            self,
+            state_root=Path(self.config.db_path).expanduser().resolve().parent,
+        )
+        self._pack_search_authorization = PackSearchAuthorizationService(
             self,
             state_root=Path(self.config.db_path).expanduser().resolve().parent,
         )
@@ -2131,111 +2138,12 @@ class AgentRuntime:
             "external_pack.remove",
         }
 
-    def _store_pack_lifecycle_confirmation(self, *, action_type: str, payload: dict[str, Any]) -> dict[str, Any]:
-        plan_id = f"pack-{action_type.rsplit('.', 1)[-1]}-{uuid.uuid4().hex[:10]}"
-        token = f"confirm-{uuid.uuid4().hex[:16]}"
-        expires_at = time.time() + 600
-        mutation_plan = build_mutator_plan(
-            action_type=action_type,
-            resources=self._pack_mutator_resources(action_type, payload),
-            rollback_scope=self._pack_rollback_scope(action_type),
-            rollback_supported=self._pack_rollback_supported(action_type),
-            confirmation_token=token,
-            expires_at=expires_at,
-            plan_id=plan_id,
-        )
-        plan = {
-            "plan_id": plan_id,
-            "confirmation_token": token,
-            "expires_at": int(expires_at),
-            "requires_confirmation": True,
-            "action_type": action_type,
-            "operation_payload": self._pack_plan_public_payload(payload),
-            "operation_payload_hash": self._pack_plan_payload_hash(payload),
-            "mutation_plan": mutation_plan,
-            "safety_notes": [
-                "This plan covers one external pack lifecycle transition only.",
-                "Approval does not enable, grant, invoke, or use the pack.",
-                "Enablement does not grant permissions, invoke, or use the pack.",
-                "Permission grants record metadata only and do not read or parse private file contents.",
-                "Search results cannot install or import packs directly.",
-            ],
-        }
-        self._pack_lifecycle_confirmations[plan_id] = {
-            "plan": dict(plan),
-            "payload": dict(payload),
-            "confirmation_token": token,
-            "expires_at": expires_at,
-            "consumed": False,
-        }
-        return {"ok": True, "requires_confirmation": True, "plan": plan}
-
     def plan_pack_lifecycle(self, action_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        payload = dict(payload or {})
-        decision = classify_operation(action_type)
-        if decision.classification != "mutating":
-            return {"ok": False, "error": "read_only_operation_does_not_need_plan", "mutated": False}
-        return self._store_pack_lifecycle_confirmation(action_type=action_type, payload=payload)
-
-    def _validate_pack_lifecycle_apply(
-        self,
-        action_type: str,
-        payload: dict[str, Any] | None = None,
-    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-        payload = dict(payload or {})
-        token = str(payload.get("confirmation_token") or "").strip()
-        plan_id = str(payload.get("plan_id") or "").strip()
-        submitted_plan = payload.get("mutation_plan") if isinstance(payload.get("mutation_plan"), dict) else None
-        if submitted_plan is None:
-            return None, {"ok": False, "error": "plan_required", "mutated": False}
-        stored = self._confirmation_by_plan_or_token(self._pack_lifecycle_confirmations, plan_id=plan_id, token=token)
-        if not stored or str(stored.get("confirmation_token") or "") != token:
-            return None, {"ok": False, "error": "invalid_confirmation", "mutated": False}
-        if bool(stored.get("consumed")):
-            return None, {"ok": False, "error": "confirmation_consumed", "mutated": False}
-        if float(stored.get("expires_at") or 0) <= time.time():
-            return None, {"ok": False, "error": "confirmation_expired", "mutated": False}
-        plan = stored.get("plan") if isinstance(stored.get("plan"), dict) else {}
-        stored_plan = plan.get("mutation_plan") if isinstance(plan.get("mutation_plan"), dict) else None
-        ok, error = validate_mutator_apply(
-            submitted_plan,
-            expected_action_type=action_type,
-            confirmation_token=token,
-        )
-        if not ok:
-            return None, {"ok": False, "error": error or "policy_plan_invalid", "mutated": False}
-        if str(submitted_plan.get("plan_id") or "") != str(stored_plan.get("plan_id") if isinstance(stored_plan, dict) else ""):
-            return None, {"ok": False, "error": "plan_id_mismatch", "mutated": False}
-        if submitted_plan != stored_plan:
-            return None, {"ok": False, "error": "plan_apply_mismatch", "mutated": False}
-        stored["consumed"] = True
-        return stored, None
+        _ok, body = self.route_pack_search_mutation(action_type, dict(payload or {}))
+        return body
 
     def apply_pack_lifecycle(self, action_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        stored, error = self._validate_pack_lifecycle_apply(action_type, payload)
-        if error is not None:
-            return error
-        assert stored is not None
-        plan_payload = dict(stored.get("payload") if isinstance(stored.get("payload"), dict) else {})
-        if action_type == "external_pack.install":
-            ok, body = self.packs_install(plan_payload)
-        elif action_type == "external_pack.approve":
-            plan_payload["approve"] = True
-            ok, body = self.packs_approve(plan_payload)
-        elif action_type == "external_pack.enable":
-            ok, body = self.packs_enable(plan_payload)
-        elif action_type == "external_pack.grant":
-            ok, body = self.packs_grant(plan_payload)
-        elif action_type == "external_pack.remove":
-            ok, body = self.delete_external_pack(
-                str(plan_payload.get("pack_id") or "").strip(),
-                changed_by=str(plan_payload.get("changed_by") or "loopback_operator"),
-            )
-        else:
-            return {"ok": False, "error": "unknown_pack_lifecycle_action", "mutated": False}
-        body = dict(body if isinstance(body, dict) else {})
-        body.setdefault("mutated", bool(ok))
-        body["plan_mode"] = {"policy_layer": "plan_mode", "action_type": action_type, "plan_id": stored["plan"]["plan_id"]}
+        _ok, body = self.route_pack_search_mutation(action_type, dict(payload or {}))
         return body
 
     def packs_grant(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
@@ -2317,6 +2225,26 @@ class AgentRuntime:
         source_value = payload.get("source")
         source_text = str(source_value or "").strip() if not isinstance(source_value, dict) else ""
         pack_dir = str(payload.get("path") or "").strip()
+        remote_keys = ("url", "source_url", "download_url", "archive_url", "base_url")
+        remote_requested = bool(
+            any(str(payload.get(key) or "").strip() for key in remote_keys)
+            or "://" in source_text
+            or (
+                isinstance(source_value, dict)
+                and (
+                    any(str(source_value.get(key) or "").strip() for key in remote_keys)
+                    or str(source_value.get("kind") or "").strip().lower()
+                    in {"github_repo", "github_archive", "generic_archive_url"}
+                )
+            )
+        )
+        if remote_requested:
+            return self._pack_error(
+                error="remote_pack_fetch_stage_unimplemented_denied",
+                error_kind="authorization_denied",
+                message="Remote pack acquisition is unavailable. No URL was opened and no content was fetched or imported.",
+                next_question="Provide a local text-pack directory, or wait for a separately authorized digest-bound quarantine-fetch stage.",
+            )
         source_id = str(
             (source_value.get("source_id") if isinstance(source_value, dict) else payload.get("source_id"))
             or ""
@@ -9632,6 +9560,14 @@ class AgentRuntime:
         """Route a v2E user mutation through durable central authorization."""
         return self._organization_memory_authorization.route(operation, dict(payload or {}))
 
+    def route_pack_search_mutation(
+        self,
+        operation: str,
+        payload: dict[str, Any] | None = None,
+    ) -> tuple[bool, dict[str, Any]]:
+        """Route a v2F pack/source/permission/search write through durable authorization."""
+        return self._pack_search_authorization.route(operation, dict(payload or {}))
+
     def execute_authorized_assistant_mutation(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         """Executor-only bridge back into the one canonical assistant command path."""
         command = str(payload.get("command") or "").strip().lower()
@@ -12668,7 +12604,7 @@ class AgentRuntime:
         plan = self._search_setup_plan_from_pending(params)
         return self._execute_search_setup_plan(plan)
 
-    def search_setup_plan(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _build_search_setup_execution_plan(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = dict(payload or {})
         base_url = str(payload.get("searxng_base_url") or payload.get("base_url") or "").strip()
         if base_url:
@@ -12697,7 +12633,7 @@ class AgentRuntime:
                     "No page fetching, browser automation, downloads, or pack install runs from search.",
                 ],
             }
-            return self._store_search_setup_confirmation(plan)
+            return self._search_setup_execution_preview(plan)
 
         services = self.managed_services_status()
         services_rows = services.get("services") if isinstance(services.get("services"), list) else []
@@ -12738,7 +12674,7 @@ class AgentRuntime:
         )
         engine = str(engine_choice.get("selected_engine") or "")
         if str(engine_choice.get("setup_mode") or "") == "podman_prerequisite":
-            return self._store_podman_prerequisite_confirmation(self._build_podman_prerequisite_plan(engine_choice))
+            return self._podman_prerequisite_execution_preview(self._build_podman_prerequisite_plan(engine_choice))
         if not engine:
             return {
                 "ok": False,
@@ -12812,36 +12748,29 @@ class AgentRuntime:
         }
         if setup_plan["engine_warning"]:
             setup_plan["safety_notes"].append(str(setup_plan["engine_warning"]))
-        return self._store_search_setup_confirmation(setup_plan)
+        return self._search_setup_execution_preview(setup_plan)
 
-    def podman_prerequisite_plan(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _build_podman_prerequisite_execution_plan(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         _ = payload
-        return self._store_podman_prerequisite_confirmation(
+        return self._podman_prerequisite_execution_preview(
             self._build_podman_prerequisite_plan({"reason": "Podman is required before managed SearXNG setup."})
         )
 
+    def search_setup_plan(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        request = dict(payload or {})
+        raw = self._build_search_setup_execution_plan(request)
+        raw_plan = raw.get("_execution_plan") or raw.get("plan") or raw
+        operation = "search.prerequisite" if str(raw_plan.get("setup_mode") or "") == "podman_prerequisite" else "search.setup"
+        _ok, body = self.route_pack_search_mutation(operation, request)
+        return body
+
+    def podman_prerequisite_plan(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        _ok, body = self.route_pack_search_mutation("search.prerequisite", dict(payload or {}))
+        return body
+
     def apply_podman_prerequisite(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        payload = dict(payload or {})
-        token = str(payload.get("confirmation_token") or "").strip()
-        plan_id = str(payload.get("plan_id") or "").strip()
-        stored = self._confirmation_by_plan_or_token(self._podman_prerequisite_confirmations, plan_id=plan_id, token=token)
-        if not stored or str(stored.get("confirmation_token") or "") != token:
-            return {"ok": False, "error": "invalid_confirmation", "mutated": False}
-        if bool(stored.get("consumed")):
-            return {"ok": False, "error": "confirmation_consumed", "mutated": False}
-        if float(stored.get("expires_at") or 0) <= time.time():
-            return {"ok": False, "error": "confirmation_expired", "mutated": False}
-        if self._safe_mode_enabled():
-            return {
-                "ok": False,
-                "error": "safe_mode_blocked",
-                "error_kind": "safe_mode_blocked",
-                "message": "Podman prerequisite setup is blocked while safe mode is active.",
-                "mutated": False,
-            }
-        stored["consumed"] = True
-        plan = dict(stored.get("plan") if isinstance(stored.get("plan"), dict) else {})
-        return self._execute_podman_prerequisite_plan(plan)
+        _ok, body = self.route_pack_search_mutation("search.prerequisite", dict(payload or {}))
+        return body
 
     def _build_podman_prerequisite_plan(self, engine_choice: dict[str, Any]) -> dict[str, Any]:
         apt_get = self._prerequisite_command_finder("apt-get")
@@ -12872,21 +12801,8 @@ class AgentRuntime:
             ],
         }
 
-    def _store_podman_prerequisite_confirmation(self, plan: dict[str, Any]) -> dict[str, Any]:
-        plan_id = f"podman-prereq-{uuid.uuid4().hex[:10]}"
-        token = f"confirm-{uuid.uuid4().hex[:16]}"
-        expires_at = time.time() + 600
-        public_plan = dict(plan)
-        public_plan.update({"plan_id": plan_id, "confirmation_token": token, "expires_at": int(expires_at)})
-        stored_plan = dict(plan)
-        stored_plan.update({"plan_id": plan_id, "confirmation_token": token})
-        self._podman_prerequisite_confirmations[plan_id] = {
-            "plan": stored_plan,
-            "confirmation_token": token,
-            "expires_at": expires_at,
-            "consumed": False,
-        }
-        return {"ok": True, "requires_confirmation": True, "plan": public_plan}
+    def _podman_prerequisite_execution_preview(self, plan: dict[str, Any]) -> dict[str, Any]:
+        return {"ok": True, "requires_confirmation": True, "plan": dict(plan)}
 
     def _execute_podman_prerequisite_plan(self, plan: dict[str, Any]) -> dict[str, Any]:
         journal = ManagedActionJournal(action_type="podman_prerequisite_setup", target="searxng:podman")
@@ -13086,83 +13002,15 @@ class AgentRuntime:
         }
 
     def apply_search_setup(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        payload = dict(payload or {})
-        token = str(payload.get("confirmation_token") or "").strip()
-        plan_id = str(payload.get("plan_id") or "").strip()
-        if self._confirmation_by_plan_or_token(self._podman_prerequisite_confirmations, plan_id=plan_id, token=token):
-            return self.apply_podman_prerequisite(payload)
-        embedded_plan = payload.get("plan") if isinstance(payload.get("plan"), dict) else None
-        if embedded_plan is not None and not token:
-            plan = dict(embedded_plan)
-            token = str(plan.get("confirmation_token") or "").strip()
-            stored = {"plan": plan, "confirmation_token": token, "expires_at": time.time() + 1, "consumed": False}
-        else:
-            stored = self._confirmation_by_plan_or_token(self._search_setup_confirmations, plan_id=plan_id, token=token)
-        if not stored or str(stored.get("confirmation_token") or "") != token:
-            return {"ok": False, "error": "invalid_confirmation", "mutated": False}
-        if bool(stored.get("consumed")):
-            return {"ok": False, "error": "confirmation_consumed", "mutated": False}
-        if float(stored.get("expires_at") or 0) <= time.time():
-            return {"ok": False, "error": "confirmation_expired", "mutated": False}
-        plan = dict(stored.get("plan") if isinstance(stored.get("plan"), dict) else {})
-        submitted_mutation_plan = payload.get("mutation_plan") if isinstance(payload.get("mutation_plan"), dict) else None
-        if submitted_mutation_plan is not None:
-            stored_mutation_plan = plan.get("mutation_plan") if isinstance(plan.get("mutation_plan"), dict) else None
-            if stored_mutation_plan != submitted_mutation_plan:
-                return {"ok": False, "error": "plan_apply_mismatch", "mutated": False}
-        policy_ok, policy_error = validate_mutator_apply(
-            plan.get("mutation_plan") if isinstance(plan.get("mutation_plan"), dict) else None,
-            expected_action_type="managed_local_service.setup_apply",
-            confirmation_token=token,
-        )
-        if not policy_ok:
-            return {"ok": False, "error": policy_error or "policy_plan_invalid", "mutated": False}
-        stored["consumed"] = True
-        return self._execute_search_setup_plan(plan)
+        request = dict(payload or {})
+        plan = request.get("mutation_plan") if isinstance(request.get("mutation_plan"), dict) else {}
+        operation = "search.prerequisite" if str(plan.get("capability_id") or "") == "search.prerequisite.install" else "search.setup"
+        _ok, body = self.route_pack_search_mutation(operation, request)
+        return body
 
-    @staticmethod
-    def _confirmation_by_plan_or_token(
-        store: dict[str, dict[str, Any]],
-        *,
-        plan_id: str,
-        token: str,
-    ) -> dict[str, Any] | None:
-        if plan_id and plan_id in store:
-            return store.get(plan_id)
-        if token:
-            for row in store.values():
-                if str(row.get("confirmation_token") or "") == token:
-                    return row
-        return None
-
-    def _store_search_setup_confirmation(self, plan: dict[str, Any]) -> dict[str, Any]:
-        plan_id = f"search-setup-{uuid.uuid4().hex[:10]}"
-        token = f"confirm-{uuid.uuid4().hex[:16]}"
-        expires_at = time.time() + 600
-        plan["mutation_plan"] = build_mutator_plan(
-            action_type="managed_local_service.setup_apply",
-            resources={
-                "created": ["container:personal-agent-searxng"],
-                "changed": ["runtime_search_config", "memory/local_services/searxng/settings.yml"],
-                "deleted": [],
-            },
-            rollback_scope=str(plan.get("rollback_scope") or "restore previous runtime search config and remove only owned managed-service resources"),
-            rollback_supported=True,
-            confirmation_token=token,
-            expires_at=expires_at,
-            plan_id=plan_id,
-        )
+    def _search_setup_execution_preview(self, plan: dict[str, Any]) -> dict[str, Any]:
         public_plan = {key: value for key, value in plan.items() if key != "raw_base_url"}
-        public_plan.update({"plan_id": plan_id, "confirmation_token": token, "expires_at": int(expires_at)})
-        stored_plan = dict(plan)
-        stored_plan.update({"plan_id": plan_id, "confirmation_token": token})
-        self._search_setup_confirmations[plan_id] = {
-            "plan": stored_plan,
-            "confirmation_token": token,
-            "expires_at": expires_at,
-            "consumed": False,
-        }
-        return {"ok": True, "requires_confirmation": True, "plan": public_plan}
+        return {"ok": True, "requires_confirmation": True, "plan": public_plan, "_execution_plan": dict(plan)}
 
     @staticmethod
     def _search_setup_plan_from_pending(params: dict[str, Any]) -> dict[str, Any]:
@@ -13314,6 +13162,7 @@ class AgentRuntime:
         self.config = replace(self.config, search_enabled=bool(enabled), search_provider=str(provider or "searxng"), searxng_base_url=base_url)
         self._persist_runtime_search_config()
         self._safe_web_search_client = None
+        self._search_status_cache = None
         self._managed_local_services = None
         self._managed_services_status_cache = None
         self._managed_services_status_cache_at = 0.0
@@ -14338,10 +14187,25 @@ class AgentRuntime:
             else:
                 reason = "disabled"
         else:
-            delivery_result = self._deliver_autopilot_notification(
-                message=message,
-                allow_remote=remote_send_allowed,
+            delivery_operation_id = f"scheduled-notification:{dedupe_hash}"
+            delivery_reserved = self._notification_store.reserve_delivery(
+                operation_id=delivery_operation_id,
+                transport="telegram_or_local",
+                target_fingerprint=stable_fingerprint({"telegram_enabled": bool(self.config.telegram_enabled), "allow_remote": remote_send_allowed}),
+                content_fingerprint=dedupe_hash,
             )
+            if delivery_reserved and self._notification_store.mark_delivery_executing(delivery_operation_id):
+                delivery_result = self._deliver_autopilot_notification(
+                    message=message,
+                    allow_remote=remote_send_allowed,
+                )
+                self._notification_store.finish_delivery(
+                    delivery_operation_id,
+                    state="succeeded" if delivery_result.ok else "failed",
+                    receipt={"delivered_to": delivery_result.delivered_to, "reason": delivery_result.reason, "error_kind": delivery_result.error_kind},
+                )
+            else:
+                delivery_result = DeliveryResult(ok=False, delivered_to="none", reason="delivery_identity_already_used", error_kind="delivery_replay_blocked")
             delivered_to = str(delivery_result.delivered_to or "none")
             error_kind = delivery_result.error_kind
             if delivery_result.ok:
@@ -14533,7 +14397,22 @@ class AgentRuntime:
         error_kind: str | None = None
 
         if bool(decision.get("send")):
-            delivery_result = self._deliver_autopilot_notification(message=message, allow_remote=True)
+            delivery_operation_id = f"notification:{str(trigger or 'manual')}:{dedupe_hash}"
+            delivery_reserved = self._notification_store.reserve_delivery(
+                operation_id=delivery_operation_id,
+                transport="telegram_or_local",
+                target_fingerprint=stable_fingerprint({"telegram_enabled": bool(self.config.telegram_enabled), "trigger": str(trigger or "")}),
+                content_fingerprint=dedupe_hash,
+            )
+            if delivery_reserved and self._notification_store.mark_delivery_executing(delivery_operation_id):
+                delivery_result = self._deliver_autopilot_notification(message=message, allow_remote=True)
+                self._notification_store.finish_delivery(
+                    delivery_operation_id,
+                    state="succeeded" if delivery_result.ok else "failed",
+                    receipt={"delivered_to": delivery_result.delivered_to, "reason": delivery_result.reason, "error_kind": delivery_result.error_kind},
+                )
+            else:
+                delivery_result = DeliveryResult(ok=False, delivered_to="none", reason="delivery_identity_already_used", error_kind="delivery_replay_blocked")
             delivered_to = str(delivery_result.delivered_to or "none")
             error_kind = delivery_result.error_kind
             if delivery_result.ok:
@@ -24622,19 +24501,19 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 return
             if path == "/search/setup/plan":
                 body = self.runtime.search_setup_plan(payload)
-                self._send_json(200 if body.get("ok") else 400, body)
+                self._send_json(200 if bool(body.get("ok")) else 400, body)
                 return
             if path == "/search/setup/apply":
                 body = self.runtime.apply_search_setup(payload)
-                self._send_json(200 if body.get("ok") else 400, body)
+                self._send_json(200 if bool(body.get("ok")) else 400, body)
                 return
             if path == "/search/setup/prerequisite/plan":
-                body = self.runtime.podman_prerequisite_plan(payload)
-                self._send_json(200 if body.get("ok") else 400, body)
+                ok, body = self.runtime.route_pack_search_mutation("search.prerequisite", payload)
+                self._send_json(200 if ok else 400, body)
                 return
             if path == "/search/setup/prerequisite/apply":
-                body = self.runtime.apply_podman_prerequisite(payload)
-                self._send_json(200 if body.get("ok") else 400, body)
+                ok, body = self.runtime.route_pack_search_mutation("search.prerequisite", payload)
+                self._send_json(200 if ok else 400, body)
                 return
             if path in {"/chat", "/ask"}:
                 trace_id = self._request_trace_id(payload)
@@ -25427,36 +25306,38 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if path == "/packs/install":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                self._send_json(400, mutator_confirmation_required_payload("external_pack.install"))
+                ok, body = self.runtime.route_pack_search_mutation("external_pack.install", payload)
+                self._send_json(200 if ok else 400, body)
                 return
             if path == "/packs/install/plan":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                body = self.runtime.plan_pack_lifecycle("external_pack.install", payload)
-                self._send_json(200 if body.get("ok") else 400, body)
+                ok, body = self.runtime.route_pack_search_mutation("external_pack.install", payload)
+                self._send_json(200 if ok else 400, body)
                 return
             if path == "/packs/install/apply":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                body = self.runtime.apply_pack_lifecycle("external_pack.install", payload)
-                self._send_json(200 if body.get("ok") else 400, body)
+                ok, body = self.runtime.route_pack_search_mutation("external_pack.install", payload)
+                self._send_json(200 if ok else 400, body)
                 return
             if path == "/packs/approve":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                self._send_json(400, mutator_confirmation_required_payload("external_pack.approve"))
+                ok, body = self.runtime.route_pack_search_mutation("external_pack.approve", payload)
+                self._send_json(200 if ok else 400, body)
                 return
             if path == "/packs/approve/plan":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                body = self.runtime.plan_pack_lifecycle("external_pack.approve", payload)
-                self._send_json(200 if body.get("ok") else 400, body)
+                ok, body = self.runtime.route_pack_search_mutation("external_pack.approve", payload)
+                self._send_json(200 if ok else 400, body)
                 return
             if path == "/packs/approve/apply":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                body = self.runtime.apply_pack_lifecycle("external_pack.approve", payload)
-                self._send_json(200 if body.get("ok") else 400, body)
+                ok, body = self.runtime.route_pack_search_mutation("external_pack.approve", payload)
+                self._send_json(200 if ok else 400, body)
                 return
             if path == "/packs/enable":
                 if self._reject_non_loopback_operator_surface(path=path):
@@ -25473,67 +25354,70 @@ class APIServerHandler(BaseHTTPRequestHandler):
                         },
                     )
                     return
-                self._send_json(400, mutator_confirmation_required_payload("external_pack.enable"))
+                ok, body = self.runtime.route_pack_search_mutation("external_pack.enable", payload)
+                self._send_json(200 if ok else 400, body)
                 return
             if path == "/packs/enable/plan":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                body = self.runtime.plan_pack_lifecycle("external_pack.enable", payload)
-                self._send_json(200 if body.get("ok") else 400, body)
+                ok, body = self.runtime.route_pack_search_mutation("external_pack.enable", payload)
+                self._send_json(200 if ok else 400, body)
                 return
             if path == "/packs/enable/apply":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                body = self.runtime.apply_pack_lifecycle("external_pack.enable", payload)
-                self._send_json(200 if body.get("ok") else 400, body)
+                ok, body = self.runtime.route_pack_search_mutation("external_pack.enable", payload)
+                self._send_json(200 if ok else 400, body)
                 return
             if path == "/packs/grant":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                self._send_json(400, mutator_confirmation_required_payload("external_pack.grant"))
+                ok, body = self.runtime.route_pack_search_mutation("external_pack.grant", payload)
+                self._send_json(200 if ok else 400, body)
                 return
             if path == "/packs/grant/plan":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                body = self.runtime.plan_pack_lifecycle("external_pack.grant", payload)
-                self._send_json(200 if body.get("ok") else 400, body)
+                ok, body = self.runtime.route_pack_search_mutation("external_pack.grant", payload)
+                self._send_json(200 if ok else 400, body)
                 return
             if path == "/packs/grant/apply":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                body = self.runtime.apply_pack_lifecycle("external_pack.grant", payload)
-                self._send_json(200 if body.get("ok") else 400, body)
+                ok, body = self.runtime.route_pack_search_mutation("external_pack.grant", payload)
+                self._send_json(200 if ok else 400, body)
                 return
             if path == "/packs/remove":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                self._send_json(400, mutator_confirmation_required_payload("external_pack.remove"))
+                ok, body = self.runtime.route_pack_search_mutation("external_pack.remove", payload)
+                self._send_json(200 if ok else 400, body)
                 return
             if path == "/packs/remove/plan":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                body = self.runtime.plan_pack_lifecycle("external_pack.remove", payload)
-                self._send_json(200 if body.get("ok") else 400, body)
+                ok, body = self.runtime.route_pack_search_mutation("external_pack.remove", payload)
+                self._send_json(200 if ok else 400, body)
                 return
             if path == "/packs/remove/apply":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                body = self.runtime.apply_pack_lifecycle("external_pack.remove", payload)
-                self._send_json(200 if body.get("ok") else 400, body)
+                ok, body = self.runtime.route_pack_search_mutation("external_pack.remove", payload)
+                self._send_json(200 if ok else 400, body)
                 return
             if len(parts) == 4 and parts[0] == "packs" and parts[2] == "remove" and parts[3] == "plan":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
                 planned_payload = dict(payload)
                 planned_payload["pack_id"] = parts[1]
-                body = self.runtime.plan_pack_lifecycle("external_pack.remove", planned_payload)
-                self._send_json(200 if body.get("ok") else 400, body)
+                ok, body = self.runtime.route_pack_search_mutation("external_pack.remove", planned_payload)
+                self._send_json(200 if ok else 400, body)
                 return
             if len(parts) == 4 and parts[0] == "packs" and parts[2] == "remove" and parts[3] == "apply":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                body = self.runtime.apply_pack_lifecycle("external_pack.remove", payload)
-                self._send_json(200 if body.get("ok") else 400, body)
+                ok, body = self.runtime.route_pack_search_mutation("external_pack.remove", {**payload, "pack_id": parts[1]})
+                self._send_json(200 if ok else 400, body)
                 return
             if path == "/bootstrap/run":
                 trace_id = self._request_trace_id(payload)
@@ -25655,10 +25539,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if path == "/pack_sources/catalog":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                ok, body = self.runtime.create_pack_source_catalog(
-                    payload,
-                    changed_by=self._request_client_host() or "loopback_operator",
-                )
+                ok, body = self.runtime.route_pack_search_mutation("pack_source.catalog.create", payload)
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/llm/models/recommend":
@@ -25919,20 +25800,15 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if path == "/pack_sources/policy":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                ok, body = self.runtime.update_pack_sources_policy(
-                    payload,
-                    changed_by=self._request_client_host() or "loopback_operator",
-                )
+                ok, body = self.runtime.route_pack_search_mutation("pack_source.policy.update", payload)
                 self._send_json(200 if ok else 400, body)
                 return
 
             if len(parts) == 3 and parts[0] == "pack_sources" and parts[2] == "policy":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                ok, body = self.runtime.update_pack_source_policy(
-                    parts[1],
-                    payload,
-                    changed_by=self._request_client_host() or "loopback_operator",
+                ok, body = self.runtime.route_pack_search_mutation(
+                    "pack_source.scoped_policy.update", {**payload, "source_id": parts[1]}
                 )
                 self._send_json(200 if ok else 400, body)
                 return
@@ -25940,10 +25816,8 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if len(parts) == 3 and parts[0] == "pack_sources" and parts[1] == "catalog":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                ok, body = self.runtime.update_pack_source_catalog(
-                    parts[2],
-                    payload,
-                    changed_by=self._request_client_host() or "loopback_operator",
+                ok, body = self.runtime.route_pack_search_mutation(
+                    "pack_source.catalog.update", {**payload, "source_id": parts[2]}
                 )
                 self._send_json(200 if ok else 400, body)
                 return
@@ -25958,7 +25832,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/permissions":
-                ok, body = self.runtime.update_permissions(payload)
+                ok, body = self.runtime.route_pack_search_mutation("permission.policy.update", payload)
                 self._send_json(200 if ok else 400, body)
                 return
 
@@ -26001,16 +25875,20 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if len(parts) == 3 and parts[0] == "pack_sources" and parts[1] == "catalog":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                ok, body = self.runtime.delete_pack_source_catalog(
-                    parts[2],
-                    changed_by=self._request_client_host() or "loopback_operator",
+                payload = self._read_json()
+                ok, body = self.runtime.route_pack_search_mutation(
+                    "pack_source.catalog.delete", {**payload, "source_id": parts[2]}
                 )
                 self._send_json(200 if ok else 400, body)
                 return
             if len(parts) == 2 and parts[0] == "packs":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                self._send_json(400, mutator_confirmation_required_payload("external_pack.remove"))
+                payload = self._read_json()
+                ok, body = self.runtime.route_pack_search_mutation(
+                    "external_pack.remove", {**payload, "pack_id": parts[1]}
+                )
+                self._send_json(200 if ok else 400, body)
                 return
             if len(parts) == 2 and parts[0] == "providers":
                 if self.runtime._safe_mode_enabled():

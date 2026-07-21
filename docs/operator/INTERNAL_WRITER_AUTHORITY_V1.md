@@ -97,3 +97,11 @@ Audit v2E enforces the formerly mixed persistence leaves:
 `llm_notifications.record_delivery`. The notification identity records an
 already-decided result only; it cannot send, retry, select arguments, enable a
 transport, or stand in for public confirmation.
+
+## Scheduled notification delivery
+
+The registered delivery writer may record only the already-bound operation,
+transport, recipient fingerprint, content fingerprint, and outcome. It cannot
+choose content/recipient, initiate an unrelated send, or accept public internal
+identity. Reserved work becomes failed after interruption; executing work
+becomes indeterminate and is never automatically resent.

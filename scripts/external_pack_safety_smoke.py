@@ -336,8 +336,8 @@ def main() -> int:
                 runtime = _temp_runtime(root / ("runtime-" + source["kind"]))
                 ok, body = runtime.packs_install({"source": source})
                 _assert(not ok, "remote install unexpectedly succeeded")
-                _assert(body.get("error") == "source_trust_required", f"unexpected error: {body}")
-                _assert("not trusted yet" in str(body.get("message") or ""), "missing trust-gate message")
+                _assert(body.get("error") == "remote_pack_fetch_stage_unimplemented_denied", f"unexpected error: {body}")
+                _assert("unavailable" in str(body.get("message") or "").lower(), "missing unavailable message")
 
             smoke.check(
                 "remote_trust_policy",
@@ -386,7 +386,7 @@ def main() -> int:
 
             smoke.check("remote_trust_policy", "source_approval_does_not_fetch", source_approval_does_not_fetch)
 
-            def quarantine_fetch_review_only() -> None:
+            def quarantine_fetch_unreachable() -> None:
                 url = "https://example.com/review-only.zip"
                 store = PackStore(str(root / "source-fetch.db"))
                 storage = root / "source-fetch-packs"
@@ -413,19 +413,12 @@ def main() -> int:
                     remote_fetcher=fetcher,
                 )
                 result = fetch.fetch_import_for_review(fetch.preview(str(approved.source_id)))
-                _assert(result.ok, f"quarantine fetch failed: {result}")
-                _assert(result.imported_for_review, "fetch did not import for review")
-                _assert(not result.did_approve and not result.did_enable, "fetch approved or enabled pack")
-                _assert(not result.did_grant_permissions and not result.did_use_pack, "fetch granted permissions or used pack")
-                packs = store.list_external_packs()
-                _assert(len(packs) == 1, f"expected one review row, got {len(packs)}")
-                canonical = packs[0].get("canonical_pack") if isinstance(packs[0].get("canonical_pack"), dict) else {}
-                trust = canonical.get("trust_anchor") if isinstance(canonical.get("trust_anchor"), dict) else {}
-                runtime = canonical.get("runtime") if isinstance(canonical.get("runtime"), dict) else {}
-                _assert(trust.get("local_review_status") == "unreviewed", "fetch skipped review gate")
-                _assert(not bool(runtime.get("enabled", False)), "fetch enabled pack")
+                _assert(not result.ok, f"quarantine fetch unexpectedly succeeded: {result}")
+                _assert(result.blocked_reason == "remote_pack_fetch_stage_unimplemented_denied", f"unexpected denial: {result}")
+                _assert(not fetcher._opener.seen_urls, "denied fetch opened a remote URL")
+                _assert(store.list_external_packs() == [], "denied fetch created pack rows")
 
-            smoke.check("remote_trust_policy", "quarantine_fetch_does_not_approve_enable_or_use", quarantine_fetch_review_only)
+            smoke.check("remote_trust_policy", "quarantine_fetch_is_unreachable", quarantine_fetch_unreachable)
 
             smoke.check(
                 "catalog_schema",

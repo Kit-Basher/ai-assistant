@@ -168,3 +168,11 @@ instructions cannot manufacture confirmation. The compatibility name
 `assistant.mutate` resolves before Plan creation to one of 37 explicit
 `assistant.<command>` operations; unknown aliases, nested commands, extra
 fields, and caller-supplied batch payloads fail closed.
+
+## v2F compatibility closure
+
+Pack/source/permission/search preview endpoints serialize Universal Mutation
+Plans. Apply endpoints consume the same durable scoped confirmation. Domain
+tokens, callback-only approval, `confirm:true`, and yes/approve flags are not
+authorization. Old pending domain Plans fail closed. Every rollback is a new
+authorized mutation.

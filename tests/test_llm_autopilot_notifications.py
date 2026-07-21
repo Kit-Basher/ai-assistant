@@ -476,7 +476,7 @@ class TestLLMAutopilotNotifications(unittest.TestCase):
                 trigger="scheduler",
             )
         self.assertEqual("sent", first["reason"])
-        self.assertEqual("sent", second["reason"])
+        self.assertEqual("delivery_identity_already_used", second["reason"])
         rows = runtime.llm_notifications(limit=5)["notifications"]
         self.assertEqual(2, len(rows))
         self.assertEqual(rows[0]["dedupe_hash"], rows[1]["dedupe_hash"])

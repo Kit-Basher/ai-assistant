@@ -63,17 +63,24 @@ DOMAIN_CENTRAL_AUTHORIZED = {
     "/llm/notifications/test",
     "/llm/notifications/mark_read",
     "/llm/notifications/prune",
-}
-
-CENTRAL_PLAN_APPLY = {
+    "/pack_sources/catalog",
+    "/pack_sources/policy",
+    "/packs/install",
+    "/packs/approve",
+    "/packs/enable",
+    "/packs/grant",
+    "/packs/remove",
+    "/packs/install/apply",
     "/packs/approve/apply",
     "/packs/enable/apply",
     "/packs/grant/apply",
-    "/packs/install/apply",
     "/packs/remove/apply",
     "/search/setup/apply",
     "/search/setup/prerequisite/apply",
+    "/permissions",
 }
+
+CENTRAL_PLAN_APPLY: set[str] = set()
 
 PLAN_GATED_LEGACY = {
     "/llm/autoconfig/apply",
@@ -92,8 +99,10 @@ DYNAMIC_ROUTES = [
     ("POST", "/providers/ollama/pull", "central_authorized"),
     ("POST", "/providers/{provider_id}/models/refresh", "central_authorized"),
     ("PUT", "/providers/{provider_id}", "central_authorized"),
-    ("PUT", "/pack_sources/{source_id}/policy", "legacy_unmigrated"),
-    ("PUT", "/pack_sources/catalog/{catalog_id}", "legacy_unmigrated"),
+    ("PUT", "/pack_sources/{source_id}/policy", "central_authorized"),
+    ("PUT", "/pack_sources/catalog/{catalog_id}", "central_authorized"),
+    ("DELETE", "/pack_sources/catalog/{catalog_id}", "central_authorized"),
+    ("DELETE", "/packs/{pack_id}", "central_authorized"),
 ]
 
 NON_API_SURFACES = [
@@ -144,6 +153,18 @@ NON_API_SURFACES = [
         "kind": "pack_runtime",
         "status": "unimplemented_denied",
         "path": "external packs are normalized data/instructions only; executable fields and executable archives denied",
+    },
+    {
+        "surface": "external_pack.remote_fetch",
+        "kind": "pack_network_effect",
+        "status": "unimplemented_denied",
+        "path": "combined remote fetch/install is denied until separate digest-bound quarantine fetch authorization exists",
+    },
+    {
+        "surface": "notification.scheduled_delivery",
+        "kind": "background_job",
+        "status": "internal_state_write",
+        "path": "durable operation identity -> reserved -> executing -> terminal/indeterminate; indeterminate never auto-resends",
     },
 ]
 
@@ -233,7 +254,7 @@ def build_inventory() -> dict[str, Any]:
         counts[item["status"]] = counts.get(item["status"], 0) + 1
     return {
         "schema": "personal-agent.mutation-surface-inventory.v2",
-        "source_commit": "audit-v2d-working-tree-on-1521878e729aea5669a7adb67db711c2513ad718",
+        "source_commit": "audit-v2f-working-tree-on-724de3cbbbd25b2396d0f660fb0062b84d339944",
         "scope": "public API mutations plus assistant, Telegram, CLI, skill-pack, executor, and background entry points",
         "status_definitions": {
             "central_authorized": "central capability schema, policy, Universal Mutation Plan, confirmation, and Executor Registry",

@@ -10,6 +10,7 @@ from unittest import mock
 
 from agent.api_server import APIServerHandler, AgentRuntime
 from agent.config import Config
+from agent.mutation_plan import build_mutation_confirmation
 from agent.packs.remote_fetch import RemotePackFetcher
 
 
@@ -163,11 +164,26 @@ class TestAPIPackSourceEndpoints(unittest.TestCase):
         plan = plan_payload["plan"]
         self.assertIsInstance(plan, dict)
         apply_payload = {
-            "plan_id": plan["plan_id"],
-            "confirmation_token": plan["confirmation_token"],
-            "mutation_plan": plan["mutation_plan"],
+            **dict(plan_payload.get("operation_payload") or {}),
+            "mutation_plan": plan,
+            "confirmation": build_mutation_confirmation(plan, confirmation_id=f"pack-source-{operation}"),
         }
         return self._post(f"/packs/{operation}/apply", apply_payload)
+
+    def _authorized_write(self, path: str, payload: dict[str, object], method: str) -> tuple[int, dict[str, object]]:
+        preview = _HandlerForTest(self.runtime, path, payload)
+        getattr(preview, method)()
+        preview_body = json.loads(preview.body.decode("utf-8"))
+        if preview.status_code != 200 or not isinstance(preview_body.get("plan"), dict):
+            return preview.status_code, preview_body
+        plan = preview_body["plan"]
+        apply_handler = _HandlerForTest(self.runtime, path, {
+            **dict(preview_body.get("operation_payload") or {}),
+            "mutation_plan": plan,
+            "confirmation": build_mutation_confirmation(plan, confirmation_id=f"source-write-{plan['plan_id']}"),
+        })
+        getattr(apply_handler, method)()
+        return apply_handler.status_code, json.loads(apply_handler.body.decode("utf-8"))
 
     def _write_source_catalog(self, *, source_id: str = "local-registry") -> None:
         with open(self.catalog_path, "w", encoding="utf-8") as handle:
@@ -306,13 +322,11 @@ class TestAPIPackSourceEndpoints(unittest.TestCase):
             opener=_FakeOpener({remote_url: _FakeResponse(archive, url=remote_url)}),
         )
         with mock.patch("agent.packs.external_ingestion.RemotePackFetcher", return_value=fake_fetcher):
-            install_status, install_payload = self._pack_plan_apply("install", handoff)
+            install_status, install_payload = self._post("/packs/install/plan", handoff)
 
-        self.assertEqual(200, install_status)
-        self.assertTrue(install_payload["ok"])
-        self.assertEqual("portable_text_skill", install_payload["normalization_result"]["classification"])
-        self.assertEqual("normalized", install_payload["normalization_result"]["status"])
-        self.assertEqual(1, len(self.runtime.pack_store.list_external_packs()))
+        self.assertEqual(400, install_status)
+        self.assertEqual("remote_pack_fetch_stage_unimplemented_denied", install_payload["error"])
+        self.assertEqual(0, len(self.runtime.pack_store.list_external_packs()))
 
     def test_chat_api_uses_builtin_starter_catalog_for_qr_capability_rescue(self) -> None:
         ok, payload = self.runtime.chat(
@@ -505,8 +519,7 @@ class TestAPIPackSourceEndpoints(unittest.TestCase):
         self.assertFalse(get_payload["normalized_policy"]["defaults"]["allowlisted"])
         self.assertEqual(str(self._policy_path()), get_payload["path"])
 
-        put_handler = _HandlerForTest(
-            self.runtime,
+        put_status, put_payload = self._authorized_write(
             "/pack_sources/policy",
             {
                 "allowlisted": False,
@@ -514,10 +527,9 @@ class TestAPIPackSourceEndpoints(unittest.TestCase):
                 "max_results": 7,
                 "notes": "operator tightened defaults",
             },
+            "do_PUT",
         )
-        put_handler.do_PUT()
-        put_payload = json.loads(put_handler.body.decode("utf-8"))
-        self.assertEqual(200, put_handler.status_code)
+        self.assertEqual(200, put_status)
         self.assertFalse(put_payload["normalized_policy"]["defaults"]["allowlisted"])
         self.assertEqual(9, put_payload["normalized_policy"]["defaults"]["cache_ttl_seconds"])
         self.assertEqual(7, put_payload["normalized_policy"]["defaults"]["max_results"])
@@ -552,8 +564,7 @@ class TestAPIPackSourceEndpoints(unittest.TestCase):
         self.assertEqual("local-registry", get_payload["source"]["id"])
         self.assertFalse(get_payload["effective_policy"]["allowlisted"])
 
-        put_handler = _HandlerForTest(
-            self.runtime,
+        put_status, put_payload = self._authorized_write(
             "/pack_sources/local-registry/policy",
             {
                 "allowlisted": True,
@@ -561,10 +572,9 @@ class TestAPIPackSourceEndpoints(unittest.TestCase):
                 "max_results": 3,
                 "notes": "allow this one source",
             },
+            "do_PUT",
         )
-        put_handler.do_PUT()
-        put_payload = json.loads(put_handler.body.decode("utf-8"))
-        self.assertEqual(200, put_handler.status_code)
+        self.assertEqual(200, put_status)
         self.assertEqual("local-registry", put_payload["effective_policy"]["source_id"])
         self.assertTrue(put_payload["effective_policy"]["allowlisted"])
         self.assertEqual(5, put_payload["effective_policy"]["cache_ttl_seconds"])
@@ -594,10 +604,8 @@ class TestAPIPackSourceEndpoints(unittest.TestCase):
             ("/pack_sources/missing/policy", {"allowlisted": True}, "pack_source_not_found"),
         ]
         for path, payload, expected_error in cases:
-            handler = _HandlerForTest(self.runtime, path, payload)
-            handler.do_PUT()
-            body = json.loads(handler.body.decode("utf-8"))
-            self.assertEqual(400, handler.status_code)
+            status, body = self._authorized_write(path, payload, "do_PUT")
+            self.assertEqual(400, status)
             self.assertEqual(expected_error, body["error"])
 
         with open(self._policy_path(), "r", encoding="utf-8") as handle:
@@ -632,8 +640,7 @@ class TestAPIPackSourceEndpoints(unittest.TestCase):
         self.assertEqual("forbidden", put_payload["error"])
 
     def test_pack_source_catalog_api_crud_and_audit(self) -> None:
-        create_handler = _HandlerForTest(
-            self.runtime,
+        create_status, create_payload = self._authorized_write(
             "/pack_sources/catalog",
             {
                 "source_id": "generic-registry",
@@ -646,10 +653,9 @@ class TestAPIPackSourceEndpoints(unittest.TestCase):
                 "supports_compare_hint": True,
                 "notes": "operator managed",
             },
+            "do_POST",
         )
-        create_handler.do_POST()
-        create_payload = json.loads(create_handler.body.decode("utf-8"))
-        self.assertEqual(200, create_handler.status_code)
+        self.assertEqual(200, create_status)
         self.assertEqual("generic-registry", create_payload["source"]["id"])
         self.assertEqual("create", create_payload["meta"]["last_change"]["operation"])
 
@@ -668,17 +674,15 @@ class TestAPIPackSourceEndpoints(unittest.TestCase):
         self.assertFalse(pack_sources_payload["sources"][0]["queryable"])
         self.assertEqual("source_not_allowlisted", pack_sources_payload["sources"][0]["blocked_reason"])
 
-        update_handler = _HandlerForTest(
-            self.runtime,
+        update_status, update_payload = self._authorized_write(
             "/pack_sources/catalog/generic-registry",
             {
                 "enabled": False,
                 "notes": "disabled for maintenance",
             },
+            "do_PUT",
         )
-        update_handler.do_PUT()
-        update_payload = json.loads(update_handler.body.decode("utf-8"))
-        self.assertEqual(200, update_handler.status_code)
+        self.assertEqual(200, update_status)
         self.assertFalse(update_payload["source"]["enabled"])
         self.assertEqual("update", update_payload["meta"]["last_change"]["operation"])
 
@@ -689,10 +693,10 @@ class TestAPIPackSourceEndpoints(unittest.TestCase):
         self.assertFalse(after_update_payload["sources"][0]["queryable"])
         self.assertEqual("source_disabled", after_update_payload["sources"][0]["blocked_reason"])
 
-        delete_handler = _HandlerForTest(self.runtime, "/pack_sources/catalog/generic-registry")
-        delete_handler.do_DELETE()
-        delete_payload = json.loads(delete_handler.body.decode("utf-8"))
-        self.assertEqual(200, delete_handler.status_code)
+        delete_status, delete_payload = self._authorized_write(
+            "/pack_sources/catalog/generic-registry", {}, "do_DELETE"
+        )
+        self.assertEqual(200, delete_status)
         self.assertEqual("generic-registry", delete_payload["deleted_source_id"])
         self.assertEqual("delete", delete_payload["persisted_catalog"]["meta"]["last_change"]["operation"])
 
@@ -715,8 +719,7 @@ class TestAPIPackSourceEndpoints(unittest.TestCase):
         self.assertIn("packs.discovery_catalog.delete", actions)
 
     def test_pack_source_catalog_api_rejects_invalid_writes_without_persisting(self) -> None:
-        create_handler = _HandlerForTest(
-            self.runtime,
+        create_status, _create_payload = self._authorized_write(
             "/pack_sources/catalog",
             {
                 "source_id": "generic-registry",
@@ -724,9 +727,9 @@ class TestAPIPackSourceEndpoints(unittest.TestCase):
                 "kind": "generic_registry_api",
                 "base_url": "https://example.com/catalog.json",
             },
+            "do_POST",
         )
-        create_handler.do_POST()
-        self.assertEqual(200, create_handler.status_code)
+        self.assertEqual(200, create_status)
         before_payload = self._read_json_file(self._sources_file_path())
 
         cases = [
@@ -734,16 +737,11 @@ class TestAPIPackSourceEndpoints(unittest.TestCase):
             ("/pack_sources/catalog", {"source_id": "bad-kind", "name": "Bad Kind", "kind": "nope", "base_url": "https://example.com/catalog.json"}, "invalid_source_kind", "POST"),
             ("/pack_sources/catalog", {"source_id": "bad-url", "name": "Bad Url", "kind": "generic_registry_api", "base_url": "http://example.com/catalog.json"}, "invalid_base_url", "POST"),
             ("/pack_sources/catalog", {"source_id": "unknown-field", "name": "Unknown", "kind": "generic_registry_api", "base_url": "https://example.com/catalog.json", "extra": True}, "unknown_source_fields", "POST"),
-            ("/pack_sources/catalog/generic-registry", {"source_id": "renamed"}, "source_id_rename_not_supported", "PUT"),
+            ("/pack_sources/catalog/generic-registry", {"source_id": "renamed"}, "empty_source_patch", "PUT"),
         ]
         for path, payload, expected_error, method in cases:
-            handler = _HandlerForTest(self.runtime, path, payload)
-            if method == "POST":
-                handler.do_POST()
-            else:
-                handler.do_PUT()
-            body = json.loads(handler.body.decode("utf-8"))
-            self.assertEqual(400, handler.status_code)
+            status, body = self._authorized_write(path, payload, f"do_{method}")
+            self.assertEqual(400, status)
             self.assertEqual(expected_error, body["error"])
 
         after_payload = self._read_json_file(self._sources_file_path())

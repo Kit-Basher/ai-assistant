@@ -258,3 +258,12 @@ pack-lifecycle, general-permission, managed-search compatibility, and remaining
 alias groups; it must also reserve scheduled notification delivery before
 transport I/O or explicitly deny retry after an uncertain outcome. Only then
 can universal authorization be reassessed. Audit 3 remains behavior/UX.
+
+## After Audit v2F
+
+Audit 3 is the end-user behavior and UX audit. It should exercise ordinary
+assistant-first journeys, confirmation clarity, recovery wording, and feature
+discoverability. Remote two-stage quarantine fetch, immutable SearXNG image
+digest resolution, notification indeterminate reconciliation UX, and stronger
+process/OS isolation remain explicit engineering roadmap items. Fresh-VM
+acceptance remains a later final-release gate, not Audit 3.

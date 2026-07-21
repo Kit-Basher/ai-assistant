@@ -105,7 +105,6 @@ from agent.packs.scaffolding import create_generated_scaffold_source, render_sca
 from agent.packs.policy import PackPermissionDenied, enforce_iface_allowed
 from agent.packs.remote_fetch import ALLOWED_REMOTE_KINDS
 from agent.packs.source_approval import SourceApprovalController
-from agent.packs.source_fetch_preview import SourceFetchController
 from agent.packs.review_state_ux import build_pack_review_state_summary, render_pack_review_state
 from agent.packs.store import PackStore
 from agent.actions.persistent_journal import PersistentManagedActionJournalStore
@@ -2552,6 +2551,34 @@ class Orchestrator:
     def _plan_mode_public_payload(mutation_plan: dict[str, Any] | None) -> dict[str, Any]:
         if not isinstance(mutation_plan, dict):
             return {}
+        if int(mutation_plan.get("schema_version") or 0) >= 1 and isinstance(mutation_plan.get("mutation_inventory"), list):
+            capability = str(mutation_plan.get("capability_id") or "")
+            resources = {"created": [], "changed": [], "deleted": []}
+            if capability == "search.service.configure":
+                resources = {
+                    "created": ["container:personal-agent-searxng"],
+                    "changed": ["runtime_search_config", "memory/local_services/searxng/settings.yml"],
+                    "deleted": [],
+                }
+            else:
+                flat = []
+                for row in mutation_plan.get("mutation_inventory") or []:
+                    if isinstance(row, dict) and isinstance(row.get("resources"), list):
+                        flat.extend(str(item) for item in row.get("resources") or [])
+                resources["changed"] = flat
+            recovery = mutation_plan.get("recovery") if isinstance(mutation_plan.get("recovery"), dict) else {}
+            confirmation = mutation_plan.get("confirmation_requirement") if isinstance(mutation_plan.get("confirmation_requirement"), dict) else {}
+            return {
+                "policy_layer": "universal_mutation_plan",
+                "action_type": str(mutation_plan.get("action_type") or ""),
+                "classification": "mutating",
+                "resources": resources,
+                "rollback_scope": str(recovery.get("scope") or ""),
+                "rollback_supported": bool(recovery.get("rollback_available", False)),
+                "requires_confirmation": bool(confirmation.get("required", True)),
+                "expires_at": mutation_plan.get("expires_at"),
+                "plan_id": str(mutation_plan.get("plan_id") or ""),
+            }
         return {
             "policy_layer": str(mutation_plan.get("policy_layer") or ""),
             "action_type": str(mutation_plan.get("action_type") or ""),
@@ -2579,7 +2606,10 @@ class Orchestrator:
         expiry_line = ""
         if expires_at is not None:
             try:
-                expiry_line = f"Expires: {datetime.fromtimestamp(int(expires_at), tz=timezone.utc).isoformat()}."
+                if isinstance(expires_at, str) and "T" in expires_at:
+                    expiry_line = f"Expires: {expires_at}."
+                else:
+                    expiry_line = f"Expires: {datetime.fromtimestamp(int(expires_at), tz=timezone.utc).isoformat()}."
             except (TypeError, ValueError, OSError):
                 expiry_line = "Expires: soon."
         lines = [
@@ -2649,12 +2679,7 @@ class Orchestrator:
                 },
             )
         plan = plan_payload.get("plan") if isinstance(plan_payload.get("plan"), dict) else {}
-        mutation_plan = plan.get("mutation_plan") if isinstance(plan.get("mutation_plan"), dict) else {}
-        apply_payload = {
-            "plan_id": str(plan.get("plan_id") or ""),
-            "confirmation_token": str(plan.get("confirmation_token") or ""),
-            "mutation_plan": mutation_plan,
-        }
+        mutation_plan = plan
         lines = [line for line in intro_lines if str(line or "").strip()]
         if permission_summary:
             lines.append(str(permission_summary).strip())
@@ -2669,7 +2694,7 @@ class Orchestrator:
                 "plan": plan,
                 "mutation_plan": mutation_plan,
                 "plan_mode": self._plan_mode_public_payload(mutation_plan),
-                "apply_payload": apply_payload,
+                "apply_payload": {"mutation_plan": plan},
                 "mutated": False,
             }
         )
@@ -2680,10 +2705,9 @@ class Orchestrator:
             used_tools=used_tools,
             action={
                 "operation": "external_pack_lifecycle_plan",
-                "params": {
-                    **apply_payload,
-                    "action_type": action_type,
-                },
+                "params": {"action_type": action_type},
+                "v2f_domain_operation": action_type,
+                "v2f_domain_request": operation_payload,
             },
             title=title,
             preview_payload=payload,
@@ -2719,10 +2743,9 @@ class Orchestrator:
                 used_tools=["managed_local_service_prerequisite_preview", "safe_web_search"],
                 action={
                     "operation": "podman_prerequisite_setup_preview",
-                    "params": {
-                        "plan_id": str(plan.get("plan_id") or ""),
-                        "confirmation_token": str(plan.get("confirmation_token") or ""),
-                    },
+                    "params": {},
+                    "v2f_domain_operation": "search.prerequisite",
+                    "v2f_domain_request": {},
                 },
                 title="Podman prerequisite setup",
                 preview_payload={
@@ -2895,7 +2918,7 @@ class Orchestrator:
                 },
             )
         plan = setup_plan_payload.get("plan") if isinstance(setup_plan_payload.get("plan"), dict) else {}
-        mutation_plan = plan.get("mutation_plan") if isinstance(plan.get("mutation_plan"), dict) else {}
+        mutation_plan = plan
         image = str(plan.get("image") or "docker.io/searxng/searxng:latest")
         name = str(plan.get("container_name") or "personal-agent-searxng")
         bind = str(plan.get("loopback_bind") or "127.0.0.1:8080:8080")
@@ -2943,11 +2966,6 @@ class Orchestrator:
         if docker_fallback:
             lines.insert(3, docker_warning)
             lines.insert(4, "Rootless Podman remains the preferred managed-service engine on Linux; this is a Docker fallback plan.")
-        apply_payload = {
-            "plan_id": str(plan.get("plan_id") or ""),
-            "confirmation_token": str(plan.get("confirmation_token") or ""),
-            "mutation_plan": mutation_plan,
-        }
         source_request_text = str(source_request or "").strip()
         return self._confirmation_preview_response(
             user_id,
@@ -2956,8 +2974,9 @@ class Orchestrator:
             used_tools=["managed_local_service_setup_preview", "safe_web_search"],
             action={
                 "operation": "managed_local_service_setup_preview",
+                "v2f_domain_operation": "search.setup",
+                "v2f_domain_request": {"allow_docker_fallback": False},
                 "params": {
-                    **apply_payload,
                     "service_id": "searxng",
                     "selected_engine": engine,
                     "source_request": source_request_text or None,
@@ -2991,13 +3010,13 @@ class Orchestrator:
                 "plan": plan,
                 "mutation_plan": mutation_plan,
                 "plan_mode": self._plan_mode_public_payload(mutation_plan),
-                "apply_payload": apply_payload,
+                "apply_payload": {"mutation_plan": plan},
                 "source_request": source_request_text or None,
                 "services_status": services_payload,
                 "search_status": status_payload,
                 "mutated": False,
             },
-            mutating=False,
+            mutating=True,
             skip_post_response_hooks=True,
         )
 
@@ -3631,6 +3650,28 @@ class Orchestrator:
                     "provider_model_session_id": domain_session_id,
                 }
             )
+        elif str(action_for_plan.get("v2f_domain_operation") or "").strip():
+            adapter = self._chat_runtime_adapter
+            route_mutation = getattr(adapter, "route_pack_search_mutation", None)
+            if not callable(route_mutation):
+                return self._runtime_state_unavailable_response(route=route, reason="v2f_authorization_unavailable")
+            v2f_operation = str(action_for_plan.get("v2f_domain_operation") or "").strip()
+            v2f_request = dict(action_for_plan.get("v2f_domain_request")) if isinstance(action_for_plan.get("v2f_domain_request"), dict) else {}
+            v2f_session_id = f"assistant:{active_thread_id or 'thread'}"
+            ok, body = route_mutation(v2f_operation, {
+                **v2f_request, "actor_id": user_id, "thread_id": active_thread_id, "session_id": v2f_session_id,
+            })
+            v2f_plan = body.get("plan") if isinstance(body, dict) and isinstance(body.get("plan"), dict) else None
+            if not ok or v2f_plan is None:
+                response_body = dict(body) if isinstance(body, dict) else {}
+                return self._runtime_truth_response(
+                    text=str(response_body.get("message") or response_body.get("error") or "This mutation is not currently eligible."),
+                    route=route, used_tools=used_tools, used_memory=used_memory, used_runtime_state=True,
+                    ok=False, error_kind=str(response_body.get("error") or "mutation_preview_denied"),
+                    payload={**response_body, "mutated": False}, skip_post_response_hooks=skip_post_response_hooks,
+                )
+            canonical_plan = v2f_plan
+            action_for_plan.update({"v2f_domain_request": v2f_request, "v2f_session_id": v2f_session_id})
         elif str(action_for_plan.get("organization_memory_domain_operation") or "").strip():
             adapter = self._chat_runtime_adapter
             route_mutation = getattr(adapter, "route_organization_memory_mutation", None)
@@ -3961,6 +4002,112 @@ class Orchestrator:
                 thread_id=str(action.get("thread_id") or ""),
             )
         organization_operation = str(action.get("organization_memory_domain_operation") or "").strip().lower()
+        v2f_operation = str(action.get("v2f_domain_operation") or "").strip().lower()
+        if v2f_operation:
+            adapter = self._chat_runtime_adapter
+            route_mutation = getattr(adapter, "route_pack_search_mutation", None)
+            v2f_plan = canonical_plan_for_status
+            v2f_request = dict(action.get("v2f_domain_request")) if isinstance(action.get("v2f_domain_request"), dict) else {}
+            session_id = str(action.get("v2f_session_id") or "").strip()
+            if not callable(route_mutation) or not v2f_plan:
+                return self._runtime_state_unavailable_response(route="action_tool", reason="v2f_authorization_unavailable")
+            try:
+                confirmation = build_mutation_confirmation(
+                    v2f_plan, confirmation_id=str(action.get("pending_id") or v2f_plan.get("plan_id") or ""),
+                    actor_id=user_id, thread_id=str(action.get("thread_id") or ""), session_id=session_id,
+                )
+            except ValueError as exc:
+                return self._runtime_truth_response(
+                    text=f"Mutation was blocked before execution: {exc}.", route="action_tool",
+                    used_tools=["v2f_authorization"], ok=False, error_kind=str(exc),
+                    payload={"ok": False, "mutated": False, "error": str(exc), "operation": v2f_operation},
+                )
+            ok, body = route_mutation(v2f_operation, {
+                **v2f_request, "actor_id": user_id, "thread_id": str(action.get("thread_id") or ""),
+                "session_id": session_id, "mutation_plan": v2f_plan, "confirmation": confirmation,
+            })
+            response_body = dict(body) if isinstance(body, dict) else {}
+            message = str(response_body.get("message") or "").strip()
+            if not message and not ok:
+                reason_code = str(
+                    response_body.get("blocked_reason")
+                    or response_body.get("error_code")
+                    or response_body.get("error")
+                    or "mutation_failed"
+                ).strip()
+                reason_detail = str(response_body.get("error") or response_body.get("error_code") or reason_code).strip()
+                if v2f_operation == "search.setup":
+                    message = f"SearXNG setup did not complete. The action was blocked or rolled back: {reason_code} ({reason_detail})."
+                    if response_body.get("rollback_ok") is not None:
+                        message += f" Previous search settings restored: {'yes' if response_body.get('rollback_ok') else 'no'}."
+                else:
+                    message = f"Mutation was blocked or not completed: {reason_code} ({reason_detail})."
+            if ok and v2f_operation.startswith("external_pack."):
+                pack = response_body.get("pack") if isinstance(response_body.get("pack"), dict) else {}
+                pack_name = str(pack.get("name") or pack.get("display_name") or "External pack").strip()
+                lifecycle = response_body.get("lifecycle") if isinstance(response_body.get("lifecycle"), dict) else {}
+                if pack:
+                    try:
+                        grants = list_adapter_grants(self._pack_store.external_storage_root())
+                    except Exception:
+                        grants = []
+                    lifecycle = PackLifecycleService().evaluate(imported_pack=pack, permission_grants=grants).to_dict()
+                    if v2f_operation == "external_pack.install" and lifecycle.get("state") in {"generated_quarantined", "imported_for_review"}:
+                        self._queue_pack_review_approve_followup(user_id, pack=pack, lifecycle=lifecycle)
+                    elif v2f_operation == "external_pack.approve" and (lifecycle.get("next_step") or {}).get("action") == "enable":
+                        self._queue_pack_enable_followup(user_id, pack=pack, lifecycle=lifecycle)
+                    elif v2f_operation == "external_pack.enable":
+                        adapters = self._external_pack_managed_adapters(pack)
+                        if lifecycle.get("state") == "needs_permission" and adapters:
+                            self._pending_managed_adapter_requests[user_id] = {
+                                "pack_id": str(pack.get("pack_id") or pack.get("canonical_id") or "").strip(),
+                                "pack_name": pack_name, "managed_adapters": adapters,
+                            }
+                            self._queue_managed_adapter_permission_request_followup(
+                                user_id, pack=pack, lifecycle=lifecycle, managed_adapters=adapters,
+                            )
+                    elif v2f_operation == "external_pack.grant":
+                        self._pending_managed_adapter_requests.pop(user_id, None)
+                response_body.update({
+                    "lifecycle": lifecycle,
+                    "action": {
+                        "external_pack.install": "install", "external_pack.approve": "review_approve",
+                        "external_pack.enable": "enable", "external_pack.grant": "grant_permission",
+                        "external_pack.remove": "remove",
+                    }.get(v2f_operation),
+                    "did_approve": v2f_operation == "external_pack.approve",
+                    "did_enable": v2f_operation == "external_pack.enable",
+                    "did_grant_permissions": v2f_operation == "external_pack.grant",
+                    "did_use_pack": False,
+                    "did_invoke_adapter": False,
+                    "executes_code": False,
+                    "reads_file": False,
+                    "approved": bool(
+                        str(((pack.get("canonical_pack") or {}).get("trust_anchor") or {}).get("local_review_status") or "").lower()
+                        in {"approved", "accepted", "reviewed"}
+                    ),
+                    "enabled": bool(
+                        pack.get("enabled") is True
+                        or ((pack.get("canonical_pack") or {}).get("runtime") or {}).get("enabled") is True
+                    ),
+                    "permissions_granted": [],
+                })
+                if v2f_operation == "external_pack.install":
+                    message = f"{pack_name} was imported for review only. It is not approved, not enabled, has no granted permissions, and was not used."
+                elif v2f_operation == "external_pack.approve":
+                    message = f"{pack_name} was approved for the next setup step. It is still not enabled, no permissions were granted, and it was not used."
+                elif v2f_operation == "external_pack.enable":
+                    message = f"{pack_name} was turned on. No permissions were granted and it was not used."
+                    if lifecycle.get("state") == "needs_permission":
+                        message += " A permission preview is required before any managed adapter can run."
+                elif v2f_operation == "external_pack.grant":
+                    message = f"Permission metadata recorded for exactly {pack_name}. No adapter ran and the pack was not used."
+            return self._runtime_truth_response(
+                text=message or "Mutation completed.",
+                route="action_tool", used_tools=["v2f_authorization"], ok=bool(ok),
+                error_kind=None if ok else str(response_body.get("error_code") or response_body.get("error") or "mutation_failed"),
+                payload={**response_body, "type": "v2f_authorization_result", "operation": v2f_operation},
+            )
         if organization_operation:
             adapter = self._chat_runtime_adapter
             route_mutation = getattr(adapter, "route_organization_memory_mutation", None)
@@ -11721,32 +11868,13 @@ class Orchestrator:
             journal_store=self._managed_action_journal_store,
         )
         preview = controller.preview(leads[0]).to_dict()
-        if bool(preview.get("ok")):
-            pending_id = str(uuid.uuid4())
-            now_epoch = int(time.time())
-            self._memory_runtime.add_pending_item(
-                user_id,
-                {
-                    "pending_id": pending_id,
-                    "kind": "followup",
-                    "origin_tool": "pack_source_approval_confirm",
-                    "question": "Record source approval for this untrusted lead?",
-                    "options": ["yes", "no"],
-                    "created_at": now_epoch,
-                    "expires_at": now_epoch + 600,
-                    "thread_id": self._active_thread_id_for_user(user_id),
-                    "status": PENDING_STATUS_READY_TO_RESUME,
-                    "context": {
-                        "approval_preview": preview,
-                        "source_leads": leads,
-                        "lifecycle_action": "source_approval_record",
-                    },
-                },
-            )
         lines = [str(preview.get("user_message") or "Source approval preview for untrusted search leads.").strip()]
         if bool(preview.get("ok")):
             lines.append(f"Proposed source id: {preview.get('source_id')}. Source kind: {preview.get('source_kind')}.")
-            lines.append("Say yes to record source approval only, or no to cancel.")
+            lines.append(
+                "This legacy assistant approval flow is read-only. Configure the source and its query policy "
+                "as separate centrally authorized operations; remote pack acquisition remains unavailable."
+            )
         else:
             lines.append("No source approval was recorded. No content was fetched, downloaded, imported, installed, approved, enabled, or granted permissions.")
         for index, lead in enumerate(leads[:5], start=1):
@@ -11765,7 +11893,8 @@ class Orchestrator:
             used_tools=["pack_acquisition"],
             payload={
                 "type": "source_approval_preview",
-                "ok": bool(preview.get("ok")),
+                "ok": False,
+                "error": "legacy_source_approval_confirmation_removed",
                 "summary": message,
                 "approval_preview": preview,
                 "source_leads": leads,
@@ -11775,48 +11904,10 @@ class Orchestrator:
         )
 
     def _source_approval_confirm_response(self, user_id: str, pending_item: dict[str, Any]) -> OrchestratorResponse:
-        context = pending_item.get("context") if isinstance(pending_item.get("context"), dict) else {}
-        preview = context.get("approval_preview") if isinstance(context.get("approval_preview"), dict) else {}
-        if not preview:
-            message = "I cannot record source approval because the approval preview is missing. No source was fetched or imported."
-            return self._runtime_truth_response(
-                text=message,
-                route="action_tool",
-                used_runtime_state=False,
-                used_memory=bool(self._current_runtime_setup_state(user_id)),
-                used_tools=["pack_acquisition"],
-                payload={"type": "source_approval", "ok": False, "summary": message},
-            )
-            result = SourceApprovalController(
-                pack_registry_discovery=self._pack_registry_discovery(),
-                journal_store=self._managed_action_journal_store,
-            ).approve(
-            preview,
-            changed_by="assistant_source_approval",
+        message = (
+            "This legacy source-approval confirmation is no longer accepted. Use separate centrally authorized "
+            "source-catalog and source-policy Plans. No source was changed, fetched, or imported."
         )
-        message = result.user_message
-        if result.ok and result.source_id:
-            pending_id = str(uuid.uuid4())
-            now_epoch = int(time.time())
-            self._memory_runtime.add_pending_item(
-                user_id,
-                {
-                    "pending_id": pending_id,
-                    "kind": "followup",
-                    "origin_tool": "pack_source_fetch_preview",
-                    "question": "Next safe step is preview/fetch into quarantine. Say yes to preview it.",
-                    "options": ["yes", "no"],
-                    "created_at": now_epoch,
-                    "expires_at": now_epoch + 600,
-                    "thread_id": self._active_thread_id_for_user(user_id),
-                    "status": PENDING_STATUS_READY_TO_RESUME,
-                    "context": {
-                        "source_id": result.source_id,
-                        "source_kind": result.source_kind,
-                        "lifecycle_action": "source_fetch_preview",
-                    },
-                },
-            )
         return self._runtime_truth_response(
             text=message,
             route="action_tool",
@@ -11825,56 +11916,32 @@ class Orchestrator:
             used_tools=["pack_acquisition"],
             payload={
                 "type": "source_approval",
-                "ok": bool(result.ok),
+                "ok": False,
+                "error": "legacy_source_approval_confirmation_removed",
                 "summary": message,
-                "result": result.to_dict(),
                 "did_fetch": False,
                 "did_import": False,
                 "did_install": False,
-                "next_step": "preview_fetch_into_quarantine" if result.ok else "source_approval_blocked",
+                "next_step": "use_canonical_source_catalog_and_policy_plans",
             },
         )
 
     def _source_fetch_preview_response(self, user_id: str, pending_item: dict[str, Any]) -> OrchestratorResponse:
-        context = pending_item.get("context") if isinstance(pending_item.get("context"), dict) else {}
-        source_id = str(context.get("source_id") or "").strip()
-        preview = SourceFetchController(
-            pack_store=self._pack_store,
-            pack_registry_discovery=self._pack_registry_discovery(),
-        ).preview(source_id)
-        if preview.ok:
-            pending_id = str(uuid.uuid4())
-            now_epoch = int(time.time())
-            self._memory_runtime.add_pending_item(
-                user_id,
-                {
-                    "pending_id": pending_id,
-                    "kind": "followup",
-                    "origin_tool": "pack_source_fetch_confirm",
-                    "question": "Fetch this approved source into quarantine and import for review only?",
-                    "options": ["yes", "no"],
-                    "created_at": now_epoch,
-                    "expires_at": now_epoch + 600,
-                    "thread_id": self._active_thread_id_for_user(user_id),
-                    "status": PENDING_STATUS_READY_TO_RESUME,
-                    "context": {
-                        "fetch_preview": preview.to_dict(),
-                        "source_id": source_id,
-                        "lifecycle_action": "source_fetch_import_for_review",
-                    },
-                },
-            )
+        message = (
+            "Remote pack fetch-to-quarantine is not implemented in the universal authorization boundary. "
+            "No URL was opened and no content was fetched or imported."
+        )
         return self._runtime_truth_response(
-            text=preview.user_message,
+            text=message,
             route="action_tool",
             used_runtime_state=False,
             used_memory=bool(self._current_runtime_setup_state(user_id)),
             used_tools=["pack_acquisition"],
             payload={
                 "type": "source_fetch_preview",
-                "ok": bool(preview.ok),
-                "summary": preview.user_message,
-                "fetch_preview": preview.to_dict(),
+                "ok": False,
+                "error": "remote_pack_fetch_stage_unimplemented_denied",
+                "summary": message,
                 "did_fetch": False,
                 "did_import": False,
                 "did_approve": False,
@@ -11885,22 +11952,10 @@ class Orchestrator:
         )
 
     def _source_fetch_confirm_response(self, user_id: str, pending_item: dict[str, Any]) -> OrchestratorResponse:
-        context = pending_item.get("context") if isinstance(pending_item.get("context"), dict) else {}
-        preview = context.get("fetch_preview") if isinstance(context.get("fetch_preview"), dict) else {}
-        result = SourceFetchController(
-            pack_store=self._pack_store,
-            pack_registry_discovery=self._pack_registry_discovery(),
-        ).fetch_import_for_review(preview)
-        lifecycle: dict[str, Any] | None = None
-        review_state: dict[str, Any] | None = None
-        message = result.user_message
-        if isinstance(result.pack, dict):
-            lifecycle = PackLifecycleService().evaluate(imported_pack=result.pack, permission_grants=[]).to_dict()
-            review_summary = build_pack_review_state_summary(result.pack, permission_grants=[], lifecycle=lifecycle)
-            review_state = review_summary.to_dict()
-            message = f"{result.user_message}\n\n{render_pack_review_state(result.pack, permission_grants=[], lifecycle=lifecycle)}"
-        if result.ok and isinstance(result.pack, dict) and lifecycle is not None:
-            self._queue_pack_review_approve_followup(user_id, pack=result.pack, lifecycle=lifecycle)
+        message = (
+            "Remote pack fetch confirmation is unavailable and old confirmation payloads are not accepted. "
+            "No URL was opened and no content was fetched or imported."
+        )
         return self._runtime_truth_response(
             text=message,
             route="action_tool",
@@ -11909,15 +11964,16 @@ class Orchestrator:
             used_tools=["pack_acquisition"],
             payload={
                 "type": "source_fetch_import",
-                "ok": bool(result.ok),
+                "ok": False,
+                "error": "remote_pack_fetch_stage_unimplemented_denied",
                 "summary": message,
-                "result": result.to_dict(),
-                "review_state": review_state,
+                "did_fetch": False,
+                "did_import": False,
                 "did_approve": False,
                 "did_enable": False,
                 "did_grant_permissions": False,
                 "did_use_pack": False,
-                "next_step": result.next_step or "review_approve",
+                "next_step": "provide_a_local_text_pack_path",
             },
         )
 
@@ -17202,6 +17258,7 @@ class Orchestrator:
                 "state_root": str(state_root),
                 "confirmation_transactions": str(state_root / "confirmation_transactions.sqlite3"),
                 "internal_writer_receipts": internal_writer_receipts,
+                "notification_delivery_ledger": str(state_root / "llm_notifications.json.delivery.sqlite3"),
                 "mode": "sqlite_online_backup",
             },
         }

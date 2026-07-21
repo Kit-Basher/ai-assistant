@@ -325,3 +325,12 @@ binding; there is no generic `organization.manage` grant. Audit v2E also adds
 `notification.prune` now protect the migrated v2E surfaces. SAFE MODE does not
 automatically authorize local writes; every supported mutation still requires
 the capability decision and scoped confirmation.
+
+## v2F capabilities
+
+The schema includes bounded capabilities for pack-source configuration,
+permission-policy configuration, pack install/approve/enable/remove/grant,
+search-service configuration, and search-prerequisite installation. Unknown
+permission names, wildcards, caller-selected executors, and foreign executable
+packs fail closed. SAFE MODE blocks the search setup/prerequisite and pack
+installation mutations identified by policy.

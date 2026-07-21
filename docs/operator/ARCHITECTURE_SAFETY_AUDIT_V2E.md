@@ -118,3 +118,10 @@ domain/security tests, 74 canonical release-smoke tests, all capability/Plan/
 internal-writer/adversarial/transaction/pack proofs, and the full suite at
 2,563 passed with 22 named environment-dependent skips. Deterministic inventory
 checks and `git diff --check` also passed.
+
+## v2F follow-through
+
+The ten deferred legacy and seven Plan-confirm pack/search/permission groups
+were dispositioned in v2F. Notification delivery bookkeeping now persists an
+operation identity before I/O and reconciles interrupted execution as
+indeterminate without automatic resend.

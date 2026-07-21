@@ -570,6 +570,24 @@ def _default_capabilities() -> list[CapabilityDefinition]:
             "conditionally_reversible", "high", "plan_and_confirm", receipt_required=True,
             runtime_revalidation_required=True, target_binding_required=True, generic_bypass_forbidden=True,
         ),
+        *[
+            _capability(
+                capability_id, title, "mutating", scope, reversibility, "high", "plan_and_confirm",
+                receipt_required=True, runtime_revalidation_required=True, target_binding_required=True,
+                external_side_effect=external, generic_bypass_forbidden=True,
+            )
+            for capability_id, title, scope, reversibility, external in (
+                ("pack.source.configure", "Change pack source catalog or policy", "local_filesystem", "reversible", False),
+                ("permission.policy.configure", "Change future permission policy", "local_filesystem", "conditionally_reversible", False),
+                ("pack.lifecycle.install", "Install one quarantined local text pack", "local_filesystem", "conditionally_reversible", False),
+                ("pack.lifecycle.approve", "Approve one exact pack digest", "local_filesystem", "reversible", False),
+                ("pack.lifecycle.enable", "Enable or disable one exact pack version", "local_filesystem", "reversible", False),
+                ("pack.permission.grant", "Grant one bounded pack adapter permission", "local_filesystem", "reversible", False),
+                ("pack.lifecycle.remove", "Remove one exact pack version", "local_filesystem", "conditionally_reversible", False),
+                ("search.service.configure", "Configure the bounded managed search service", "local_host", "conditionally_reversible", True),
+                ("search.prerequisite.install", "Install the bounded managed-search prerequisite", "local_host", "conditionally_reversible", True),
+            )
+        ],
         _capability(
             "system.package.install",
             "Install local package",

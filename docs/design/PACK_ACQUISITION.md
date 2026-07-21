@@ -25,8 +25,8 @@ Allowed v1 outcomes:
 - trusted catalog candidate found: show preview before fetch/import.
 - remote source untrusted: stop at the source-trust gate and explain that approval is required before fetch/import.
 - safe web-search leads found: show untrusted source leads only. Leads are not source approval, are not trusted, and cannot be fetched/imported until the separate source approval gate is completed.
-- source approval preview confirmed: record explicit trust for the source id only, then stop. Source approval does not approve pack content and does not fetch, download, import, install, approve, enable, configure, grant permissions, or use a pack.
-- approved source fetch confirmed: fetch into quarantine and import for review only, then stop. The assistant must show the imported pack review state before any approval continuation. Quarantine fetch/import does not approve, enable, configure, grant permissions, or use a pack; review approval remains the next gate.
+- source approval preview: advisory only in the assistant compatibility flow. Source catalog creation and query-policy changes are separate centrally authorized operations.
+- approved-source fetch confirmation: explicitly unavailable. Old approval/fetch confirmations cannot open a URL or import content.
 - no candidate found: offer a preview-only scaffold path.
 - imported for review: show review state, then show a review-approval preview before any approval mutation.
 - approved but disabled: show an enablement preview before any enablement mutation.
@@ -41,9 +41,9 @@ Remote content remains hostile even when a source is approved. Source trust only
 
 Safe web-search lead discovery is metadata-only. Result URLs, titles, snippets, and engine/source labels are untrusted search metadata. The assistant must not fetch result pages, download archives, call `/packs/install`, import packs, enable packs, or infer safety from GitHub or any other domain. Leads only point to the separate source approval gate.
 
-Source approval is explicit user trust for a source id, not trust in the content. It may record a source catalog/policy entry that permits a future fetch or preview into quarantine, but fetched content remains hostile and must still pass catalog/source policy, quarantine, normalization, inspection, review approval, enablement, configuration, permissions, and managed-adapter gates before use.
+Source catalog and query policy are distinct centrally authorized state changes, not trust in pack content. They permit metadata queries only and do not authorize archive acquisition.
 
-Quarantine fetch/import-for-review is a separate gate after source approval. The assistant may fetch only from an approved source id through the existing hostile remote-fetch and `ExternalPackIngestor` paths. A successful fetch creates a review-only external pack candidate with no approval, no enablement, no configuration, no permission grant, and no use.
+Quarantine fetch/import-for-review is not implemented at the product boundary. The retained hostile-fetch primitives are offline/test infrastructure and are not called by Web, assistant, Telegram, CLI, compatibility, or registered executor paths. A future implementation must add a separate authorized fetch stage before approval or installation.
 
 After any import-for-review result, the assistant must render a bounded review-state summary before asking for approval. That summary may include pack identity, lifecycle state, local review status, enabled=false, permissions/grants status, managed-adapter kinds, risk flags, import status, and safe source/provenance metadata. It must not expose raw `SKILL.md`, README, manifests, catalog listings, prompt text, secrets, private paths, or long hostile strings. Review state is not content trust; it is a truthfulness checkpoint that tells the user why the pack is still not usable and names the next safe gate as review/approval.
 
@@ -56,3 +56,12 @@ Configuration and permission continuation is separate from enablement. If the en
 Managed adapter invocation is a later explicit action after usability. The assistant must preview the pack, adapter kind, operation, redacted grant scope, read/write behavior, and disabled execution channels before running anything. The first supported operation set is `validate_grant`, `describe_capability`, and `dry_run`; `local_file_import` v1 can validate metadata and dry-run the selected-file grant only. Content read, search, parse, or indexing behavior is not implemented until a future core-owned adapter operation adds it.
 
 External/generated packs must not run arbitrary code. They can request only approved managed adapters implemented in core runtime. V1 does not add internet-wide search, OAuth, browser scraping, transcript lookup, YouTube/browser parsing, dependency installs, `handler.py`, or arbitrary generated code execution.
+
+## v2F authorization status
+
+Local text-pack installation is centrally Plan/confirm authorized. Combined
+remote fetch/install is explicitly unavailable: remote acquisition requires a
+future separately authorized, connection-target-validated quarantine stage,
+followed by a second digest- and normalized-manifest-bound approval/install
+Plan. Source allowlisting alone never authorizes fetch, install, execution, or
+permissions.

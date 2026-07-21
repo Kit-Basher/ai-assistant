@@ -331,3 +331,11 @@ sub-operations plus `memory.reset.v1`, `semantic.ingest.v1`,
 `notification.mark_read.v1`, and `notification.prune.v1`. A Plan for one
 assistant command cannot select another command's executor. They share the
 canonical transaction database; direct callback invocation fails closed.
+
+## v2F executors
+
+Thirteen v2F executors are operation-specific and capability-bound. They accept
+only Executor Registry authorization metadata produced after durable
+confirmation reservation. Public aliases cannot select an executor or call an
+alternate confirmation store. Receipts are redacted and the transaction result
+remains consumed even when downstream journal append fails.

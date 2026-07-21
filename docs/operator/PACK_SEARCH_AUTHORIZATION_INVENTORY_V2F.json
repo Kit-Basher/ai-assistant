@@ -1,0 +1,247 @@
+{
+  "schema": "personal-agent.pack-search-authorization-inventory.v2f",
+  "starting_commit": "724de3cbbbd25b2396d0f660fb0062b84d339944",
+  "summary": {
+    "bounded_internal_writer": 1,
+    "central_authorized": 13,
+    "legacy": 0,
+    "unimplemented_denied": 2
+  },
+  "surfaces": [
+    {
+      "actor": "scope-bound actor/thread/session",
+      "capability_id": "pack.lifecycle.approve",
+      "confirmation": "durable single-use Universal Mutation Plan confirmation",
+      "disposition": "central_authorized",
+      "executor_id": "external_pack.approve.v1",
+      "operation": "external_pack.approve",
+      "receipt": "redacted Executor Registry receipt",
+      "resources": "operation-specific source/pack/policy/search target set",
+      "rollback": "Restore the previous review state through a new Plan.",
+      "routes": [
+        "POST /packs/approve",
+        "POST /packs/approve/plan",
+        "POST /packs/approve/apply"
+      ],
+      "target_binding": "request + current resource state + RuntimeTruthService activation fingerprint"
+    },
+    {
+      "actor": "scope-bound actor/thread/session",
+      "capability_id": "pack.lifecycle.enable",
+      "confirmation": "durable single-use Universal Mutation Plan confirmation",
+      "disposition": "central_authorized",
+      "executor_id": "external_pack.enable.v1",
+      "operation": "external_pack.enable",
+      "receipt": "redacted Executor Registry receipt",
+      "resources": "operation-specific source/pack/policy/search target set",
+      "rollback": "Restore the previous enabled state through a new Plan.",
+      "routes": [
+        "POST /packs/enable",
+        "POST /packs/enable/plan",
+        "POST /packs/enable/apply"
+      ],
+      "target_binding": "request + current resource state + RuntimeTruthService activation fingerprint"
+    },
+    {
+      "actor": "scope-bound actor/thread/session",
+      "capability_id": "pack.permission.grant",
+      "confirmation": "durable single-use Universal Mutation Plan confirmation",
+      "disposition": "central_authorized",
+      "executor_id": "external_pack.grant.v1",
+      "operation": "external_pack.grant",
+      "receipt": "redacted Executor Registry receipt",
+      "resources": "operation-specific source/pack/policy/search target set",
+      "rollback": "Revoke the exact bounded grant through a new Plan.",
+      "routes": [
+        "POST /packs/grant",
+        "POST /packs/grant/plan",
+        "POST /packs/grant/apply"
+      ],
+      "target_binding": "request + current resource state + RuntimeTruthService activation fingerprint"
+    },
+    {
+      "actor": "scope-bound actor/thread/session",
+      "capability_id": "pack.lifecycle.install",
+      "confirmation": "durable single-use Universal Mutation Plan confirmation",
+      "disposition": "central_authorized",
+      "executor_id": "external_pack.install.v1",
+      "operation": "external_pack.install",
+      "receipt": "redacted Executor Registry receipt",
+      "resources": "operation-specific source/pack/policy/search target set",
+      "rollback": "Remove only the exact installed/quarantined pack version through a new Plan.",
+      "routes": [
+        "POST /packs/install",
+        "POST /packs/install/plan",
+        "POST /packs/install/apply"
+      ],
+      "target_binding": "request + current resource state + RuntimeTruthService activation fingerprint"
+    },
+    {
+      "actor": "scope-bound actor/thread/session",
+      "capability_id": "pack.lifecycle.remove",
+      "confirmation": "durable single-use Universal Mutation Plan confirmation",
+      "disposition": "central_authorized",
+      "executor_id": "external_pack.remove.v1",
+      "operation": "external_pack.remove",
+      "receipt": "redacted Executor Registry receipt",
+      "resources": "operation-specific source/pack/policy/search target set",
+      "rollback": "Restore only from a separately reviewed backup; deletion is otherwise irreversible.",
+      "routes": [
+        "POST /packs/remove",
+        "POST /packs/remove/plan",
+        "POST /packs/remove/apply",
+        "DELETE /packs/{pack_id}"
+      ],
+      "target_binding": "request + current resource state + RuntimeTruthService activation fingerprint"
+    },
+    {
+      "actor": "scope-bound actor/thread/session",
+      "capability_id": "pack.source.configure",
+      "confirmation": "durable single-use Universal Mutation Plan confirmation",
+      "disposition": "central_authorized",
+      "executor_id": "pack_source.catalog.create.v1",
+      "operation": "pack_source.catalog.create",
+      "receipt": "redacted Executor Registry receipt",
+      "resources": "operation-specific source/pack/policy/search target set",
+      "rollback": "Restore the previous source catalog document.",
+      "routes": [
+        "POST /pack_sources/catalog"
+      ],
+      "target_binding": "request + current resource state + RuntimeTruthService activation fingerprint"
+    },
+    {
+      "actor": "scope-bound actor/thread/session",
+      "capability_id": "pack.source.configure",
+      "confirmation": "durable single-use Universal Mutation Plan confirmation",
+      "disposition": "central_authorized",
+      "executor_id": "pack_source.catalog.delete.v1",
+      "operation": "pack_source.catalog.delete",
+      "receipt": "redacted Executor Registry receipt",
+      "resources": "operation-specific source/pack/policy/search target set",
+      "rollback": "Restore the deleted source and its scoped policy through a new Plan.",
+      "routes": [
+        "DELETE /pack_sources/catalog/{source_id}"
+      ],
+      "target_binding": "request + current resource state + RuntimeTruthService activation fingerprint"
+    },
+    {
+      "actor": "scope-bound actor/thread/session",
+      "capability_id": "pack.source.configure",
+      "confirmation": "durable single-use Universal Mutation Plan confirmation",
+      "disposition": "central_authorized",
+      "executor_id": "pack_source.catalog.update.v1",
+      "operation": "pack_source.catalog.update",
+      "receipt": "redacted Executor Registry receipt",
+      "resources": "operation-specific source/pack/policy/search target set",
+      "rollback": "Restore the previous source catalog entry.",
+      "routes": [
+        "PUT /pack_sources/catalog/{source_id}"
+      ],
+      "target_binding": "request + current resource state + RuntimeTruthService activation fingerprint"
+    },
+    {
+      "actor": "scope-bound actor/thread/session",
+      "capability_id": "pack.source.configure",
+      "confirmation": "durable single-use Universal Mutation Plan confirmation",
+      "disposition": "central_authorized",
+      "executor_id": "pack_source.policy.update.v1",
+      "operation": "pack_source.policy.update",
+      "receipt": "redacted Executor Registry receipt",
+      "resources": "operation-specific source/pack/policy/search target set",
+      "rollback": "Restore the previous global source policy.",
+      "routes": [
+        "PUT /pack_sources/policy"
+      ],
+      "target_binding": "request + current resource state + RuntimeTruthService activation fingerprint"
+    },
+    {
+      "actor": "scope-bound actor/thread/session",
+      "capability_id": "pack.source.configure",
+      "confirmation": "durable single-use Universal Mutation Plan confirmation",
+      "disposition": "central_authorized",
+      "executor_id": "pack_source.scoped_policy.update.v1",
+      "operation": "pack_source.scoped_policy.update",
+      "receipt": "redacted Executor Registry receipt",
+      "resources": "operation-specific source/pack/policy/search target set",
+      "rollback": "Restore the previous source-specific policy.",
+      "routes": [
+        "PUT /pack_sources/{source_id}/policy"
+      ],
+      "target_binding": "request + current resource state + RuntimeTruthService activation fingerprint"
+    },
+    {
+      "actor": "scope-bound actor/thread/session",
+      "capability_id": "permission.policy.configure",
+      "confirmation": "durable single-use Universal Mutation Plan confirmation",
+      "disposition": "central_authorized",
+      "executor_id": "permission.policy.update.v1",
+      "operation": "permission.policy.update",
+      "receipt": "redacted Executor Registry receipt",
+      "resources": "operation-specific source/pack/policy/search target set",
+      "rollback": "Restore the previous bounded permission policy through a separately authorized Plan.",
+      "routes": [
+        "PUT /permissions"
+      ],
+      "target_binding": "request + current resource state + RuntimeTruthService activation fingerprint"
+    },
+    {
+      "actor": "scope-bound actor/thread/session",
+      "capability_id": "search.prerequisite.install",
+      "confirmation": "durable single-use Universal Mutation Plan confirmation",
+      "disposition": "central_authorized",
+      "executor_id": "search.prerequisite.v1",
+      "operation": "search.prerequisite",
+      "receipt": "redacted Executor Registry receipt",
+      "resources": "operation-specific source/pack/policy/search target set",
+      "rollback": "System package installation is not automatically reversible.",
+      "routes": [
+        "POST /search/setup/prerequisite/plan",
+        "POST /search/setup/prerequisite/apply"
+      ],
+      "target_binding": "request + current resource state + RuntimeTruthService activation fingerprint"
+    },
+    {
+      "actor": "scope-bound actor/thread/session",
+      "capability_id": "search.service.configure",
+      "confirmation": "durable single-use Universal Mutation Plan confirmation",
+      "disposition": "central_authorized",
+      "executor_id": "search.setup.v1",
+      "operation": "search.setup",
+      "receipt": "redacted Executor Registry receipt",
+      "resources": "operation-specific source/pack/policy/search target set",
+      "rollback": "Remove only the owned service and restore prior search configuration.",
+      "routes": [
+        "POST /search/setup/plan",
+        "POST /search/setup/apply"
+      ],
+      "target_binding": "request + current resource state + RuntimeTruthService activation fingerprint"
+    },
+    {
+      "disposition": "unimplemented_denied",
+      "operation": "external_pack.remote_fetch",
+      "reason": "all product and compatibility callers deny before URL I/O; separate digest-bound quarantine fetch is not implemented",
+      "routes": [
+        "remote form of POST /packs/install",
+        "legacy assistant source approval/fetch follow-ups",
+        "SourceFetchController product calls",
+        "AgentRuntime.packs_install remote inputs"
+      ]
+    },
+    {
+      "disposition": "unimplemented_denied",
+      "operation": "external_pack.foreign_code",
+      "reason": "foreign executable/plugin packs never execute",
+      "routes": [
+        "all external pack paths"
+      ]
+    },
+    {
+      "disposition": "bounded_internal_writer",
+      "operation": "notification.scheduled_delivery",
+      "reason": "durable identity and state ledger; interrupted send becomes indeterminate and is never automatically resent",
+      "routes": [
+        "trusted scheduler only"
+      ]
+    }
+  ]
+}

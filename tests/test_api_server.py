@@ -4134,7 +4134,20 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertEqual(200, put_permissions.status_code)
         put_payload = json.loads(put_permissions.body.decode("utf-8"))
         self.assertTrue(put_payload["ok"])
-        self.assertTrue(put_payload["permissions"]["actions"]["modelops.pull_ollama_model"])
+        permission_plan = put_payload["plan"]
+        apply_permissions = _HandlerForTest(
+            runtime,
+            "/permissions",
+            {
+                **dict(put_payload.get("operation_payload") or {}),
+                "mutation_plan": permission_plan,
+                "confirmation": build_mutation_confirmation(permission_plan, confirmation_id="permission-policy-update"),
+            },
+        )
+        apply_permissions.do_PUT()
+        self.assertEqual(200, apply_permissions.status_code)
+        applied_payload = json.loads(apply_permissions.body.decode("utf-8"))
+        self.assertTrue(applied_payload["permissions"]["actions"]["modelops.pull_ollama_model"])
 
         # Deny by default for actions not explicitly enabled.
         plan_handler = _HandlerForTest(

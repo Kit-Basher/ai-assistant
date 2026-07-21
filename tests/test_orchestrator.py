@@ -110,6 +110,7 @@ class _RuntimeChatAvailableAdapter:
         self.pack_store = None
         self.pack_install_handler = None
         self._pack_lifecycle_confirmations: dict[str, dict[str, object]] = {}
+        self._canonical_pack_plans: dict[str, dict[str, object]] = {}
 
     def _safe_mode_enabled(self) -> bool:
         return False
@@ -210,6 +211,70 @@ class _RuntimeChatAvailableAdapter:
         else:
             return {"ok": False, "error": "unknown_pack_lifecycle_action", "mutated": False}
         return {"ok": isinstance(pack, dict), "pack": pack if isinstance(pack, dict) else {}, "mutated": isinstance(pack, dict)}
+
+    def route_pack_search_mutation(self, action_type: str, payload: dict[str, object]) -> tuple[bool, dict[str, object]]:
+        plan = payload.get("mutation_plan") if isinstance(payload.get("mutation_plan"), dict) else None
+        confirmation = payload.get("confirmation") if isinstance(payload.get("confirmation"), dict) else None
+        if plan is None and confirmation is None:
+            request = {key: value for key, value in payload.items() if key not in {"actor_id", "thread_id", "session_id"}}
+            legacy = self.plan_pack_lifecycle(action_type, request)
+            legacy_plan = legacy["plan"]
+            capabilities = {
+                "external_pack.install": "pack.lifecycle.install",
+                "external_pack.approve": "pack.lifecycle.approve",
+                "external_pack.enable": "pack.lifecycle.enable",
+                "external_pack.grant": "pack.permission.grant",
+                "external_pack.remove": "pack.lifecycle.remove",
+            }
+            plan = build_mutation_plan(
+                plan_id=f"canonical-{legacy_plan['plan_id']}", capability_id=capabilities[action_type],
+                executor_id=f"{action_type}.v1", expires_at_epoch=int(time.time()) + 600,
+                actor_id=str(payload.get("actor_id") or ""), thread_id=str(payload.get("thread_id") or ""),
+                session_id=str(payload.get("session_id") or ""),
+                target_snapshot={"operation": action_type, "request": request},
+                mutation_inventory=[{"operation": action_type}], preserved_resources=["unrelated packs"],
+                expected_side_effects=[action_type], recovery={"rollback_available": True},
+            )
+            plan.update({"action_type": action_type, "executor_status": "enabled", "target": action_type})
+            self._canonical_pack_plans[str(plan["plan_id"])] = {"plan": plan, "legacy": legacy, "consumed": False}
+            return True, {"ok": True, "requires_confirmation": True, "plan": plan, "mutated": False}
+        if plan is None or confirmation is None:
+            return False, {"ok": False, "error": "scoped_mutation_plan_and_confirmation_required", "mutated": False}
+        stored = self._canonical_pack_plans.get(str(plan.get("plan_id") or ""))
+        if not stored or stored.get("plan") != plan or stored.get("consumed"):
+            return False, {"ok": False, "error": "mutation_plan_unknown_or_consumed", "mutated": False}
+        try:
+            validate_mutation_confirmation(plan, confirmation)
+        except ValueError as exc:
+            return False, {"ok": False, "error": str(exc), "mutated": False}
+        stored["consumed"] = True
+        legacy = stored["legacy"]
+        legacy_plan = legacy["plan"]
+        result = self.apply_pack_lifecycle(action_type, {
+            "plan_id": legacy_plan["plan_id"], "confirmation_token": legacy_plan["confirmation_token"],
+            "mutation_plan": legacy_plan["mutation_plan"],
+        })
+        if bool(result.get("ok")) and action_type == "external_pack.approve":
+            result.update({
+                "action": "review_approve", "message": "The draft is approved for the next setup step.",
+                "did_approve": True, "did_enable": False, "did_grant": False,
+                "lifecycle": {"state": "approved", "usable": False, "missing_gate": "enablement"},
+            })
+        elif bool(result.get("ok")) and action_type == "external_pack.enable":
+            result.update({
+                "action": "enable", "message": "The approved pack is enabled; permissions remain a separate step.",
+                "did_approve": False, "did_enable": True, "did_grant": False,
+                "lifecycle": {"state": "enabled", "usable": False, "missing_gate": "permissions"},
+            })
+        elif bool(result.get("ok")) and action_type == "external_pack.grant":
+            result.update({
+                "action": "permission_grant", "message": "The exact managed-adapter permission was granted.",
+                "did_approve": False, "did_enable": False, "did_grant": True,
+                "lifecycle": {"state": "usable", "usable": True, "missing_gate": None},
+            })
+        elif bool(result.get("ok")) and action_type == "external_pack.install":
+            result.update({"action": "install", "message": "The pack was imported for review only; it is not approved, not enabled, and has no permissions."})
+        return bool(result.get("ok")), result
 
 
 class _PreparedChatAdapter:
@@ -7005,14 +7070,14 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIn("review preview", review_preview.text.lower())
         self.assertIn("plan mode confirmation", review_preview.text.lower())
         approved = orchestrator.handle_message("yes", "user1")
-        self.assertEqual(["pack_lifecycle_action"], approved.data["used_tools"])
+        self.assertEqual(["v2f_authorization"], approved.data["used_tools"])
         self.assertIn("approved for the next setup step", approved.text.lower())
         enable_preview = orchestrator.handle_message("yes", "user1")
         self.assertEqual(["pack_lifecycle_action"], enable_preview.data["used_tools"])
         self.assertIn("turn-on preview", enable_preview.text.lower())
         self.assertIn("plan mode confirmation", enable_preview.text.lower())
         enabled = orchestrator.handle_message("yes", "user1")
-        self.assertEqual(["pack_lifecycle_action"], enabled.data["used_tools"])
+        self.assertEqual(["v2f_authorization"], enabled.data["used_tools"])
         self.assertIn("permission preview is required", enabled.text)
         permission_preview = orchestrator.handle_message("yes", "user1")
         self.assertEqual(["managed_adapter_permission"], permission_preview.data["used_tools"])
@@ -7032,7 +7097,7 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIn("selected-file permission plan", grant_plan.text.lower())
         self.assertIn("plan mode confirmation", grant_plan.text.lower())
         grant_response = orchestrator.handle_message("yes", "user1")
-        self.assertEqual(["pack_lifecycle_action"], grant_response.data["used_tools"])
+        self.assertEqual(["v2f_authorization"], grant_response.data["used_tools"])
         self.assertIn("permission metadata recorded", grant_response.text.lower())
         grant_payload = grant_response.data.get("runtime_payload") if isinstance(grant_response.data.get("runtime_payload"), dict) else {}
         self.assertTrue(grant_payload.get("approved"))
@@ -7079,7 +7144,7 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIn("grant file permission", approval_preview.text.lower())
 
         approved = orchestrator.handle_message("yes", "user1")
-        self.assertEqual(["pack_lifecycle_action"], approved.data["used_tools"])
+        self.assertEqual(["v2f_authorization"], approved.data["used_tools"])
         approved_payload = approved.data.get("runtime_payload") if isinstance(approved.data.get("runtime_payload"), dict) else {}
         self.assertEqual("review_approve", approved_payload.get("action"))
         self.assertEqual("approved", (approved_payload.get("lifecycle") or {}).get("state"))
@@ -7098,7 +7163,7 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIn("will not grant file permission", enable_preview.text.lower())
 
         enabled = orchestrator.handle_message("yes", "user1")
-        self.assertEqual(["pack_lifecycle_action"], enabled.data["used_tools"])
+        self.assertEqual(["v2f_authorization"], enabled.data["used_tools"])
         enabled_payload = enabled.data.get("runtime_payload") if isinstance(enabled.data.get("runtime_payload"), dict) else {}
         self.assertEqual("enable", enabled_payload.get("action"))
         self.assertTrue(enabled_payload.get("did_enable"))
@@ -7612,7 +7677,7 @@ Workflow:
         self.assertEqual(["capability_gap_import"], import_plan.data["used_tools"])
         self.assertIn("plan mode confirmation", import_plan.text.lower())
         imported = orchestrator.handle_message("yes", "user1")
-        self.assertEqual(["pack_lifecycle_action"], imported.data["used_tools"])
+        self.assertEqual(["v2f_authorization"], imported.data["used_tools"])
         self.assertEqual(1, len(install_calls))
         self.assertEqual("https://github.com/example/local-voice/archive/main.zip", install_calls[0]["source"])
         self.assertEqual("github_archive", install_calls[0]["source_kind"])

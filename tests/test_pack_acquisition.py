@@ -419,7 +419,8 @@ class TestPackAcquisitionOrchestratorRegression(unittest.TestCase):
         self.assertIn("source approval preview", text.lower())
         self.assertIn("source is still untrusted", text.lower())
         self.assertIn("no pages were fetched", text.lower())
-        self.assertIn("say yes to record source approval only", text.lower())
+        self.assertIn("legacy assistant approval flow is read-only", text.lower())
+        self.assertIn("remote pack acquisition remains unavailable", text.lower())
         self.assertFalse(self.runtime.pack_store.list_external_packs())
 
     def test_second_yes_after_source_approval_preview_records_approval_only(self) -> None:
@@ -765,7 +766,7 @@ class TestPackAcquisitionOrchestratorRegression(unittest.TestCase):
         self.assertIn("no content was downloaded", text.lower())
         self.assertFalse(self.runtime.pack_store.list_external_packs())
 
-    def test_no_after_source_approval_preview_cancels_without_fetch(self) -> None:
+    def test_no_after_read_only_source_preview_has_no_mutation_to_cancel(self) -> None:
         self.runtime.config = replace(
             self.runtime.config,
             search_enabled=True,
@@ -780,8 +781,7 @@ class TestPackAcquisitionOrchestratorRegression(unittest.TestCase):
         self._post_chat("yes")
         _body, text = self._post_chat("no")
 
-        self.assertIn("did not approve that source", text.lower())
-        self.assertIn("no content was fetched", text.lower())
+        self.assertIn("don’t have a current action", text.lower())
         self.assertFalse(self.runtime.pack_store.list_external_packs())
 
 

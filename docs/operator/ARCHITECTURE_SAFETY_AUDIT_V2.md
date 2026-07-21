@@ -151,3 +151,11 @@ Audit v2E supersedes that count: organization, memory reset, semantic-memory,
 and notification public writes are centralized, leaving ten
 `legacy_unmigrated` and seven domain-confirmed pack/search surfaces. See
 `ARCHITECTURE_SAFETY_AUDIT_V2E.md`. Universal authorization remains incomplete.
+
+## v2F closure addendum
+
+The final inventory regeneration reports zero legacy and unclassified mutation
+surfaces. The closure claim covers inventoried public entry points and bounded
+internal writers; it does not claim isolation from arbitrary trusted-process
+Python. See `ARCHITECTURE_SAFETY_AUDIT_V2F.md` for denied and incomplete
+functions.

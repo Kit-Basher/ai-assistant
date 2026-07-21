@@ -155,3 +155,13 @@ Lifecycle states:
 case it returns `setup_mode=already_configured`, `requires_confirmation=false`,
 and `mutated=false` instead of trying to create a new container or allocate a
 port.
+
+## v2F managed setup authorization
+
+Status and prerequisite checks remain read-only. Setup, repair, reuse, and the
+bounded Podman prerequisite use Universal Mutation Plans and durable scoped
+confirmation; SAFE MODE blocks apply. The executor fixes service identity,
+image allowlist, loopback bind, container name, configuration location, and
+package. Arbitrary image/command/mount/port/URL selection is rejected. The
+allowlisted image is not yet registry-digest pinned, so immutable digest binding
+remains a release warning.

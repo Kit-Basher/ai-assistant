@@ -841,3 +841,16 @@ no-follow descriptor reads and ingests the exact verified bytes. The global
 legacy count falls from 19 to ten.
 Seven domain-confirmed pack/search groups remain for v2F, so universal public
 authorization is still incomplete. Telegram remains disabled and untouched.
+
+## Audit v2F working-tree checkpoint
+
+The final ten legacy and seven older Plan-confirm groups have final
+dispositions. Thirteen pack/source/permission/search operations are centrally
+authorized; scheduled notification delivery uses a durable bounded writer;
+remote combined fetch/install and foreign code are explicitly denied. Global
+legacy and unclassified counts are zero. Universal authorization applies to
+inventoried public boundaries, subject to the documented lack of isolation
+from malicious Python already running in the trusted process. No release has
+been made. Backup v1 now includes the durable notification delivery ledger so
+its replay-prevention and reconciliation state does not depend on WAL/SHM files
+or disappear during a supported restore.

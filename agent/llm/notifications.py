@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from contextlib import closing
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import sqlite3
 import tempfile
 import time
 from typing import Any
@@ -181,6 +183,111 @@ class NotificationStore:
         self.compact = bool(compact)
         self.compact_keep_recent = max(1, int(compact_keep_recent))
         self.state = self.load()
+        self.delivery_ledger_path = self.path.with_name(f"{self.path.name}.delivery.sqlite3")
+        self._init_delivery_ledger()
+        self.reconcile_interrupted_deliveries()
+
+    def _delivery_connection(self) -> sqlite3.Connection:
+        self.delivery_ledger_path.parent.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(str(self.delivery_ledger_path), timeout=30.0, isolation_level=None)
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA synchronous=FULL")
+        return connection
+
+    def _init_delivery_ledger(self) -> None:
+        with closing(self._delivery_connection()) as connection:
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS notification_deliveries (
+                operation_id TEXT PRIMARY KEY,
+                transport TEXT NOT NULL,
+                target_fingerprint TEXT NOT NULL,
+                content_fingerprint TEXT NOT NULL,
+                state TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                receipt_json TEXT NOT NULL DEFAULT '{}'
+                )"""
+            )
+        try:
+            os.chmod(self.delivery_ledger_path, 0o600)
+        except OSError:
+            pass
+
+    def reserve_delivery(self, *, operation_id: str, transport: str, target_fingerprint: str, content_fingerprint: str) -> bool:
+        """Reserve one outbound delivery durably; existing identities never resend."""
+        now = int(time.time())
+        with closing(self._delivery_connection()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT state, transport, target_fingerprint, content_fingerprint FROM notification_deliveries WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            if row is not None:
+                connection.rollback()
+                return False
+            connection.execute(
+                "INSERT INTO notification_deliveries(operation_id, transport, target_fingerprint, content_fingerprint, state, created_at, updated_at) VALUES (?, ?, ?, ?, 'reserved', ?, ?)",
+                (operation_id, transport, target_fingerprint, content_fingerprint, now, now),
+            )
+            connection.commit()
+        return True
+
+    def mark_delivery_executing(self, operation_id: str) -> bool:
+        with closing(self._delivery_connection()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            changed = connection.execute(
+                "UPDATE notification_deliveries SET state = 'executing', updated_at = ? WHERE operation_id = ? AND state = 'reserved'",
+                (int(time.time()), operation_id),
+            ).rowcount
+            connection.commit()
+        return changed == 1
+
+    def finish_delivery(self, operation_id: str, *, state: str, receipt: dict[str, Any] | None = None) -> bool:
+        if state not in {"succeeded", "failed", "indeterminate", "abandoned"}:
+            raise ValueError("notification_delivery_terminal_state_invalid")
+        safe_receipt = {
+            str(key): sanitize_notification_text(value)
+            for key, value in (receipt or {}).items()
+            if str(key) in {"delivered_to", "reason", "error_kind"}
+        }
+        with closing(self._delivery_connection()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            changed = connection.execute(
+                "UPDATE notification_deliveries SET state = ?, updated_at = ?, receipt_json = ? WHERE operation_id = ? AND state IN ('reserved','executing')",
+                (state, int(time.time()), json.dumps(safe_receipt, sort_keys=True), operation_id),
+            ).rowcount
+            connection.commit()
+        return changed == 1
+
+    def reconcile_interrupted_deliveries(self) -> int:
+        """A restart makes executing sends indeterminate; they are never auto-retried."""
+        with closing(self._delivery_connection()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            reserved = connection.execute(
+                "UPDATE notification_deliveries SET state = 'failed', updated_at = ? WHERE state = 'reserved'",
+                (int(time.time()),),
+            ).rowcount
+            executing = connection.execute(
+                "UPDATE notification_deliveries SET state = 'indeterminate', updated_at = ? WHERE state = 'executing'",
+                (int(time.time()),),
+            ).rowcount
+            connection.commit()
+        return int(reserved + executing)
+
+    def delivery_reconciliation_status(self) -> dict[str, Any]:
+        with closing(self._delivery_connection()) as connection:
+            rows = connection.execute(
+                "SELECT operation_id, transport, state, created_at, updated_at FROM notification_deliveries ORDER BY created_at DESC LIMIT 100"
+            ).fetchall()
+        return {
+            "ok": True,
+            "exactly_once_claimed": False,
+            "automatic_resend_of_indeterminate": False,
+            "deliveries": [
+                {"operation_id": row[0], "transport": row[1], "state": row[2], "created_at": row[3], "updated_at": row[4]}
+                for row in rows
+            ],
+        }
 
     @staticmethod
     def default_path() -> str:

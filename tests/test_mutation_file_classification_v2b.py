@@ -22,18 +22,16 @@ def test_mutation_file_inventory_is_exact_and_field_complete() -> None:
     payload = json.loads(audit.CLASSIFICATION_PATH.read_text(encoding="utf-8"))
     rows = payload["classifications"]
     indexed = {row["path"]: row for row in rows}
-    assert len(rows) == len(indexed) == payload["reviewed_count"] == 155
+    assert len(rows) == len(indexed) == payload["reviewed_count"] == 157
     assert set(indexed) == _detected_paths()
     for path, row in indexed.items():
         assert audit.REQUIRED_CLASSIFICATION_FIELDS == set(row)
         assert all(str(row[field]).strip() for field in audit.REQUIRED_CLASSIFICATION_FIELDS), path
 
 
-def test_release_blocking_files_are_not_misreported_as_central() -> None:
+def test_v2f_closure_has_no_pending_migration_disposition() -> None:
     payload = json.loads(audit.CLASSIFICATION_PATH.read_text(encoding="utf-8"))
     pending = {row["path"] for row in payload["classifications"] if row["disposition"] == "supported_pending_migration"}
-    assert len(pending) == 19
-    assert "agent/secret_store.py" not in pending
-    assert "agent/semantic_memory/storage.py" in pending
-    assert "agent/packs/external_ingestion.py" in pending
-    assert "agent/telegram_runtime_state.py" in pending
+    assert pending == set()
+    denied = {row["path"] for row in payload["classifications"] if "unimplemented_denied" in row["disposition"]}
+    assert "agent/packs/remote_fetch.py" in denied

@@ -363,6 +363,12 @@ class TestSafeWebSearchRuntime(unittest.TestCase):
         runtime.search_status = lambda: dict(search_status)  # type: ignore[method-assign]
         runtime.managed_services_status = lambda: dict(services_status)  # type: ignore[method-assign]
         runtime.search_setup_plan = self._managed_setup_plan  # type: ignore[method-assign]
+        execution = dict(self._managed_setup_plan()["plan"])
+        execution.pop("mutation_plan", None)
+        execution["raw_base_url"] = str(execution.get("health_url") or "http://127.0.0.1:8888")
+        runtime._build_search_setup_execution_plan = lambda _payload: {  # type: ignore[method-assign]
+            "ok": True, "plan": dict(execution), "_execution_plan": dict(execution)
+        }
 
     def test_search_status_and_query_endpoints(self) -> None:
         runtime = self._runtime()

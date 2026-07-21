@@ -28,6 +28,7 @@ EXPECTED_FILES = {
     "support_bundle_style_summary.json",
     "backup_summary.json",
     "confirmation_transactions.sqlite3",
+    "notification_delivery.sqlite3",
 }
 
 
@@ -198,6 +199,23 @@ def run(base_url: str, timeout: float) -> list[Check]:
             _pass("durable confirmation snapshot is standalone and valid", "integrity=ok", "inspect confirmation snapshot")
             if confirmation_ok
             else _fail("durable confirmation snapshot is standalone and valid", "missing or invalid", "inspect confirmation snapshot")
+        )
+        notification_snapshot = artifact_path / "notification_delivery.sqlite3"
+        notification_ok = False
+        if notification_snapshot.is_file() and not notification_snapshot.is_symlink():
+            try:
+                with sqlite3.connect(f"file:{notification_snapshot}?mode=ro", uri=True) as connection:
+                    integrity = connection.execute("PRAGMA integrity_check").fetchone()
+                    table = connection.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'notification_deliveries'"
+                    ).fetchone()
+                notification_ok = bool(integrity and integrity[0] == "ok" and table)
+            except sqlite3.Error:
+                notification_ok = False
+        checks.append(
+            _pass("notification delivery snapshot is standalone and valid", "integrity=ok", "inspect notification delivery snapshot")
+            if notification_ok
+            else _fail("notification delivery snapshot is standalone and valid", "missing or invalid", "inspect notification delivery snapshot")
         )
         missing_files = sorted(name for name in EXPECTED_FILES if not (artifact_path / name).is_file())
         checks.append(

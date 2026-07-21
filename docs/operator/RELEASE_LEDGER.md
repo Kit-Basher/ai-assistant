@@ -421,3 +421,15 @@ proof as mandatory:
 - Verification: 632 focused domain/security tests and 74 release-smoke tests
   passed; capability, Plan, internal-writer, adversarial, transaction, and pack
   proofs passed; full pytest finished at 2,563 passed and 22 named skips.
+
+## 2026-07-20 — Audit v2F working tree (unreleased)
+
+- Replaced remaining pack/source/permission/search legacy confirmation stores
+  with durable Universal Mutation Plans and scoped confirmation.
+- Added durable scheduled-delivery intent and indeterminate crash
+  reconciliation without claiming exactly-once transport delivery. Backup v1
+  snapshots and restores that delivery ledger as a standalone SQLite database.
+- Mutation inventories now report zero legacy, Plan-gated legacy, and
+  unclassified surfaces. Remote pack fetch and foreign code remain denied.
+- No commit, tag, release, service change, Telegram enablement, recovery change,
+  or fresh-VM run is part of this working-tree audit.

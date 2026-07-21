@@ -45,7 +45,7 @@
     {
       "writer_id": "control_plane",
       "module": "agent.control_plane",
-      "disposition": "operator_triggered_legacy",
+      "disposition": "operator_triggered_central",
       "capability_id": "legacy.control_plane.write",
       "allowed_operations": [
         "put_document",
@@ -327,7 +327,7 @@
     {
       "writer_id": "llm_registry",
       "module": "agent.llm.registry",
-      "disposition": "operator_triggered_legacy",
+      "disposition": "operator_triggered_central",
       "capability_id": "legacy.provider.registry_write",
       "allowed_operations": [
         "save_registry"
@@ -365,7 +365,7 @@
     {
       "writer_id": "llm_registry_txn",
       "module": "agent.llm.registry_txn",
-      "disposition": "operator_triggered_legacy",
+      "disposition": "operator_triggered_central",
       "capability_id": "legacy.provider.registry_transaction",
       "allowed_operations": [
         "snapshot",
@@ -686,7 +686,7 @@
     {
       "writer_id": "packs_managed_adapters",
       "module": "agent.packs.managed_adapters",
-      "disposition": "operator_triggered_legacy",
+      "disposition": "operator_triggered_central",
       "capability_id": "legacy.pack.adapter_grant",
       "allowed_operations": [
         "record_grant",
@@ -725,7 +725,7 @@
     {
       "writer_id": "permissions",
       "module": "agent.permissions",
-      "disposition": "operator_triggered_legacy",
+      "disposition": "operator_triggered_central",
       "capability_id": "legacy.permissions.write",
       "allowed_operations": [
         "save_permissions"
@@ -928,7 +928,7 @@
     {
       "writer_id": "telegram_runtime_state",
       "module": "agent.telegram_runtime_state",
-      "disposition": "operator_triggered_legacy",
+      "disposition": "operator_triggered_central",
       "capability_id": "legacy.telegram.lifecycle",
       "allowed_operations": [
         "clear_lock",

@@ -12,6 +12,7 @@ from unittest import mock
 from pathlib import Path
 
 from agent.api_server import AgentRuntime
+from agent.mutation_plan import build_mutation_confirmation, mutation_plan_fingerprint
 from agent.telegram_bridge import build_telegram_chat_payload_result
 from agent.services.managed_local_services import (
     APPROVED_SEARXNG_IMAGE,
@@ -1243,21 +1244,22 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertEqual(200, handler.status_code)
         self.assertTrue(payload["requires_confirmation"])
         self.assertEqual("podman_prerequisite", payload["plan"]["setup_mode"])
-        self.assertEqual([["sudo", "apt-get", "install", "-y", "podman"]], payload["plan"]["commands"])
+        self.assertNotIn("commands", payload["plan"])
         self.assertEqual([], runner.calls)
 
     def test_podman_prerequisite_apply_rejects_invalid_and_expired_confirmation(self) -> None:
         runtime, _runner = self._runtime_with_podman_prerequisite()
         invalid = runtime.apply_podman_prerequisite({"plan_id": "missing", "confirmation_token": "bad"})
         plan_payload = runtime.podman_prerequisite_plan({})
-        plan = plan_payload["plan"]
-        runtime._podman_prerequisite_confirmations[plan["plan_id"]]["expires_at"] = time.time() - 1  # noqa: SLF001
-        expired = runtime.apply_podman_prerequisite({"plan_id": plan["plan_id"], "confirmation_token": plan["confirmation_token"]})
+        plan = dict(plan_payload["plan"])
+        plan["expires_at"] = "2000-01-01T00:00:00+00:00"
+        plan["plan_fingerprint"] = mutation_plan_fingerprint(plan)
+        expired = runtime.apply_podman_prerequisite(_universal_apply(plan))
 
         self.assertFalse(invalid["ok"])
-        self.assertEqual("invalid_confirmation", invalid["error"])
+        self.assertEqual("legacy_confirmation_token_rejected", invalid["error"])
         self.assertFalse(expired["ok"])
-        self.assertEqual("confirmation_expired", expired["error"])
+        self.assertEqual("mutation_confirmation_expired", expired["error"])
         self.assertFalse(runtime.config.search_enabled)
 
     def test_search_setup_apply_returns_elevated_handoff_for_podman_prerequisite_plan_token(self) -> None:
@@ -1271,7 +1273,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         apply_handler = _HandlerForTest(
             runtime,
             "/search/setup/apply",
-            {"plan_id": plan["plan_id"], "confirmation_token": plan["confirmation_token"]},
+            _universal_apply(plan),
         )
         apply_handler.do_POST()
         payload = json.loads(apply_handler.body.decode("utf-8"))
@@ -1296,10 +1298,10 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         plan_payload = runtime.search_setup_plan({})
         plan = plan_payload["plan"]
 
-        result = runtime.apply_search_setup({"plan_id": plan["plan_id"], "confirmation_token": plan["confirmation_token"]})
+        result = runtime.apply_search_setup(_universal_apply(plan))
 
         self.assertFalse(result["ok"])
-        self.assertEqual("safe_mode_blocked", result["error"])
+        self.assertEqual("safe_mode_mutation_blocked", result["error"])
         self.assertFalse(result["mutated"])
         self.assertEqual([], runner.calls)
         self.assertFalse(runtime.config.search_enabled)
@@ -1325,15 +1327,11 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         runtime, runner = self._runtime_with_podman_prerequisite(running_as_root=True)
         plan_payload = runtime.podman_prerequisite_plan({})
         plan = plan_payload["plan"]
-        stored = runtime._podman_prerequisite_confirmations[plan["plan_id"]]["plan"]  # noqa: SLF001
-        stored["commands"] = [["sudo", "apt-get", "install", "-y", "curl"]]
+        result = runtime.apply_podman_prerequisite({**_universal_apply(plan), "command": ["apt-get", "install", "curl"]})
 
-        result = runtime.apply_podman_prerequisite(
-            {"plan_id": plan["plan_id"], "confirmation_token": plan["confirmation_token"]}
-        )
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(["/usr/bin/apt-get", "install", "-y", "podman"], runner.calls[0]["argv"])
+        self.assertFalse(result["ok"])
+        self.assertEqual("caller_selected_execution_metadata_forbidden", result["error"])
+        self.assertEqual([], runner.calls)
         self.assertFalse(runtime.config.search_enabled)
 
     def test_failed_podman_install_does_not_enable_search(self) -> None:
@@ -1393,7 +1391,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
 
         self.assertEqual(400, handler.status_code)
         self.assertFalse(payload["ok"])
-        self.assertEqual("invalid_confirmation", payload["error"])
+        self.assertEqual("legacy_confirmation_token_rejected", payload["error"])
         self.assertFalse(runtime.config.search_enabled)
 
     def test_search_setup_apply_user_url_verifies_and_persists_journal(self) -> None:
@@ -1407,7 +1405,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
             apply_handler = _HandlerForTest(
                 runtime,
                 "/search/setup/apply",
-                {"plan_id": plan["plan_id"], "confirmation_token": plan["confirmation_token"]},
+                _universal_apply(plan),
             )
             apply_handler.do_POST()
         payload = json.loads(apply_handler.body.decode("utf-8"))
@@ -1426,7 +1424,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         plan_payload = runtime.search_setup_plan({"base_url": "http://127.0.0.1:8888"})
         plan = plan_payload["plan"]
         with mock.patch("agent.search.safe_web_search.build_opener", return_value=_FakeSearchOpener({"results": []})):
-            result = runtime.apply_search_setup({"plan_id": plan["plan_id"], "confirmation_token": plan["confirmation_token"]})
+            result = runtime.apply_search_setup(_universal_apply(plan))
         self.assertTrue(result["ok"])
 
         restarted = self._runtime(search_enabled=False, endpoint=None)
@@ -1486,42 +1484,36 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         plan_payload = runtime.search_setup_plan({"base_url": "http://127.0.0.1:8888"})
         plan = plan_payload["plan"]
         with mock.patch("agent.search.safe_web_search.build_opener", return_value=_FakeSearchOpener({"results": []})):
-            first = runtime.apply_search_setup({"plan_id": plan["plan_id"], "confirmation_token": plan["confirmation_token"]})
-        second = runtime.apply_search_setup({"plan_id": plan["plan_id"], "confirmation_token": plan["confirmation_token"]})
+            first = runtime.apply_search_setup(_universal_apply(plan))
+        second = runtime.apply_search_setup(_universal_apply(plan))
 
         self.assertTrue(first["ok"])
         self.assertFalse(second["ok"])
-        self.assertEqual("confirmation_consumed", second["error"])
+        self.assertIn(second["error"], {"confirmation_consumed", "mutation_plan_target_changed"})
 
     def test_search_setup_apply_rejects_submitted_mutation_plan_tamper(self) -> None:
         runtime = self._runtime_with_engine("podman")
         plan_payload = runtime.search_setup_plan({})
         plan = plan_payload["plan"]
-        mutation_plan = dict(plan["mutation_plan"])
-        mutation_plan["action_type"] = "external_pack.install"
-
-        result = runtime.apply_search_setup(
-            {
-                "plan_id": plan["plan_id"],
-                "confirmation_token": plan["confirmation_token"],
-                "mutation_plan": mutation_plan,
-            }
-        )
+        mutation_plan = dict(plan)
+        mutation_plan["executor_id"] = "external_pack.install.v1"
+        result = runtime.apply_search_setup({**dict(plan.get("operation_payload") or {}), "mutation_plan": mutation_plan, "confirmation": build_mutation_confirmation(plan, confirmation_id="tamper")})
 
         self.assertFalse(result["ok"])
-        self.assertEqual("plan_apply_mismatch", result["error"])
+        self.assertIn(result["error"], {"mutation_plan_fingerprint_mismatch", "mutation_operation_scope_mismatch"})
         self.assertFalse(runtime.config.search_enabled)
 
     def test_search_setup_apply_refuses_expired_confirmation(self) -> None:
         runtime = self._runtime(search_enabled=False, endpoint=None)
         plan_payload = runtime.search_setup_plan({"base_url": "http://127.0.0.1:8888"})
-        plan = plan_payload["plan"]
-        runtime._search_setup_confirmations[plan["plan_id"]]["expires_at"] = time.time() - 1  # noqa: SLF001
+        plan = dict(plan_payload["plan"])
+        plan["expires_at"] = "2000-01-01T00:00:00+00:00"
+        plan["plan_fingerprint"] = mutation_plan_fingerprint(plan)
 
-        result = runtime.apply_search_setup({"plan_id": plan["plan_id"], "confirmation_token": plan["confirmation_token"]})
+        result = runtime.apply_search_setup(_universal_apply(plan))
 
         self.assertFalse(result["ok"])
-        self.assertEqual("confirmation_expired", result["error"])
+        self.assertEqual("mutation_confirmation_expired", result["error"])
         self.assertFalse(runtime.config.search_enabled)
 
     def _chat(self, runtime: AgentRuntime, prompt: str, *, history: list[dict[str, str]] | None = None) -> tuple[dict[str, object], str]:
@@ -1607,9 +1599,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
     def _install_podman_prerequisite(self, runtime: AgentRuntime) -> dict[str, object]:
         plan_payload = runtime.podman_prerequisite_plan({})
         plan = plan_payload["plan"]
-        return runtime.apply_podman_prerequisite(
-            {"plan_id": plan["plan_id"], "confirmation_token": plan["confirmation_token"]}
-        )
+        return runtime.apply_podman_prerequisite(_universal_apply(plan))
 
     def test_setup_prompt_with_docker_available_offers_podman_prerequisite(self) -> None:
         runtime = self._runtime_with_engine("docker")
@@ -1627,7 +1617,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         canonical_plan = setup.get("canonical_plan", {}) if isinstance(setup.get("canonical_plan"), dict) else {}
         self.assertEqual("podman_prerequisite_setup_preview", setup.get("action"))
         self.assertEqual("podman", setup.get("prerequisite"))
-        self.assertEqual("managed_local_service.prerequisite", canonical_plan.get("action_type"))
+        self.assertEqual("search.prerequisite", canonical_plan.get("action_type"))
         meta = body.get("meta", {}) if isinstance(body.get("meta"), dict) else {}
         self.assertIn("managed_local_service_prerequisite_preview", meta.get("used_tools", []))
 
@@ -1653,14 +1643,14 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertEqual("podman", setup.get("preferred_engine"))
         self.assertFalse(setup.get("requires_docker_fallback_confirmation"))
         plan_mode = setup.get("plan_mode") if isinstance(setup.get("plan_mode"), dict) else {}
-        self.assertEqual("plan_mode", plan_mode.get("policy_layer"))
-        self.assertEqual("managed_local_service.setup_apply", plan_mode.get("action_type"))
+        self.assertEqual("universal_mutation_plan", plan_mode.get("policy_layer"))
+        self.assertEqual("search.setup", plan_mode.get("action_type"))
         self.assertEqual("mutating", plan_mode.get("classification"))
         self.assertTrue(plan_mode.get("requires_confirmation"))
         self.assertTrue(plan_mode.get("plan_id"))
         apply_payload = setup.get("apply_payload") if isinstance(setup.get("apply_payload"), dict) else {}
-        self.assertEqual(plan_mode.get("plan_id"), apply_payload.get("plan_id"))
-        self.assertTrue(apply_payload.get("confirmation_token"))
+        self.assertEqual(plan_mode.get("plan_id"), (apply_payload.get("mutation_plan") or {}).get("plan_id"))
+        self.assertNotIn("confirmation_token", apply_payload)
         runner = runtime._managed_local_service_executor._runner  # noqa: SLF001
         self.assertEqual([], runner.calls)
 
@@ -1685,9 +1675,8 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         _body, first_text = self._chat(runtime, "enable web search")
         orchestrator = runtime.orchestrator()
         pending = next(iter(orchestrator.confirmations._pending.values()))  # noqa: SLF001
-        params = pending.action.get("params") if isinstance(pending.action, dict) and isinstance(pending.action.get("params"), dict) else {}
-        mutation_plan = params.get("mutation_plan") if isinstance(params.get("mutation_plan"), dict) else {}
-        mutation_plan["action_type"] = "external_pack.install"
+        mutation_plan = pending.action.get("canonical_plan") if isinstance(pending.action, dict) and isinstance(pending.action.get("canonical_plan"), dict) else {}
+        mutation_plan["executor_id"] = "external_pack.install.v1"
 
         _body, second_text = self._chat(
             runtime,
@@ -1696,7 +1685,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         )
 
         self.assertIn("blocked", second_text.lower())
-        self.assertIn("did not pull an image", second_text)
+        self.assertIn("mutation_plan_fingerprint_mismatch", second_text)
         self.assertEqual([], runner.calls)
         self.assertFalse(runtime.config.search_enabled)
 
@@ -1779,7 +1768,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         plan = runtime.search_setup_plan({"allow_docker_fallback": False})["plan"]
 
         with mock.patch("agent.search.safe_web_search.build_opener", return_value=_FakeSearchOpener({"results": []})):
-            result = runtime.apply_search_setup({"plan_id": plan["plan_id"], "confirmation_token": plan["confirmation_token"]})
+            result = runtime.apply_search_setup(_universal_apply(plan))
 
         self.assertTrue(result["ok"])
         self.assertTrue(result["did_configure"])
@@ -2059,3 +2048,9 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+def _universal_apply(plan: dict[str, object]) -> dict[str, object]:
+    return {
+        **dict(plan.get("operation_payload") or {}),
+        "mutation_plan": plan,
+        "confirmation": build_mutation_confirmation(plan, confirmation_id="explicit-managed-search-confirmation"),
+    }

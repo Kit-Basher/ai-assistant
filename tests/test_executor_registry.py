@@ -49,6 +49,7 @@ from agent.capability_policy import POLICY_SCHEMA_VERSION
 from agent.mutation_plan import build_mutation_confirmation, build_mutation_plan
 from agent.confirmation_transactions import ConfirmationTransactionStore
 from agent.internal_writer_authority import InternalWriterJournal
+from agent.llm.notifications import NotificationStore
 
 
 def _plan(**overrides):
@@ -268,6 +269,15 @@ class ExecutorRegistryTests(unittest.TestCase):
             "trigger": "runtime",
         }))
 
+        notification_store = NotificationStore(str(source_state / "llm_notifications.json"))
+        self.assertTrue(notification_store.reserve_delivery(
+            operation_id="notification-uncertain",
+            transport="test",
+            target_fingerprint="target-fingerprint",
+            content_fingerprint="content-fingerprint",
+        ))
+        self.assertTrue(notification_store.mark_delivery_executing("notification-uncertain"))
+
         backup_result = create_additive_backup(
             _plan(action_type="operator.backup"),
             _trusted_action(
@@ -279,6 +289,7 @@ class ExecutorRegistryTests(unittest.TestCase):
                             "state_root": str(source_state),
                             "confirmation_transactions": str(confirmation_path),
                             "internal_writer_receipts": [str(receipt_path)],
+                            "notification_delivery_ledger": str(notification_store.delivery_ledger_path),
                         }
                     },
                 },
@@ -290,7 +301,7 @@ class ExecutorRegistryTests(unittest.TestCase):
         wal_keeper.close()
         artifact = Path(backup_result["details"]["artifact_path"])
         manifest = json.loads((artifact / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(2, len(manifest["authority_state"]))
+        self.assertEqual(3, len(manifest["authority_state"]))
         for row in manifest["authority_state"]:
             snapshot = artifact / row["backup_name"]
             self.assertEqual(0o600, snapshot.stat().st_mode & 0o777)
@@ -327,6 +338,10 @@ class ExecutorRegistryTests(unittest.TestCase):
             ).fetchone()[0])
             self.assertEqual("indeterminate", connection.execute(
                 "SELECT state FROM internal_writer_operations WHERE operation_key = 'internal-uncertain'"
+            ).fetchone()[0])
+        with sqlite3.connect(target_state / "llm_notifications.json.delivery.sqlite3") as connection:
+            self.assertEqual("indeterminate", connection.execute(
+                "SELECT state FROM notification_deliveries WHERE operation_id = 'notification-uncertain'"
             ).fetchone()[0])
 
     def test_host_lifecycle_record_validates_and_rejects_tamper(self) -> None:
