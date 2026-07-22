@@ -177,7 +177,7 @@ def _validate_uninstall_service_name(name: str, *, fixture_mode: str) -> str:
 
 
 def _systemctl_user(action: str, service: str, *, timeout: int = 30, fixture_mode: str = "active_host_proof") -> dict[str, Any]:
-    if action not in {"start", "stop", "restart", "disable", "reset-failed", "daemon-reload"}:
+    if action not in {"start", "stop", "restart", "enable", "disable", "reset-failed", "daemon-reload"}:
         raise ValueError("host_lifecycle_systemctl_action_rejected")
     if action == "daemon-reload":
         return _bounded_run(["systemctl", "--user", "daemon-reload"], timeout=timeout)
@@ -323,9 +323,14 @@ def _run_update(record: dict[str, Any]) -> dict[str, Any]:
         checkpoint_dir = state_root / "update_checkpoints" / operation_id
         checkpoint = read_json(checkpoint_dir / "manifest.json") if (checkpoint_dir / "manifest.json").is_file() else {}
         _stage(record, "verifying", {"resume": "target_already_promoted", "checkpoint": checkpoint})
+        service_enable: dict[str, Any] | None = None
         service_restart: dict[str, Any] | None = None
         if service_name:
             _stage(record, "starting_services", {"resume": "target_already_promoted", "service": service_name})
+            service_enable = _systemctl_user("enable", service_name, timeout=45, fixture_mode=fixture_mode)
+            enable_code = service_enable.get("returncode")
+            if int(enable_code if enable_code is not None else 1) != 0:
+                raise RuntimeError("update_resume_service_enable_failed")
             service_restart = _systemctl_user("restart", service_name, timeout=45, fixture_mode=fixture_mode)
             restart_code = service_restart.get("returncode")
             if int(restart_code if restart_code is not None else 1) != 0:
@@ -343,6 +348,7 @@ def _run_update(record: dict[str, Any]) -> dict[str, Any]:
             "target_commit": target_commit,
             "promoted_release": str(previous_target),
             "verified_commit": target_commit,
+            "service_enable": service_enable,
             "service_restart": service_restart,
             "http_verification": http_verification,
             "checkpoint": checkpoint,
@@ -402,10 +408,16 @@ def _run_update(record: dict[str, Any]) -> dict[str, Any]:
             _stage(record, "failed_after_mutation", interrupted)
             _receipt(record, interrupted)
             return interrupted
+    service_enable: dict[str, Any] | None = None
     service_restart: dict[str, Any] | None = None
     if service_name:
         _stage(record, "starting_services", {"service": service_name, "promoted_release": str(final_release), "checkpoint": checkpoint})
-        service_restart = _systemctl_user("restart", service_name, timeout=45, fixture_mode=fixture_mode)
+        service_enable = _systemctl_user("enable", service_name, timeout=45, fixture_mode=fixture_mode)
+        enable_code = service_enable.get("returncode")
+        if int(enable_code if enable_code is not None else 1) == 0:
+            service_restart = _systemctl_user("restart", service_name, timeout=45, fixture_mode=fixture_mode)
+        else:
+            service_restart = {"returncode": 1, "output": "service enable failed; restart not attempted"}
         restart_code = service_restart.get("returncode")
         if int(restart_code if restart_code is not None else 1) != 0:
             _stage(record, "rolling_back", {"service_restart": service_restart, "checkpoint": checkpoint})
@@ -428,6 +440,7 @@ def _run_update(record: dict[str, Any]) -> dict[str, Any]:
                 "target_commit": target_commit,
                 "rollback_commit": rollback_commit,
                 "rollback_verified": rollback_verified,
+                "service_enable": service_enable,
                 "service_restart": service_restart,
                 "checkpoint": checkpoint,
                 "finished_at": utc_now_iso(),
@@ -487,6 +500,7 @@ def _run_update(record: dict[str, Any]) -> dict[str, Any]:
         "target_commit": target_commit,
         "promoted_release": str(final_release),
         "verified_commit": verified_commit,
+        "service_enable": service_enable,
         "service_restart": service_restart,
         "http_verification": http_verification,
         "checkpoint": checkpoint,

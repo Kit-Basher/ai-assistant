@@ -151,10 +151,14 @@ def render_system_health_summary(
 
     ollama = services.get("ollama") if isinstance(services.get("ollama"), dict) else {}
     personal_agent = services.get("personal_agent") if isinstance(services.get("personal_agent"), dict) else {}
+    ollama_active = str(ollama.get("active_state") or ollama.get("service_state") or "unknown")
+    ollama_enabled = str(ollama.get("enabled_state") or "unknown")
+    agent_active = str(personal_agent.get("active_state") or personal_agent.get("service_state") or "unknown")
+    agent_enabled = str(personal_agent.get("enabled_state") or "unknown")
     service_line = (
-        f"Ollama {str(ollama.get('service_state') or 'unknown')}/"
+        f"Ollama active={ollama_active}, startup={ollama_enabled}/"
         f"{'reachable' if bool(ollama.get('reachable', False)) else 'unreachable'}; "
-        f"Personal Agent {str(personal_agent.get('service_state') or 'unknown')}/"
+        f"Personal Agent active={agent_active}, startup={agent_enabled}/"
         f"{'reachable' if bool(personal_agent.get('reachable', False)) else 'unreachable'}"
     )
 

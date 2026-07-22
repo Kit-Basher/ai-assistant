@@ -233,7 +233,54 @@ class TestDoctorCLI(unittest.TestCase):
             check = _check_secret_store_path()
         self.assertEqual("WARN", check.status)
         self.assertIn("secret_store missing", check.detail_short)
-        self.assertTrue(bool(check.next_action))
+        self.assertIn("doctor --repair-secret-store", str(check.next_action))
+        self.assertNotIn("doctor --fix", str(check.next_action))
+        self.assertIn("Safe Mode does not block", str(check.next_action))
+
+    def test_explicit_secret_store_repair_creates_valid_store(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "state" / "secrets.enc.json"
+            with patch.dict(os.environ, {"AGENT_SECRET_STORE_PATH": str(path)}, clear=False), patch(
+                "agent.doctor.Path.home", return_value=Path(tmpdir)
+            ):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    return_code = main(["--repair-secret-store"])
+                check = _check_secret_store_path()
+
+            self.assertEqual(0, return_code)
+            self.assertEqual("OK", check.status)
+            self.assertEqual(0o600, path.stat().st_mode & 0o777)
+            self.assertIn("Created empty encrypted secret store", output.getvalue())
+
+    def test_explicit_secret_store_repair_never_overwrites_existing_store(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "secrets.enc.json"
+            original = b"preserve this invalid store\n"
+            path.write_bytes(original)
+            with patch.dict(os.environ, {"AGENT_SECRET_STORE_PATH": str(path)}, clear=False), patch(
+                "sys.stderr", new_callable=io.StringIO
+            ) as stderr:
+                return_code = main(["--repair-secret-store"])
+
+            self.assertEqual(2, return_code)
+            self.assertEqual(original, path.read_bytes())
+            self.assertIn("was not changed", stderr.getvalue())
+
+    def test_explicit_secret_store_repair_updates_production_api_dropin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            path = home / "state" / "secrets.enc.json"
+            with patch.dict(os.environ, {"HOME": str(home), "AGENT_SECRET_STORE_PATH": str(path)}, clear=False), patch(
+                "agent.doctor.Path.home", return_value=home
+            ):
+                self.assertEqual(0, main(["--repair-secret-store"]))
+                self.assertEqual(0, main(["--repair-secret-store"]))
+
+            dropin = home / ".config/systemd/user/personal-agent-api.service.d/override.conf"
+            content = dropin.read_text(encoding="utf-8")
+            self.assertIn(f"Environment=AGENT_SECRET_STORE_PATH={path.resolve()}", content)
+            self.assertFalse((home / ".config/systemd/user/personal-agent-telegram.service").exists())
 
     def test_telegram_dropin_missing_warns(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -241,7 +288,21 @@ class TestDoctorCLI(unittest.TestCase):
                 check = _check_telegram_dropin()
         self.assertEqual("WARN", check.status)
         self.assertIn("missing drop-in", check.detail_short)
-        self.assertEqual("Run: python -m agent doctor --fix", check.next_action)
+        self.assertIn("doctor --repair-secret-store", str(check.next_action))
+        self.assertNotIn("doctor --fix", str(check.next_action))
+
+    def test_telegram_dropin_missing_secret_store_path_uses_explicit_local_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            dropin = home / ".config/systemd/user/personal-agent-api.service.d/override.conf"
+            dropin.parent.mkdir(parents=True)
+            dropin.write_text("[Service]\nEnvironment=TELEGRAM_ENABLED=1\n", encoding="utf-8")
+            with patch("agent.doctor.Path.home", return_value=home):
+                check = _check_telegram_dropin()
+        self.assertEqual("WARN", check.status)
+        self.assertIn("doctor --repair-secret-store", str(check.next_action))
+        self.assertNotIn("doctor --fix", str(check.next_action))
+        self.assertIn("Safe Mode does not block", str(check.next_action))
 
     def test_llm_unavailable_returns_fail_with_next_action(self) -> None:
         payload = {

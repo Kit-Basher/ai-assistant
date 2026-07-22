@@ -158,6 +158,26 @@ class SecretStore:
             raise RuntimeError("invalid secret store payload")
         _ = self._decrypt_payload(raw)
 
+    def initialize_encrypted_file(self) -> None:
+        """Create an empty encrypted-file store without overwriting any path."""
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        encrypted = self._encrypt_payload({})
+        encoded = json.dumps(encrypted, ensure_ascii=True).encode("utf-8")
+        fd = os.open(self._path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(encoded)
+        except Exception:
+            try:
+                self._path.unlink()
+            except OSError:
+                pass
+            raise
+        stat_result = self._path.stat()
+        with self._file_cache_lock:
+            self._file_cache_stamp = (int(stat_result.st_mtime_ns), int(stat_result.st_size))
+            self._file_cache_data = {}
+
     def status(self) -> dict[str, Any]:
         if self._keyring is not None:
             return {

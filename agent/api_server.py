@@ -24134,6 +24134,12 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if path == "/ready":
                 self._send_json(200, self.runtime.ready_status())
                 return
+            if path == "/status":
+                # Compatibility for installed/older CLI clients.  New clients use
+                # /ready plus /runtime, but /status historically exposed the
+                # readiness payload and must remain a useful runtime-health route.
+                self._send_json(200, self.runtime.ready_status())
+                return
             if path == "/state":
                 self._send_json(200, self.runtime.ui_state())
                 return

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from agent.orchestrator import Orchestrator
-from agent.skills.system_health import collect_system_health
+from agent.skills.system_health import _collect_services, collect_system_health
 from agent.skills.system_health_analyzer import analyze_system_health
 from agent.skills.system_health_summary import render_system_health_summary
 from agent.tool_executor import ToolExecutor
@@ -15,6 +16,39 @@ from memory.db import MemoryDB
 
 
 class TestSystemHealthSkill(unittest.TestCase):
+    def test_running_disabled_service_remains_active_and_reports_startup_state(self) -> None:
+        calls: list[tuple[str, ...]] = []
+
+        def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            calls.append(tuple(args))
+            state = "disabled" if "is-enabled" in args else "active"
+            return subprocess.CompletedProcess(args, 0, stdout=state + "\n", stderr="")
+
+        with patch("agent.skills.system_health._tcp_reachable", return_value=True):
+            services = _collect_services(_run)
+
+        agent_service = services["personal_agent"]
+        self.assertEqual("active", agent_service["service_state"])
+        self.assertEqual("active", agent_service["active_state"])
+        self.assertEqual("disabled", agent_service["enabled_state"])
+        self.assertTrue(any("is-active" in call for call in calls))
+        self.assertTrue(any("is-enabled" in call for call in calls))
+
+        observed = {
+            "cpu": {},
+            "memory": {},
+            "disk": [],
+            "gpu": {},
+            "services": services,
+            "network": {"state": "up", "up_interfaces": ["eth0"], "default_route": True, "dns_configured": True},
+            "warnings": [],
+        }
+        analysis = analyze_system_health(observed)
+        summary = render_system_health_summary(observed, analysis)
+        self.assertEqual("ok", analysis["status"])
+        self.assertIn("Personal Agent active=active, startup=disabled/reachable", summary)
+        self.assertNotIn("Personal Agent runtime is not healthy", summary)
+
     def test_collect_system_health_returns_expected_top_level_keys(self) -> None:
         with patch("agent.skills.system_health._collect_cpu", return_value={"usage_pct": 12.5, "load_average": {"1m": 0.2, "5m": 0.1, "15m": 0.1}, "cpu_count": 8}), patch(
             "agent.skills.system_health._collect_memory",

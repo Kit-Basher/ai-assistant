@@ -2963,6 +2963,31 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertTrue(str(payload.get("version") or ""))
         self.assertTrue(str(payload.get("version_source") or ""))
 
+    def test_status_endpoint_preserves_legacy_runtime_health_contract(self) -> None:
+        expected = {"ok": True, "ready": True, "runtime_mode": "READY"}
+
+        class _Runtime:
+            def ready_status(self) -> dict[str, object]:
+                return dict(expected)
+
+        class _HandlerForTest(APIServerHandler):
+            def __init__(self) -> None:
+                self.runtime = _Runtime()
+                self.path = "/status"
+                self.headers = {}
+                self.status_code = 0
+                self.response_payload: dict[str, object] = {}
+
+            def _send_json(self, status: int, payload: dict[str, object]) -> None:  # type: ignore[override]
+                self.status_code = status
+                self.response_payload = payload
+
+        handler = _HandlerForTest()
+        handler.do_GET()
+
+        self.assertEqual(200, handler.status_code)
+        self.assertEqual(expected, handler.response_payload)
+
     def test_legacy_model_scout_http_endpoints_are_removed(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
 

@@ -458,11 +458,13 @@ def _collect_gpu(run_command: RunCommand) -> dict[str, Any]:
     }
 
 
-def _systemctl_state(unit: str, *, user: bool, run_command: RunCommand) -> str:
+def _systemctl_state(unit: str, *, user: bool, state_kind: str, run_command: RunCommand) -> str:
+    if state_kind not in {"active", "enabled"}:
+        raise ValueError("unsupported systemd state kind")
     args = ["systemctl"]
     if user:
         args.append("--user")
-    args.extend(["is-active", unit])
+    args.extend([f"is-{state_kind}", unit])
     result = _run_command(args, run_command=run_command, timeout_seconds=1.0)
     text = str(result["stdout"] or result["stderr"]).strip().lower()
     if text:
@@ -481,19 +483,28 @@ def _tcp_reachable(host: str, port: int, *, timeout_seconds: float = 0.25) -> bo
 
 
 def _collect_services(run_command: RunCommand) -> dict[str, Any]:
+    ollama_active = _systemctl_state("ollama.service", user=False, state_kind="active", run_command=run_command)
+    ollama_enabled = _systemctl_state("ollama.service", user=False, state_kind="enabled", run_command=run_command)
+    agent_service = runtime_service_name()
+    agent_active = _systemctl_state(agent_service, user=True, state_kind="active", run_command=run_command)
+    agent_enabled = _systemctl_state(agent_service, user=True, state_kind="enabled", run_command=run_command)
     return {
         "ollama": {
             "service_name": "ollama.service",
             "service_scope": "system",
-            "service_state": _systemctl_state("ollama.service", user=False, run_command=run_command),
+            "service_state": ollama_active,
+            "active_state": ollama_active,
+            "enabled_state": ollama_enabled,
             "host": "127.0.0.1",
             "port": 11434,
             "reachable": _tcp_reachable("127.0.0.1", 11434),
         },
         "personal_agent": {
-            "service_name": runtime_service_name(),
+            "service_name": agent_service,
             "service_scope": "user",
-            "service_state": _systemctl_state(runtime_service_name(), user=True, run_command=run_command),
+            "service_state": agent_active,
+            "active_state": agent_active,
+            "enabled_state": agent_enabled,
             "host": "127.0.0.1",
             "port": runtime_port(),
             "reachable": _tcp_reachable("127.0.0.1", runtime_port()),

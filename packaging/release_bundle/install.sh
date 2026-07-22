@@ -90,7 +90,8 @@ install -m 755 "$bundle_root/uninstall.sh" "$release_root/bin/personal-agent-uni
 
 "$python_bin" -m venv "$release_root/.venv"
 "$release_root/.venv/bin/python" -m pip install "$release_root"
-"$release_root/.venv/bin/python" -m agent doctor --fix
+AGENT_SECRET_STORE_PATH="$state_root/secrets.enc.json" \
+    "$release_root/.venv/bin/python" -m agent doctor --repair-secret-store
 
 ln -sfn "$release_root" "$current_root"
 ln -sfn "$current_root/bin/personal-agent-webui" "$launcher_path"

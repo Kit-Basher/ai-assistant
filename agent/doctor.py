@@ -551,7 +551,10 @@ def _check_secret_store_path() -> DoctorCheck:
             check_id="env.secret_store",
             status="WARN",
             detail_short=f"secret_store missing: {path}",
-            next_action=f"Create readable secret store file at {path}.",
+            next_action=(
+                "Run: python -m agent doctor --repair-secret-store "
+                f"(creates {path} only if it is still missing; Safe Mode does not block this local repair)."
+            ),
         )
     if not os.access(path, os.R_OK):
         return DoctorCheck(
@@ -568,7 +571,10 @@ def _check_secret_store_path() -> DoctorCheck:
             check_id="env.secret_store",
             status="FAIL",
             detail_short=f"secret_store decrypt failed: {exc.__class__.__name__}",
-            next_action=f"Repair or replace secret store at {path}.",
+            next_action=(
+                f"Preserve {path}, restore it from a known-good backup, or move it aside explicitly before running "
+                "python -m agent doctor --repair-secret-store. The repair command never overwrites an existing store."
+            ),
         )
     return DoctorCheck(
         check_id="env.secret_store",
@@ -601,7 +607,10 @@ def _check_telegram_dropin() -> DoctorCheck:
             check_id="telegram.dropin",
             status="WARN",
             detail_short=f"missing drop-in: {dropin}",
-            next_action="Run: python -m agent doctor --fix",
+            next_action=(
+                "Run: python -m agent doctor --repair-secret-store "
+                "(validates or creates the store and writes the production API drop-in locally)."
+            ),
         )
     try:
         content = dropin.read_text(encoding="utf-8")
@@ -617,7 +626,10 @@ def _check_telegram_dropin() -> DoctorCheck:
             check_id="telegram.dropin",
             status="WARN",
             detail_short="AGENT_SECRET_STORE_PATH missing in telegram drop-in",
-            next_action="Run: python -m agent doctor --fix",
+            next_action=(
+                "Run: python -m agent doctor --repair-secret-store "
+                "(validates the store and repairs the production API drop-in locally; Safe Mode does not block it)."
+            ),
         )
     return DoctorCheck(check_id="telegram.dropin", status="OK", detail_short=f"drop-in configured: {dropin}")
 
@@ -3177,6 +3189,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Personal Agent doctor checks")
     parser.add_argument("--json", action="store_true", help="emit JSON output")
     parser.add_argument("--fix", action="store_true", help="apply deterministic safe fixes")
+    parser.add_argument(
+        "--repair-secret-store",
+        action="store_true",
+        help="explicitly create the configured encrypted secret store if it is missing; never overwrite it",
+    )
     parser.add_argument("--apply-plan", default=None, help="authorized Universal Mutation Plan JSON for --fix")
     parser.add_argument("--confirmation", default=None, help="scoped confirmation artifact JSON for --fix")
     parser.add_argument(
@@ -3188,6 +3205,40 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--api-base-url", default=PRODUCTION_API_BASE_URL, help="local API base URL")
     parser.add_argument("--repo-root", default=None, help="override repo root")
     args = parser.parse_args(argv)
+
+    if args.repair_secret_store:
+        if args.json or args.fix or args.apply_plan or args.confirmation or args.collect_diagnostics or args.online:
+            print("--repair-secret-store must be used by itself", file=sys.stderr, flush=True)
+            return 2
+        path = Path(_effective_secret_store_path()).expanduser()
+        store = SecretStore(path=str(path))
+        created = False
+        try:
+            if path.exists() or path.is_symlink():
+                store.validate()
+            else:
+                store.initialize_encrypted_file()
+                created = True
+        except FileExistsError:
+            print(f"Secret store was not changed because the path appeared concurrently: {path}", file=sys.stderr, flush=True)
+            return 2
+        except Exception as exc:  # noqa: BLE001 - report safe refusal without exposing payload details.
+            print(
+                f"Secret store was not changed because {path} could not be validated safely: {exc.__class__.__name__}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 2
+        dropin_changes = _safe_fix_telegram_dropin()
+        if created:
+            print(f"Created empty encrypted secret store: {path}", flush=True)
+        else:
+            print(f"Validated existing encrypted secret store without changing it: {path}", flush=True)
+        if dropin_changes:
+            print(f"Configured {PRODUCTION_SERVICE_NAME} to use the encrypted secret store.", flush=True)
+        else:
+            print(f"{PRODUCTION_SERVICE_NAME} secret-store configuration already matches.", flush=True)
+        return 0
 
     if args.fix:
         from agent.secrets import _authorized_secret_request

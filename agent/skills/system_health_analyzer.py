@@ -233,7 +233,8 @@ def analyze_system_health(observed: dict[str, Any]) -> dict[str, Any]:
         )
 
     ollama = services.get("ollama") if isinstance(services.get("ollama"), dict) else {}
-    if not bool(ollama.get("reachable", False)) or str(ollama.get("service_state") or "").strip().lower() not in {"active", "activating"}:
+    ollama_active_state = str(ollama.get("active_state") or ollama.get("service_state") or "").strip().lower()
+    if not bool(ollama.get("reachable", False)) or ollama_active_state not in {"active", "activating"}:
         status = _escalate(status, "warn")
         warnings.append(
             _warning(
@@ -242,7 +243,8 @@ def analyze_system_health(observed: dict[str, Any]) -> dict[str, Any]:
                 component="services",
                 message="Ollama is not healthy.",
                 details=(
-                    f"service_state={str(ollama.get('service_state') or 'unknown')} "
+                    f"active_state={ollama_active_state or 'unknown'} "
+                    f"enabled_state={str(ollama.get('enabled_state') or 'unknown')} "
                     f"reachable={str(bool(ollama.get('reachable', False))).lower()}."
                 ),
             )
@@ -256,7 +258,10 @@ def analyze_system_health(observed: dict[str, Any]) -> dict[str, Any]:
         )
 
     personal_agent = services.get("personal_agent") if isinstance(services.get("personal_agent"), dict) else {}
-    if not bool(personal_agent.get("reachable", False)) or str(personal_agent.get("service_state") or "").strip().lower() not in {"active", "activating"}:
+    personal_agent_active_state = str(
+        personal_agent.get("active_state") or personal_agent.get("service_state") or ""
+    ).strip().lower()
+    if not bool(personal_agent.get("reachable", False)) or personal_agent_active_state not in {"active", "activating"}:
         status = _escalate(status, "warn")
         warnings.append(
             _warning(
@@ -265,7 +270,8 @@ def analyze_system_health(observed: dict[str, Any]) -> dict[str, Any]:
                 component="services",
                 message="Personal Agent runtime is not healthy.",
                 details=(
-                    f"service_state={str(personal_agent.get('service_state') or 'unknown')} "
+                    f"active_state={personal_agent_active_state or 'unknown'} "
+                    f"enabled_state={str(personal_agent.get('enabled_state') or 'unknown')} "
                     f"reachable={str(bool(personal_agent.get('reachable', False))).lower()}."
                 ),
             )

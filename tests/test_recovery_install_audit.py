@@ -73,6 +73,17 @@ class TestRecoveryInstallAudit(unittest.TestCase):
         self.assertIn("127.0.0.1:18765", dev)
         self.assertIn("personal-agent-api-dev.service", dev)
 
+    def test_install_and_update_enable_production_api_autostart(self) -> None:
+        installer = (REPO_ROOT / "packaging" / "release_bundle" / "install.sh").read_text(encoding="utf-8")
+        updater = (REPO_ROOT / "agent" / "host_lifecycle.py").read_text(encoding="utf-8")
+        self.assertIn("--user enable --now personal-agent-api.service", installer)
+        self.assertIn("store.initialize_encrypted_file()", (REPO_ROOT / "agent" / "doctor.py").read_text(encoding="utf-8"))
+        enable_call = '_systemctl_user("enable", service_name, timeout=45, fixture_mode=fixture_mode)'
+        restart_call = '_systemctl_user("restart", service_name, timeout=45, fixture_mode=fixture_mode)'
+        self.assertGreaterEqual(updater.count(enable_call), 2)
+        self.assertLess(updater.index(enable_call), updater.index(restart_call))
+        self.assertNotIn("personal-agent-telegram.service", installer)
+
 
 if __name__ == "__main__":
     unittest.main()
