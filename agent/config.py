@@ -111,6 +111,11 @@ def runtime_api_base_url() -> str:
     return f"http://127.0.0.1:{runtime_port()}"
 
 
+PRODUCTION_SERVICE_NAME = "personal-agent-api.service"
+PRODUCTION_API_PORT = 8765
+PRODUCTION_API_BASE_URL = f"http://127.0.0.1:{PRODUCTION_API_PORT}"
+
+
 def resolved_default_db_path() -> str:
     return str(canonical_db_path())
 

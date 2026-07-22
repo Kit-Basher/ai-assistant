@@ -565,6 +565,11 @@ _OPERATIONAL_STATUS_PHRASES = (
     "service health",
 )
 _OPERATIONAL_OBSERVE_PHRASES = (
+    "run a system check",
+    "run system check",
+    "quick system check",
+    "quick system health check",
+    "system health check",
     "what are my specs",
     "what are my pc specs",
     "system info",
@@ -2460,6 +2465,13 @@ def _classify_runtime_chat_route_raw(
     operator_lifecycle_route = _classify_operator_lifecycle_route(normalized)
     if operator_lifecycle_route is not None:
         return operator_lifecycle_route
+    if any(phrase in normalized for phrase in _OPERATIONAL_OBSERVE_PHRASES):
+        return {
+            "route": "operational_status",
+            "kind": "operational_observe",
+            "generic_allowed": False,
+            "fallback_reason": "operational_status",
+        }
     if _looks_like_runtime_status_query(normalized):
         return {
             "route": "runtime_status",

@@ -1,17 +1,38 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 from typing import Callable
+import urllib.request
 
-from agent.config import runtime_service_name
+from agent.config import PRODUCTION_API_BASE_URL, PRODUCTION_SERVICE_NAME
 from agent.diagnostics import CommandResult, redact_secrets, run_command
 from memory.db import MemoryDB
 
 
 _SERVICE_UNITS = (
-    runtime_service_name(),
-    "personal-agent-telegram.service",
+    PRODUCTION_SERVICE_NAME,
 )
+
+
+def _embedded_telegram_snapshot() -> dict[str, object]:
+    try:
+        with urllib.request.urlopen(f"{PRODUCTION_API_BASE_URL}/telegram/status", timeout=0.8) as response:
+            payload = json.loads(response.read().decode("utf-8") or "{}")
+    except Exception as exc:
+        return {"available": False, "state": "unknown", "error": exc.__class__.__name__}
+    if not isinstance(payload, dict):
+        return {"available": False, "state": "unknown", "error": "invalid_payload"}
+    return {
+        "available": True,
+        "enabled": bool(payload.get("enabled", False)),
+        "state": str(payload.get("state") or "unknown"),
+        "effective_state": str(payload.get("effective_state") or "unknown"),
+        "embedded_running": bool(payload.get("embedded_running", False)),
+        "health": str(payload.get("telegram_health_level") or "UNVERIFIED"),
+        "duplicate_pollers": bool(payload.get("duplicate_pollers", False)),
+        "last_error": payload.get("last_error"),
+    }
 
 
 def _parse_systemctl_show(output: str) -> dict[str, str]:
@@ -116,11 +137,13 @@ def build_runtime_status_report(
     db: MemoryDB,
     run_command_fn: Callable[[list[str], float], CommandResult] | None = None,
     now: datetime | None = None,
+    telegram_status_fn: Callable[[], dict[str, object]] | None = None,
 ) -> str:
     runner = run_command_fn or run_command
     now_dt = now or datetime.now(timezone.utc)
 
     services = [_service_snapshot(unit_name, runner) for unit_name in _SERVICE_UNITS]
+    telegram = (telegram_status_fn or _embedded_telegram_snapshot)()
     service_logs = {
         unit_name: _journal_lines(
             runner(
@@ -161,16 +184,14 @@ def build_runtime_status_report(
         audit_count_text = str(audit_count)
 
     notes: list[str] = []
-    api_service = next((row for row in services if row["unit"] == runtime_service_name()), None)
-    telegram_service = next((row for row in services if row["unit"] == "personal-agent-telegram.service"), None)
+    api_service = next((row for row in services if row["unit"] == PRODUCTION_SERVICE_NAME), None)
     api_state = str((api_service or {}).get("active_state") or "unknown")
-    telegram_state = str((telegram_service or {}).get("active_state") or "unknown")
     if api_state != "active":
         notes.append("API service is not active.")
-    if telegram_state == "failed":
-        notes.append("Telegram service failed.")
-    elif telegram_state == "active" and api_state != "active":
-        notes.append("Telegram service is active while the API service is not active.")
+    if bool(telegram.get("duplicate_pollers", False)):
+        notes.append("Duplicate Telegram poller detected.")
+    if telegram.get("available") and telegram.get("enabled") and not telegram.get("embedded_running"):
+        notes.append(f"Embedded Telegram is not running (state={telegram.get('effective_state')}).")
 
     lines: list[str] = []
     lines.append("1. Service State")
@@ -184,6 +205,12 @@ def build_runtime_status_report(
                 last_exit=str(service.get("last_exit") or "not available"),
             )
         )
+    lines.append("- embedded Telegram: state={state} effective_state={effective} health={health} running={running}".format(
+        state=str(telegram.get("state") or "unknown"),
+        effective=str(telegram.get("effective_state") or "unknown"),
+        health=str(telegram.get("health") or "UNVERIFIED"),
+        running=str(bool(telegram.get("embedded_running", False))).lower(),
+    ))
     lines.append("2. Recent Logs")
     for unit_name in _SERVICE_UNITS:
         log_lines, log_note = service_logs.get(unit_name, ([], "not available"))

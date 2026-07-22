@@ -99,7 +99,7 @@ class TestPackagingBuild(unittest.TestCase):
                 self.assertIn("Name: personal-agent", metadata_text)
                 self.assertIn(f"Version: {version}", metadata_text)
                 self.assertIn("Requires-Dist: openai>=1.0.0", metadata_text)
-                self.assertIn("Requires-Dist: python-telegram-bot>=22.6", metadata_text)
+                self.assertIn("Requires-Dist: python-telegram-bot[job-queue]>=22.6", metadata_text)
                 self.assertIn("Provides-Extra: test", metadata_text)
                 self.assertIn("Requires-Dist: pytest", metadata_text)
                 self.assertIn('extra == "test"', metadata_text)

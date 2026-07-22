@@ -19081,10 +19081,22 @@ class Orchestrator:
         text = (
             f"Doctor: {report.summary_status} (trace {report.trace_id})\n"
             f"PASS {pass_count} · WARN {warn_count} · FAIL {fail_count}\n"
-            f"Next: {next_action}\n"
-            "Run: python -m agent doctor --json for details."
+            + "\n".join(
+                f"- [{item.status}] {item.check_id}: {item.detail_short}"
+                for item in report.checks
+            )
+            + f"\nNext: {next_action}\n"
+            "Run: python -m agent doctor --json for machine-readable details."
         )
-        return {"ok": True, "user_text": text, "data": {"trace_id": report.trace_id, "summary_status": report.summary_status}}
+        return {
+            "ok": True,
+            "user_text": text,
+            "data": {
+                "trace_id": report.trace_id,
+                "summary_status": report.summary_status,
+                "checks": [item.to_dict() for item in report.checks],
+            },
+        }
 
     def _tool_handler_observe_system_health(self, request: dict[str, Any], user_id: str) -> dict[str, Any]:
         _ = user_id

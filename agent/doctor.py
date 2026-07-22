@@ -42,6 +42,8 @@ from agent.config import (
     runtime_instance,
     runtime_root_path,
     runtime_service_name,
+    PRODUCTION_API_BASE_URL,
+    PRODUCTION_SERVICE_NAME,
 )
 
 
@@ -475,23 +477,44 @@ def _telegram_optional_check(check_id: str) -> DoctorCheck:
     )
 
 
-def _check_telegram_service_for_doctor(*, required: bool) -> DoctorCheck:
-    if required:
-        return _check_systemd_service("personal-agent-telegram.service", "systemd.telegram_service")
-    active, state = _run_systemctl_user("personal-agent-telegram.service")
-    if active:
+def _check_embedded_telegram_for_doctor(*, api_base_url: str, required: bool) -> DoctorCheck:
+    ok, payload_or_error = _api_get_json(f"{api_base_url.rstrip('/')}/telegram/status")
+    if not ok:
         return DoctorCheck(
-            check_id="systemd.telegram_service",
+            check_id="telegram.embedded_runtime",
+            status="WARN" if required else "OK",
+            detail_short=f"embedded Telegram status unavailable: {payload_or_error}",
+            next_action=(f"Run: systemctl --user restart {PRODUCTION_SERVICE_NAME}" if required else None),
+        )
+    payload = payload_or_error if isinstance(payload_or_error, dict) else {}
+    enabled = bool(payload.get("enabled", False))
+    embedded_running = bool(payload.get("embedded_running", False))
+    duplicate = bool(payload.get("duplicate_pollers", False) or payload.get("duplicate_consumer_suspected", False))
+    state = str(payload.get("effective_state") or payload.get("state") or "unknown")
+    if duplicate:
+        return DoctorCheck(
+            check_id="telegram.embedded_runtime",
+            status="FAIL",
+            detail_short="duplicate Telegram poller detected alongside the production API",
+            next_action="Stop the extra Telegram poller; keep the poller embedded in personal-agent-api.service.",
+        )
+    if embedded_running:
+        lock_pid = payload.get("lock_pid")
+        detail = "embedded Telegram poller running in personal-agent-api.service"
+        if lock_pid:
+            detail += f"; lock owner pid={lock_pid} is legitimate"
+        return DoctorCheck(check_id="telegram.embedded_runtime", status="OK", detail_short=detail)
+    if not enabled and not required:
+        return DoctorCheck(
+            check_id="telegram.embedded_runtime",
             status="OK",
-            detail_short="personal-agent-telegram.service active",
+            detail_short="embedded Telegram disabled (optional)",
         )
     return DoctorCheck(
-        check_id="systemd.telegram_service",
-        status="OK",
-        detail_short=(
-            f"personal-agent-telegram.service state={state}; "
-            "Telegram is optional. No action needed unless you want Telegram."
-        ),
+        check_id="telegram.embedded_runtime",
+        status="FAIL" if required else "WARN",
+        detail_short=f"embedded Telegram state={state}",
+        next_action=f"Check {PRODUCTION_SERVICE_NAME} and /telegram/status.",
     )
 
 
@@ -572,7 +595,7 @@ def _check_required_dirs() -> DoctorCheck:
 
 
 def _check_telegram_dropin() -> DoctorCheck:
-    dropin = Path.home() / ".config" / "systemd" / "user" / "personal-agent-telegram.service.d" / "override.conf"
+    dropin = Path.home() / ".config" / "systemd" / "user" / f"{PRODUCTION_SERVICE_NAME}.d" / "override.conf"
     if not dropin.is_file():
         return DoctorCheck(
             check_id="telegram.dropin",
@@ -720,7 +743,7 @@ def _check_llm_availability(api_base: str) -> DoctorCheck:
                 check_id="llm.availability",
                 status="WARN",
                 detail_short=f"/llm/status unavailable: {payload_or_error}",
-                next_action=f"Run: systemctl --user restart {runtime_service_name()}",
+                next_action=f"Run: systemctl --user restart {PRODUCTION_SERVICE_NAME}",
             )
         payload = payload_or_error if isinstance(payload_or_error, dict) else {}
     provider = str(payload.get("default_provider") or "unknown").strip() or "unknown"
@@ -806,7 +829,7 @@ def _doctor_checks(
         _check_secret_store_path(),
         _check_required_dirs(),
         _check_write_mode_safe(),
-        _check_systemd_service(runtime_service_name(), "systemd.api_service"),
+        _check_systemd_service(PRODUCTION_SERVICE_NAME, "systemd.api_service"),
         _check_llm_availability(api_base_url),
         _check_logging_to_stdout(),
     ]
@@ -814,8 +837,7 @@ def _doctor_checks(
         checks.extend(
             [
                 _check_telegram_dropin(),
-                _check_telegram_service_for_doctor(required=telegram_required),
-                _check_telegram_poller_singleton(),
+                _check_embedded_telegram_for_doctor(api_base_url=api_base_url, required=telegram_required),
                 _check_telegram_token(online=online),
             ]
         )
@@ -823,8 +845,7 @@ def _doctor_checks(
         checks.extend(
             [
                 _telegram_optional_check("telegram.dropin"),
-                _telegram_optional_check("systemd.telegram_service"),
-                _telegram_optional_check("process.telegram_pollers"),
+                _telegram_optional_check("telegram.embedded_runtime"),
                 _telegram_optional_check("telegram.token"),
             ]
         )
@@ -849,7 +870,7 @@ def _safe_fix_dirs() -> list[str]:
         canonical_state_dir(),
         canonical_config_dir(),
         Path.home() / ".config" / "systemd" / "user",
-        Path.home() / ".config" / "systemd" / "user" / "personal-agent-telegram.service.d",
+        Path.home() / ".config" / "systemd" / "user" / f"{PRODUCTION_SERVICE_NAME}.d",
     ]
     for path in paths:
         if path.is_dir():
@@ -864,19 +885,34 @@ def _safe_fix_telegram_dropin() -> list[str]:
     secret_path = Path(_effective_secret_store_path()).expanduser().resolve()
     if not secret_path.is_file() or not os.access(secret_path, os.R_OK):
         return changed
-    dropin_dir = Path.home() / ".config" / "systemd" / "user" / "personal-agent-telegram.service.d"
+    dropin_dir = Path.home() / ".config" / "systemd" / "user" / f"{PRODUCTION_SERVICE_NAME}.d"
     dropin_dir.mkdir(parents=True, exist_ok=True)
     dropin_path = dropin_dir / "override.conf"
     target_line = f"Environment=AGENT_SECRET_STORE_PATH={secret_path}"
     existing = ""
+    migrating_legacy = False
     if dropin_path.is_file():
         try:
             existing = dropin_path.read_text(encoding="utf-8")
         except Exception:
             existing = ""
-    if target_line in existing:
+    else:
+        legacy_path = Path.home() / ".config" / "systemd" / "user" / "personal-agent-telegram.service.d" / "override.conf"
+        if legacy_path.is_file():
+            migrating_legacy = True
+            try:
+                existing = legacy_path.read_text(encoding="utf-8")
+            except Exception:
+                existing = ""
+    if target_line in existing and not migrating_legacy:
         return changed
-    content = "[Service]\n" + target_line + "\n"
+    content = existing
+    if content and not content.endswith("\n"):
+        content += "\n"
+    if not content.strip():
+        content = "[Service]\n"
+    if target_line not in content:
+        content += target_line + "\n"
     dropin_path.write_text(content, encoding="utf-8")
     changed.append(f"wrote_dropin:{dropin_path}")
     return changed
@@ -960,7 +996,7 @@ def _recovery_manifest() -> dict[str, Any]:
             "Configured discovery sources and policies live under the canonical config/state directories and are included by copying those paths.",
         ],
         "restore_steps": [
-            f"Stop {runtime_service_name()} and personal-agent-telegram.service if they are running.",
+            f"Stop {PRODUCTION_SERVICE_NAME} before copying state.",
             "Restore the copied operator config and state files to their canonical paths.",
             "Run: python -m agent doctor --fix",
             "Restart the user services and confirm /ready and /health are healthy.",
@@ -3054,7 +3090,7 @@ def run_doctor_report(
     online: bool = False,
     fix: bool = False,
     collect_diagnostics: bool = False,
-    api_base_url: str = f"http://127.0.0.1:{runtime_port()}",
+    api_base_url: str = PRODUCTION_API_BASE_URL,
     now_epoch: int | None = None,
 ) -> DoctorReport:
     configure_logging_if_needed()
@@ -3149,7 +3185,7 @@ def main(argv: list[str] | None = None) -> int:
         help="write one redacted local diagnostics bundle and print its path",
     )
     parser.add_argument("--online", action="store_true", help="allow online Telegram token validation")
-    parser.add_argument("--api-base-url", default=f"http://127.0.0.1:{runtime_port()}", help="local API base URL")
+    parser.add_argument("--api-base-url", default=PRODUCTION_API_BASE_URL, help="local API base URL")
     parser.add_argument("--repo-root", default=None, help="override repo root")
     args = parser.parse_args(argv)
 

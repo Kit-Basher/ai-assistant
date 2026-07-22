@@ -15,7 +15,7 @@ server, the CLI, and the optional Telegram adapter.
 Telegram operator note: diagnostics and logs redact bot-token URLs. If an older
 journal ever contained `https://api.telegram.org/bot...`, rotate the bot token
 in BotFather, update the Personal Agent secret store, and restart
-`personal-agent-telegram.service`.
+the embedded Telegram poller in `personal-agent-api.service`.
 
 ## Current Product Truth
 Current release line: v0.2.5 development patch on top of the v0.2.4 Telegram

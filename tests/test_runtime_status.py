@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from agent.config import runtime_service_name
+from agent.config import PRODUCTION_SERVICE_NAME
 from agent.diagnostics import CommandResult
 from agent.runtime_status import build_runtime_status_report
 from memory.db import MemoryDB
@@ -45,7 +45,7 @@ class TestRuntimeStatusReport(unittest.TestCase):
         self.tmpdir.cleanup()
 
     def test_report_structure_and_redaction(self) -> None:
-        api_service = runtime_service_name()
+        api_service = PRODUCTION_SERVICE_NAME
         runner = FakeRunner(
             {
                 ("systemctl", "--user", "show", api_service, "-p", "ActiveState", "-p", "SubState", "-p", "UnitFileState", "-p", "MainPID", "-p", "Result", "-p", "ExecMainStatus", "-p", "ExecMainCode", "-p", "ExecMainExitTimestamp"): CommandResult(
@@ -128,7 +128,18 @@ class TestRuntimeStatusReport(unittest.TestCase):
                 ),
             }
         )
-        report = build_runtime_status_report(self.db, run_command_fn=runner)
+        report = build_runtime_status_report(
+            self.db,
+            run_command_fn=runner,
+            telegram_status_fn=lambda: {
+                "available": True,
+                "enabled": True,
+                "state": "running",
+                "effective_state": "enabled_running",
+                "health": "POLLING",
+                "embedded_running": True,
+            },
+        )
         order = [
             "1. Service State",
             "2. Recent Logs",
@@ -138,7 +149,8 @@ class TestRuntimeStatusReport(unittest.TestCase):
         indices = [report.index(section) for section in order]
         self.assertEqual(indices, sorted(indices))
         self.assertIn(f"{api_service}: status=active", report)
-        self.assertIn("personal-agent-telegram.service: status=inactive", report)
+        self.assertIn("embedded Telegram: state=running", report)
+        self.assertNotIn("personal-agent-telegram.service", report)
         self.assertNotIn("12345:ABCDEF1234567890123456", report)
         self.assertNotIn("sk-test", report)
         self.assertIn("[REDACTED]", report)
@@ -164,7 +176,7 @@ class TestRuntimeStatusReport(unittest.TestCase):
         self.assertIn("audit_log last_24h: 1", report)
 
     def test_permission_denied_degrades(self) -> None:
-        api_service = runtime_service_name()
+        api_service = PRODUCTION_SERVICE_NAME
         runner = FakeRunner(
             {
                 ("systemctl", "--user", "show", api_service, "-p", "ActiveState", "-p", "SubState", "-p", "UnitFileState", "-p", "MainPID", "-p", "Result", "-p", "ExecMainStatus", "-p", "ExecMainCode", "-p", "ExecMainExitTimestamp"): CommandResult(
@@ -205,9 +217,12 @@ class TestRuntimeStatusReport(unittest.TestCase):
                 ),
             }
         )
-        report = build_runtime_status_report(self.db, run_command_fn=runner)
+        report = build_runtime_status_report(
+            self.db,
+            run_command_fn=runner,
+            telegram_status_fn=lambda: {"available": False, "state": "unknown"},
+        )
         self.assertIn(f"{api_service}: status=not available (permission)", report)
-        self.assertIn("personal-agent-telegram.service: status=not available (permission)", report)
         self.assertIn(f"2. Recent Logs\n- {api_service}\n  not available (permission)", report)
 
     def test_source_and_docs_do_not_reference_obsolete_single_service_topology(self) -> None:
@@ -221,12 +236,12 @@ class TestRuntimeStatusReport(unittest.TestCase):
         for source in (runtime_source, manifest_source, runbook_source, readme_source):
             self.assertNotIn("journalctl -u personal-agent", source)
             self.assertNotIn("personal-agent.service", source)
-        self.assertIn("runtime_service_name()", runtime_source)
-        self.assertIn("personal-agent-telegram.service", runtime_source)
+        self.assertIn("PRODUCTION_SERVICE_NAME", runtime_source)
+        self.assertNotIn("personal-agent-telegram.service", runtime_source)
         self.assertIn("personal-agent-api.service", manifest_source)
-        self.assertIn("personal-agent-telegram.service", manifest_source)
+        self.assertIn("embedded Telegram poller", manifest_source)
         self.assertIn("personal-agent-api.service", runbook_source)
-        self.assertIn("personal-agent-telegram.service", runbook_source)
+        self.assertNotIn("personal-agent-telegram.service", runbook_source)
         self.assertNotIn("/runtime_status", readme_source)
 
 

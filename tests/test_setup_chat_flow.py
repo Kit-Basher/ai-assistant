@@ -38,7 +38,8 @@ class TestSetupChatFlow(unittest.TestCase):
             ("can you tell what CPU and GPU I have?", "operational_status", "operational_observe"),
             ("can you see the GPU?", "operational_status", "operational_observe"),
             ("can you dig deeper into my system?", "operational_status", "operational_observe"),
-            ("run a system check", "action_tool", "shell_blocked_request"),
+            ("run a system check", "operational_status", "operational_observe"),
+            ("quick system health check", "operational_status", "operational_observe"),
         )
         for text, expected_route, expected_kind in cases:
             with self.subTest(text=text):

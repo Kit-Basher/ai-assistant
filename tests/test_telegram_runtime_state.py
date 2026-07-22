@@ -37,12 +37,14 @@ class TestTelegramRuntimeState(unittest.TestCase):
     def _run_stub(self, *, installed: bool, active: bool, enabled: bool):
         def _runner(args, **_kwargs):  # type: ignore[no-untyped-def]
             cmd = list(args)
-            if cmd[-2:] == ["cat", "personal-agent-telegram.service"]:
+            if cmd[-2:] == ["cat", "personal-agent-api.service"]:
                 return _completed(cmd, 0 if installed else 1)
-            if cmd[-2:] == ["is-active", "personal-agent-telegram.service"]:
+            if cmd[-2:] == ["is-active", "personal-agent-api.service"]:
                 return _completed(cmd, 0 if active else 3, "active\n" if active else "inactive\n")
-            if cmd[-2:] == ["is-enabled", "personal-agent-telegram.service"]:
+            if cmd[-2:] == ["is-enabled", "personal-agent-api.service"]:
                 return _completed(cmd, 0 if enabled else 1, "enabled\n" if enabled else "disabled\n")
+            if "show" in cmd and "--property=MainPID" in cmd:
+                return _completed(cmd, 0, f"{os.getpid()}\n" if active else "0\n")
             raise AssertionError(f"unexpected command: {cmd}")
 
         return _runner
@@ -56,18 +58,20 @@ class TestTelegramRuntimeState(unittest.TestCase):
             calls.append(cmd)
             if cmd == ["systemctl", "--user", "--version"]:
                 return _completed(cmd, 0, "systemd 255\n")
-            if cmd[-2:] == ["cat", "personal-agent-telegram.service"]:
+            if cmd[-2:] == ["cat", "personal-agent-api.service"]:
                 return _completed(cmd, 0)
-            if cmd[-2:] == ["is-active", "personal-agent-telegram.service"]:
+            if cmd[-2:] == ["is-active", "personal-agent-api.service"]:
                 return _completed(cmd, 0 if state["active"] else 3, "active\n" if state["active"] else "inactive\n")
-            if cmd[-2:] == ["is-enabled", "personal-agent-telegram.service"]:
+            if cmd[-2:] == ["is-enabled", "personal-agent-api.service"]:
                 return _completed(cmd, 0 if state["enabled"] else 1, "enabled\n" if state["enabled"] else "disabled\n")
+            if "show" in cmd and "--property=MainPID" in cmd:
+                return _completed(cmd, 0, f"{os.getpid()}\n" if state["active"] else "0\n")
             if cmd[-1:] == ["daemon-reload"]:
                 return _completed(cmd, 0)
-            if cmd[-2:] == ["restart", "personal-agent-telegram.service"]:
+            if cmd[-2:] == ["restart", "personal-agent-api.service"]:
                 state["active"] = bool(active_after_restart)
                 return _completed(cmd, 0 if active_after_restart else 1)
-            if cmd[-2:] == ["stop", "personal-agent-telegram.service"]:
+            if cmd[-2:] == ["stop", "personal-agent-api.service"]:
                 state["active"] = bool(active_after_stop)
                 return _completed(cmd, 0 if not active_after_stop else 1)
             raise AssertionError(f"unexpected command: {cmd}")
@@ -139,6 +143,9 @@ class TestTelegramRuntimeState(unittest.TestCase):
             secret_path.parent.mkdir(parents=True, exist_ok=True)
             SecretStore(path=str(secret_path)).set_secret("telegram:bot_token", "123456:abcdef")
             write_telegram_enablement(True, home=home, env={})
+            lock_path = telegram_lock_paths("123456:abcdef", home=home, env={})[0]
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
             state = get_telegram_runtime_state(
                 home=home,
                 env={"AGENT_SECRET_STORE_PATH": str(secret_path)},
@@ -146,6 +153,8 @@ class TestTelegramRuntimeState(unittest.TestCase):
             )
         self.assertTrue(bool(state["token_configured"]))
         self.assertEqual("enabled_running", state["effective_state"])
+        self.assertTrue(bool(state["embedded_running"]))
+        self.assertFalse(bool(state["duplicate_pollers"]))
 
     def test_stale_lock_reports_blocked_and_can_be_cleared(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -219,11 +228,11 @@ class TestTelegramRuntimeState(unittest.TestCase):
                         f" 101 python -m agent.telegram_adapter.bot --token={token}\n"
                         " 202 /usr/bin/python -m agent.telegram_adapter.bot\n",
                     )
-                if cmd[-2:] == ["cat", "personal-agent-telegram.service"]:
+                if cmd[-2:] == ["cat", "personal-agent-api.service"]:
                     return _completed(cmd, 0)
-                if cmd[-2:] == ["is-active", "personal-agent-telegram.service"]:
+                if cmd[-2:] == ["is-active", "personal-agent-api.service"]:
                     return _completed(cmd, 0, "active\n")
-                if cmd[-2:] == ["is-enabled", "personal-agent-telegram.service"]:
+                if cmd[-2:] == ["is-enabled", "personal-agent-api.service"]:
                     return _completed(cmd, 0, "enabled\n")
                 raise AssertionError(f"unexpected command: {cmd}")
 
@@ -252,11 +261,11 @@ class TestTelegramRuntimeState(unittest.TestCase):
                 cmd = list(args)
                 if cmd == ["ps", "-eo", "pid,args"]:
                     raise RuntimeError("ps unavailable")
-                if cmd[-2:] == ["cat", "personal-agent-telegram.service"]:
+                if cmd[-2:] == ["cat", "personal-agent-api.service"]:
                     return _completed(cmd, 0)
-                if cmd[-2:] == ["is-active", "personal-agent-telegram.service"]:
+                if cmd[-2:] == ["is-active", "personal-agent-api.service"]:
                     return _completed(cmd, 0, "active\n")
-                if cmd[-2:] == ["is-enabled", "personal-agent-telegram.service"]:
+                if cmd[-2:] == ["is-enabled", "personal-agent-api.service"]:
                     return _completed(cmd, 0, "enabled\n")
                 raise AssertionError(f"unexpected command: {cmd}")
 
@@ -268,7 +277,7 @@ class TestTelegramRuntimeState(unittest.TestCase):
 
         self.assertFalse(bool(state["poller_inspection_available"]))
         self.assertFalse(bool(state["duplicate_pollers"]))
-        self.assertEqual("enabled_running", state["effective_state"])
+        self.assertEqual("enabled_stopped", state["effective_state"])
 
     def test_operator_env_ignores_shell_enabled_override_and_uses_dropin(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -374,7 +383,7 @@ class TestTelegramRuntimeState(unittest.TestCase):
             self.assertTrue(ok)
             self.assertTrue(response["ok"])
             commands = [call[-2:] for call in calls]
-            self.assertIn(["restart", "personal-agent-telegram.service"], commands)
+            self.assertIn(["restart", "personal-agent-api.service"], commands)
             journal = response.get("managed_action_journal", {})
             self.assertEqual("telegram_service_enable", journal.get("action_type"))
             self.assertTrue(journal.get("verification_result", {}).get("ok"))
@@ -412,8 +421,7 @@ class TestTelegramRuntimeState(unittest.TestCase):
             self.assertEqual("telegram_service_restart_failed", response["error_kind"])
             self.assertIn("restored previous Telegram service config", response["message"])
             commands = [call[-2:] for call in calls]
-            self.assertIn(["restart", "personal-agent-telegram.service"], commands)
-            self.assertIn(["stop", "personal-agent-telegram.service"], commands)
+            self.assertIn(["restart", "personal-agent-api.service"], commands)
             journal = response.get("managed_action_journal", {})
             self.assertTrue(journal.get("rollback_result", {}).get("attempted"))
             self.assertTrue(
@@ -452,7 +460,7 @@ class TestTelegramRuntimeState(unittest.TestCase):
             self.assertTrue(persisted["recovery_needed"])
             self.assertNotIn(str(home), json.dumps(persisted, sort_keys=True))
 
-    def test_manage_telegram_service_disable_stops_and_verifies(self) -> None:
+    def test_manage_telegram_service_disable_restarts_api_and_verifies(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
             store = self._journal_store(home)
@@ -469,9 +477,9 @@ class TestTelegramRuntimeState(unittest.TestCase):
 
             self.assertTrue(ok)
             commands = [call[-2:] for call in calls]
-            self.assertIn(["stop", "personal-agent-telegram.service"], commands)
+            self.assertIn(["restart", "personal-agent-api.service"], commands)
             self.assertFalse(bool(response["state"]["enabled"]))
-            self.assertFalse(bool(response["state"]["service_active"]))
+            self.assertTrue(bool(response["state"]["service_active"]))
             journal = response.get("managed_action_journal", {})
             persisted = store.get(journal["action_id"])
             self.assertIsNotNone(persisted)
@@ -479,7 +487,8 @@ class TestTelegramRuntimeState(unittest.TestCase):
             self.assertEqual("verified", persisted["status"])
 
     def test_approved_telegram_systemctl_actions_reject_arbitrary_service(self) -> None:
-        self.assertTrue(is_approved_telegram_systemctl_user_action(["restart", "personal-agent-telegram.service"]))
+        self.assertTrue(is_approved_telegram_systemctl_user_action(["restart", "personal-agent-api.service"]))
+        self.assertFalse(is_approved_telegram_systemctl_user_action(["restart", "personal-agent-telegram.service"]))
         self.assertFalse(is_approved_telegram_systemctl_user_action(["restart", "unrelated.service"]))
         self.assertFalse(is_approved_telegram_systemctl_user_action(["enable", "personal-agent-telegram.service"]))
 

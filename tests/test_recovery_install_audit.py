@@ -27,10 +27,9 @@ class TestRecoveryInstallAudit(unittest.TestCase):
             self.assertTrue(config.safe_mode_enabled)
             self.assertFalse(config.telegram_enabled)
 
-    def test_all_service_surfaces_pin_safe_mode_and_disable_telegram(self) -> None:
+    def test_production_service_surfaces_pin_safe_mode_without_overriding_telegram(self) -> None:
         paths = (
             REPO_ROOT / "systemd" / "personal-agent-api.service",
-            REPO_ROOT / "systemd" / "personal-agent-api-dev.service",
             REPO_ROOT / "packaging" / "debian" / "personal-agent-api.service.in",
             REPO_ROOT / "packaging" / "release_bundle" / "install.sh",
         )
@@ -38,7 +37,12 @@ class TestRecoveryInstallAudit(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             with self.subTest(path=path):
                 self.assertIn("AGENT_SAFE_MODE=1", text)
-                self.assertIn("TELEGRAM_ENABLED=0", text)
+                self.assertNotIn("TELEGRAM_ENABLED=0", text)
+                self.assertNotIn("personal-agent-telegram.service", text)
+
+    def test_embedded_telegram_dependency_includes_job_queue(self) -> None:
+        metadata = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertIn('python-telegram-bot[job-queue]>=22.6', metadata)
 
     def test_shipped_units_use_canonical_mutable_state_roots(self) -> None:
         service_paths = (

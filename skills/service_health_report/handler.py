@@ -16,7 +16,7 @@ def service_health_report(context: dict[str, Any], user_id: str | None = None) -
     service_lines = [
         line
         for line in lines
-        if line.startswith("- personal-agent-api.service:") or line.startswith("- personal-agent-telegram.service:")
+        if line.startswith("- personal-agent-api.service:") or line.startswith("- embedded Telegram:")
     ]
     if not service_lines:
         service_lines = ["personal-agent-api.service: status=unknown"]
@@ -26,7 +26,8 @@ def service_health_report(context: dict[str, Any], user_id: str | None = None) -
     )
     api_active = "status=active" in api_line.lower()
     telegram_failed = any(
-        line.startswith("- personal-agent-telegram.service:") and "status=failed" in line.lower()
+        line.startswith("- embedded Telegram:")
+        and ("effective_state=enabled_" in line.lower() and "running=true" not in line.lower())
         for line in service_lines
     )
     log_start = 0

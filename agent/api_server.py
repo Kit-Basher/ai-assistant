@@ -1042,7 +1042,7 @@ class AgentRuntime:
         except Exception:
             telegram = {}
         effective_state = str(telegram.get("effective_state") or telegram.get("state") or "unknown").strip().lower() or "unknown"
-        enabled = bool(telegram.get("enabled", False) or telegram.get("configured", False))
+        enabled = bool(telegram.get("enabled", False))
         startup_policy = "enabled" if enabled else "disabled"
         last_error = None if effective_state in {"enabled_running", "running"} else (str(telegram.get("next_action") or "").strip() or None)
         self._skill_governance_store.register_managed_adapter(
@@ -5533,21 +5533,23 @@ class AgentRuntime:
             if isinstance(runner_status.get("transport_health"), dict)
             else {}
         )
-        polling_active = bool(runner_status.get("embedded_running", False)) or bool(runtime_state.get("service_active", False))
+        runtime_enabled = bool(getattr(self.config, "telegram_enabled", False))
+        polling_active = bool(runner_status.get("embedded_running", False)) or bool(runtime_state.get("embedded_running", False))
+        embedded_running = bool(runner_status.get("embedded_running", False))
         inbound_seen = bool(transport_health.get("last_update_received_at"))
         dispatch_seen = bool(transport_health.get("last_dispatch_started_at") or transport_health.get("last_update_processed_at"))
         outbound_seen = bool(transport_health.get("last_reply_success_at"))
         duplicate_consumer_suspected = bool(runtime_state.get("duplicate_pollers", False)) or str(
             runner_status.get("last_error") or ""
         ).lower().find("conflict") >= 0
-        handler_registered = bool(transport_health.get("handler_registered", False) or runtime_state.get("service_active", False))
+        handler_registered = bool(transport_health.get("handler_registered", False) or runtime_state.get("embedded_running", False))
         recent_error = bool(
             transport_health.get("last_error_code")
             or transport_health.get("last_reply_error_class")
             or runner_status.get("last_error")
         )
         telegram_health_level = classify_telegram_health_level(
-            enabled=bool(runtime_state.get("enabled", False)),
+            enabled=runtime_enabled,
             token_configured=bool(runtime_state.get("token_configured", False)),
             polling_active=polling_active,
             handler_registered=handler_registered,
@@ -5565,9 +5567,20 @@ class AgentRuntime:
             and not duplicate_consumer_suspected
             and not recent_error
         )
+        effective_state = str(runtime_state.get("effective_state") or "unknown")
+        ready_state = str(runtime_state.get("ready_state") or "unknown")
+        next_action = str(runtime_state.get("next_action") or "No action needed.")
+        if not runtime_enabled:
+            effective_state = "disabled_optional"
+            ready_state = "disabled_optional"
+            next_action = "No action needed."
+        elif embedded_running and not duplicate_consumer_suspected:
+            effective_state = "enabled_running"
+            ready_state = "running"
+            next_action = "No action needed."
         payload = {
             "ok": True,
-            "enabled": bool(runtime_state.get("enabled", False)),
+            "enabled": runtime_enabled,
             "configured": bool(runtime_state.get("token_configured", False)),
             "token_present": bool(runtime_state.get("token_configured", False)),
             "token_validated": bool(runtime_state.get("token_configured", False)),
@@ -5575,12 +5588,12 @@ class AgentRuntime:
             "secret_store_state": str(runtime_state.get("secret_store_state") or "unknown"),
             "secret_store_valid": bool(runtime_state.get("secret_store_valid", False)),
             "secret_store_error_kind": runtime_state.get("secret_store_error_kind"),
-            "state": str(runtime_state.get("ready_state") or "unknown"),
-            "effective_state": str(runtime_state.get("effective_state") or "unknown"),
+            "state": ready_state,
+            "effective_state": effective_state,
             "transport_mode": "polling",
             "polling_active": polling_active,
             "webhook_active": False,
-            "handler_registered": bool(transport_health.get("handler_registered", False) or runtime_state.get("service_active", False)),
+            "handler_registered": bool(transport_health.get("handler_registered", False) or runtime_state.get("embedded_running", False)),
             "last_update_received_at": transport_health.get("last_update_received_at"),
             "last_update_kind": transport_health.get("last_update_kind"),
             "last_update_scope_hash": transport_health.get("last_update_scope_hash"),
@@ -5625,8 +5638,8 @@ class AgentRuntime:
             "duplicate_pollers": bool(runtime_state.get("duplicate_pollers", False)),
             "poller_evidence": list(runtime_state.get("poller_evidence") or [])[:4],
             "poller_inspection_error": runtime_state.get("poller_inspection_error"),
-            "next_action": str(runtime_state.get("next_action") or "No action needed."),
-            "embedded_running": bool(runner_status.get("embedded_running", False)),
+            "next_action": next_action,
+            "embedded_running": embedded_running,
             "embedded_state": str(runner_status.get("state") or "") or None,
             "last_event": str(runner_status.get("last_event") or ""),
             "last_error": str(runner_status.get("last_error") or "") or None,

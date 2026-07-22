@@ -12,7 +12,9 @@ from agent.actions.persistent_journal import PersistentManagedActionJournalStore
 from agent.secret_store import SecretStore
 
 
-TELEGRAM_SERVICE_NAME = "personal-agent-telegram.service"
+# Telegram is hosted by the production API process.  Keep the historical public
+# constant name for compatibility with callers, but never create a second unit.
+TELEGRAM_SERVICE_NAME = "personal-agent-api.service"
 TELEGRAM_HEALTH_DISABLED_OPTIONAL = "DISABLED_OPTIONAL"
 _APPROVED_SYSTEMCTL_USER_ACTIONS = {
     ("--version",),
@@ -88,6 +90,11 @@ def telegram_dropin_path(*, home: Path | None = None) -> Path:
     return telegram_dropin_dir(home=home) / "override.conf"
 
 
+def legacy_telegram_dropin_path(*, home: Path | None = None) -> Path:
+    root = home or Path.home()
+    return root / ".config" / "systemd" / "user" / "personal-agent-telegram.service.d" / "override.conf"
+
+
 def is_personal_agent_telegram_dropin_path(path: str | Path, *, home: Path | None = None) -> bool:
     try:
         return Path(path).expanduser().resolve(strict=False) == telegram_dropin_path(home=home).expanduser().resolve(strict=False)
@@ -125,9 +132,12 @@ def read_telegram_enablement(*, env: Mapping[str, str] | None = None, home: Path
             "source_path": None,
         }
     dropin = telegram_dropin_path(home=home)
-    if dropin.is_file():
+    candidates = (dropin, legacy_telegram_dropin_path(home=home))
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
         try:
-            content = dropin.read_text(encoding="utf-8")
+            content = candidate.read_text(encoding="utf-8")
         except Exception:
             content = ""
         overrides = _parse_environment_overrides(content)
@@ -137,7 +147,7 @@ def read_telegram_enablement(*, env: Mapping[str, str] | None = None, home: Path
                 "enabled": _truthy(raw_dropin),
                 "config_source": "config",
                 "raw_value": raw_dropin,
-                "source_path": str(dropin),
+                "source_path": str(candidate),
             }
     return {
         "enabled": False,
@@ -437,6 +447,14 @@ def _service_enabled(*, run: Callable[..., subprocess.CompletedProcess[str]] | N
     return (proc.stdout or "").strip() == "enabled"
 
 
+def _service_main_pid(*, run: Callable[..., subprocess.CompletedProcess[str]] | None = None) -> int | None:
+    try:
+        proc = _systemctl_user(["show", TELEGRAM_SERVICE_NAME, "--property=MainPID", "--value"], run=run)
+    except Exception:
+        return None
+    return _safe_int((proc.stdout or "").strip()) if proc.returncode == 0 else None
+
+
 def get_telegram_runtime_state(
     *,
     env: Mapping[str, str] | None = None,
@@ -459,7 +477,18 @@ def get_telegram_runtime_state(
     enabled = bool(enablement.get("enabled", False))
     token_configured = bool(token)
 
-    duplicate_pollers = bool(poller_info.get("duplicate", False))
+    service_main_pid = _service_main_pid(run=run) if service_active and bool(lock_info.get("live")) else None
+    embedded_running = bool(
+        service_active
+        and lock_info.get("live")
+        and service_main_pid is not None
+        and service_main_pid == lock_info.get("pid")
+    )
+    standalone_poller_count = int(poller_info.get("count") or 0)
+    poller_count = standalone_poller_count + (1 if embedded_running else 0)
+    duplicate_pollers = poller_count > 1 or bool(
+        service_active and lock_info.get("live") and service_main_pid and service_main_pid != lock_info.get("pid")
+    )
 
     if not enabled:
         effective_state = "disabled_optional"
@@ -473,7 +502,7 @@ def get_telegram_runtime_state(
         effective_state = "enabled_misconfigured"
         next_action = "Run: python -m agent.secrets set telegram:bot_token"
         ready_state = "disabled_missing_token"
-    elif service_active:
+    elif embedded_running:
         if duplicate_pollers:
             effective_state = "enabled_duplicate_pollers"
             next_action = "Stop duplicate Telegram pollers and keep only one running instance."
@@ -494,8 +523,8 @@ def get_telegram_runtime_state(
         next_action = "Run: python -m agent telegram_enable"
         ready_state = "stopped"
 
-    polling_active = bool(service_active)
-    handler_registered = bool(service_installed)
+    polling_active = embedded_running
+    handler_registered = embedded_running
     duplicate_consumer_suspected = bool(duplicate_pollers)
     telegram_health_level = classify_telegram_health_level(
         enabled=enabled,
@@ -543,6 +572,9 @@ def get_telegram_runtime_state(
         "service_installed": bool(service_installed),
         "service_active": bool(service_active),
         "service_enabled": bool(service_enabled),
+        "service_main_pid": service_main_pid,
+        "embedded_running": embedded_running,
+        "embedded_state": "running" if embedded_running else ("stopped" if enabled else "disabled"),
         "token_configured": token_configured,
         "token_source": token_source,
         "secret_store_state": secret_store_status.get("state"),
@@ -554,7 +586,7 @@ def get_telegram_runtime_state(
         "lock_path": lock_info.get("path"),
         "lock_pid": lock_info.get("pid"),
         "poller_inspection_available": bool(poller_info.get("available", False)),
-        "poller_count": poller_info.get("count"),
+        "poller_count": poller_count,
         "duplicate_pollers": duplicate_pollers,
         "poller_evidence": list(poller_info.get("evidence") or []),
         "poller_inspection_error": poller_info.get("error"),
@@ -915,7 +947,7 @@ def manage_telegram_service_state(
     elif not enabled and service_installed:
         service_action_attempted = True
         proc = _run_approved_systemctl_user(
-            ["stop", TELEGRAM_SERVICE_NAME],
+            ["restart", TELEGRAM_SERVICE_NAME],
             journal=journal,
             step_name="systemctl_service_action",
             run=run,
@@ -929,8 +961,8 @@ def manage_telegram_service_state(
                 state_before=state_before,
                 run=run,
                 managed_action_journal_store=managed_action_journal_store,
-                error_kind="telegram_service_stop_failed",
-                detail="I could not stop the Personal Agent Telegram service.",
+                error_kind="telegram_service_restart_failed",
+                detail="I could not restart the Personal Agent API after disabling embedded Telegram.",
             )
     else:
         journal.record_step(
@@ -989,11 +1021,11 @@ def _telegram_service_verification_ok(
         if not bool(state.get("enabled", False)):
             return False
         if service_action_attempted:
-            return bool(state.get("service_active", False)) and str(state.get("ready_state") or "") == "running"
+            return bool(state.get("service_active", False))
         return True
     if bool(state.get("enabled", True)):
         return False
-    if service_action_attempted and bool(state.get("service_active", False)):
+    if service_action_attempted and not bool(state.get("service_active", False)):
         return False
     return True
 
