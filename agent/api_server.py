@@ -12779,7 +12779,11 @@ class AgentRuntime:
         request = dict(payload or {})
         raw = self._build_search_setup_execution_plan(request)
         raw_plan = raw.get("_execution_plan") or raw.get("plan") or raw
-        operation = "search.prerequisite" if str(raw_plan.get("setup_mode") or "") == "podman_prerequisite" else "search.setup"
+        operation = (
+            "search.prerequisite"
+            if str(raw_plan.get("setup_mode") or "") == "podman_prerequisite"
+            else "search.searxng.repair"
+        )
         _ok, body = self.route_pack_search_mutation(operation, request)
         return body
 
@@ -13023,7 +13027,11 @@ class AgentRuntime:
     def apply_search_setup(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         request = dict(payload or {})
         plan = request.get("mutation_plan") if isinstance(request.get("mutation_plan"), dict) else {}
-        operation = "search.prerequisite" if str(plan.get("capability_id") or "") == "search.prerequisite.install" else "search.setup"
+        operation = (
+            "search.prerequisite"
+            if str(plan.get("capability_id") or "") == "search.prerequisite.install"
+            else "search.searxng.repair"
+        )
         _ok, body = self.route_pack_search_mutation(operation, request)
         return body
 
@@ -13089,6 +13097,13 @@ class AgentRuntime:
                 journal.record_created_resource("container", "personal-agent-searxng", engine=str(plan.get("selected_engine") or ""))
             if not bool(service_result.get("ok")):
                 rollback_ok = bool(service_result.get("rollback_ok", not service_result.get("rollback_attempted")))
+                readiness_failure = str(service_result.get("blocked_reason") or "") in {
+                    "managed_service_health_check_failed",
+                    "managed_service_existing_container_unhealthy",
+                    "managed_service_startup_pending",
+                }
+                initial_failure_stage = "readiness" if readiness_failure else "setup"
+                failure_stage = "rollback" if bool(service_result.get("cleanup_incomplete")) else initial_failure_stage
                 journal.mark_verification(ok=False, reason=str(service_result.get("blocked_reason") or "service_setup_failed"))
                 journal.mark_rollback(ok=rollback_ok, attempted=bool(service_result.get("rollback_attempted")), summary=str(service_result.get("error") or "Service setup failed."))
                 self._persist_managed_action_journal(
@@ -13097,7 +13112,13 @@ class AgentRuntime:
                     recovery_hint="Inspect only the personal-agent-searxng container if cleanup was incomplete.",
                 )
                 response = dict(service_result)
-                response.update({"ok": False, "did_configure": False, "managed_action_journal": journal.to_dict()})
+                response.update({
+                    "ok": False,
+                    "did_configure": False,
+                    "failure_stage": failure_stage,
+                    "initial_failure_stage": initial_failure_stage if failure_stage == "rollback" else None,
+                    "managed_action_journal": journal.to_dict(),
+                })
                 return response
             service_plan = service_result.get("plan") if isinstance(service_result.get("plan"), dict) else {}
             if str(service_plan.get("health_url") or "").strip():
@@ -13169,6 +13190,13 @@ class AgentRuntime:
                 "ok": False,
                 "did_configure": False,
                 "blocked_reason": "search_status_verification_failed",
+                "failure_stage": "readiness" if rollback_ok else "rollback",
+                "initial_failure_stage": None if rollback_ok else "readiness",
+                "error": (
+                    "SearXNG readiness verification failed; previous search settings and owned setup resources were restored."
+                    if rollback_ok
+                    else "SearXNG readiness verification failed, and rollback of the owned setup resources did not complete."
+                ),
                 "search_status": status,
                 "cleanup_result": cleanup_result,
                 "rollback_ok": rollback_ok,

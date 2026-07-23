@@ -2595,7 +2595,7 @@ class Orchestrator:
         if int(mutation_plan.get("schema_version") or 0) >= 1 and isinstance(mutation_plan.get("mutation_inventory"), list):
             capability = str(mutation_plan.get("capability_id") or "")
             resources = {"created": [], "changed": [], "deleted": []}
-            if capability == "search.service.configure":
+            if capability in {"search.service.configure", "search.searxng.repair"}:
                 resources = {
                     "created": ["container:personal-agent-searxng"],
                     "changed": ["runtime_search_config", "memory/local_services/searxng/settings.yml"],
@@ -3053,7 +3053,7 @@ class Orchestrator:
             used_tools=["managed_local_service_setup_preview", "safe_web_search"],
             action={
                 "operation": "managed_local_service_setup_preview",
-                "v2f_domain_operation": "search.setup",
+                "v2f_domain_operation": "search.searxng.repair",
                 "v2f_domain_request": {"allow_docker_fallback": False},
                 "params": {
                     "service_id": "searxng",
@@ -4116,8 +4116,18 @@ class Orchestrator:
                     or "mutation_failed"
                 ).strip()
                 reason_detail = str(response_body.get("error") or response_body.get("error_code") or reason_code).strip()
-                if v2f_operation == "search.setup":
-                    message = f"SearXNG setup did not complete. The action was blocked or rolled back: {reason_code} ({reason_detail})."
+                if v2f_operation in {"search.setup", "search.searxng.repair"}:
+                    failure_stage = str(response_body.get("failure_stage") or "setup").strip().lower()
+                    stage_text = {
+                        "policy": "policy blocked the repair",
+                        "setup": "setup failed",
+                        "readiness": "readiness verification failed",
+                        "rollback": "rollback did not complete",
+                    }.get(failure_stage, f"{failure_stage} failed")
+                    message = f"SearXNG setup did not complete because {stage_text}: {reason_code} ({reason_detail})."
+                    initial_stage = str(response_body.get("initial_failure_stage") or "").strip().lower()
+                    if failure_stage == "rollback" and initial_stage:
+                        message += f" The original failure was during {initial_stage}."
                     if response_body.get("rollback_ok") is not None:
                         message += f" Previous search settings restored: {'yes' if response_body.get('rollback_ok') else 'no'}."
                 else:

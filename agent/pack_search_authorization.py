@@ -45,7 +45,17 @@ SPECS: dict[str, V2FMutationSpec] = {
     "external_pack.enable": _spec("external_pack.enable", "pack.lifecycle.enable", "Restore the previous enabled state through a new Plan."),
     "external_pack.grant": _spec("external_pack.grant", "pack.permission.grant", "Revoke the exact bounded grant through a new Plan."),
     "external_pack.remove": _spec("external_pack.remove", "pack.lifecycle.remove", "Restore only from a separately reviewed backup; deletion is otherwise irreversible."),
+    # Kept as a fail-closed compatibility operation. Safe Mode must not become a
+    # generic bypass for historical search mutations.
     "search.setup": _spec("search.setup", "search.service.configure", "Remove only the owned service and restore prior search configuration.", safe=True),
+    # This is the sole Safe-Mode-eligible local-search mutation. Its executor is
+    # hard-bound to the assistant-owned SearXNG plan and still requires a valid,
+    # single-use mutation confirmation.
+    "search.searxng.repair": _spec(
+        "search.searxng.repair",
+        "search.searxng.repair",
+        "Remove only resources created by this repair and restore prior assistant-owned SearXNG configuration.",
+    ),
     "search.prerequisite": _spec("search.prerequisite", "search.prerequisite.install", "System package installation is not automatically reversible.", safe=True),
 }
 
@@ -119,7 +129,7 @@ class PackSearchAuthorizationService:
             snapshot["grants_fingerprint"] = stable_fingerprint(grant_path.read_text(encoding="utf-8") if grant_path.is_file() else "absent")
             snapshot["permission_policy"] = self.runtime.permission_store.load()
             snapshot["source_policy"] = self.runtime._pack_registry_discovery().get_policy()
-        elif operation == "search.setup":
+        elif operation in {"search.setup", "search.searxng.repair"}:
             built = self.runtime._build_search_setup_execution_plan(request)
             snapshot["execution_plan"] = built.get("_execution_plan") or built.get("plan") or built
         elif operation == "search.prerequisite":
@@ -172,6 +182,15 @@ class PackSearchAuthorizationService:
         invalid = self._validate(operation, request)
         if invalid:
             return False, {"ok": False, "error": invalid, "mutated": False}
+        if spec.safe_mode_blocked and self.runtime._safe_mode_enabled():
+            return False, {
+                "ok": False,
+                "error": "safe_mode_mutation_blocked",
+                "failure_stage": "policy",
+                "message": "Safe Mode policy blocks this operation, so no approval preview was created.",
+                "requires_confirmation": False,
+                "mutated": False,
+            }
         actor, thread, session = self._scope(payload)
         snapshot = self._target_snapshot(operation, request)
         if operation.startswith("search."):
@@ -270,7 +289,20 @@ class PackSearchAuthorizationService:
             if not valid:
                 return {"ok": False, "mutated": False, "error_code": reason or "generic_bypass_blocked"}
             if spec.safe_mode_blocked and self.runtime._safe_mode_enabled():
-                return {"ok": False, "mutated": False, "error_code": "safe_mode_mutation_blocked"}
+                return {
+                    "ok": False,
+                    "mutated": False,
+                    "error_code": "safe_mode_mutation_blocked",
+                    "details": {
+                        "result": {
+                            "ok": False,
+                            "mutated": False,
+                            "error": "safe_mode_mutation_blocked",
+                            "failure_stage": "policy",
+                            "message": "Safe Mode policy blocks this mutation.",
+                        }
+                    },
+                }
             p = dict(action.get("parameters") if isinstance(action.get("parameters"), dict) else {})
             result = self._invoke(spec.operation, p, snapshot=action.get("target_snapshot"))
             ok = bool(result[0]) if isinstance(result, tuple) else bool(result.get("ok"))
@@ -291,7 +323,7 @@ class PackSearchAuthorizationService:
         if operation == "external_pack.enable": return self.runtime.packs_enable(p)
         if operation == "external_pack.grant": return self.runtime.packs_grant(p)
         if operation == "external_pack.remove": return self.runtime.delete_external_pack(str(p.get("pack_id") or ""), changed_by=actor)
-        if operation == "search.setup":
+        if operation in {"search.setup", "search.searxng.repair"}:
             built = self.runtime._build_search_setup_execution_plan(p)
             execution_plan = built.get("_execution_plan") or built.get("plan") or built
             return self.runtime._execute_search_setup_plan(execution_plan)

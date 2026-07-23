@@ -585,6 +585,7 @@ def _default_capabilities() -> list[CapabilityDefinition]:
                 ("pack.permission.grant", "Grant one bounded pack adapter permission", "local_filesystem", "reversible", False),
                 ("pack.lifecycle.remove", "Remove one exact pack version", "local_filesystem", "conditionally_reversible", False),
                 ("search.service.configure", "Configure the bounded managed search service", "local_host", "conditionally_reversible", True),
+                ("search.searxng.repair", "Repair the assistant-owned local SearXNG service", "local_host", "conditionally_reversible", True),
                 ("search.prerequisite.install", "Install the bounded managed-search prerequisite", "local_host", "conditionally_reversible", True),
             )
         ],

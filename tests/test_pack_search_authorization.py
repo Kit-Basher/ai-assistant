@@ -25,7 +25,7 @@ def _confirmation(plan: dict[str, object]) -> dict[str, object]:
 
 
 def test_all_v2f_operations_have_distinct_capability_executor_bindings() -> None:
-    assert len(SPECS) == 13
+    assert len(SPECS) == 14
     assert len({row.executor_id for row in SPECS.values()}) == len(SPECS)
     assert all(row.capability_id and row.rollback for row in SPECS.values())
 
@@ -134,6 +134,22 @@ def test_search_image_tag_or_runtime_plan_drift_invalidates_confirmation() -> No
         )
         assert not ok
         assert body["error"] == "mutation_plan_target_changed"
+
+
+def test_safe_mode_keeps_legacy_search_and_generic_llm_mutations_blocked() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        runtime = _runtime(Path(raw), safe_mode_enabled=True)
+
+        ok_search, search_body = runtime.route_pack_search_mutation("search.setup", {})
+        ok_fix, fix_body = runtime.route_provider_model_mutation("llm.fix", {})
+
+        assert not ok_search
+        assert search_body["error"] == "safe_mode_mutation_blocked"
+        assert search_body["failure_stage"] == "policy"
+        assert search_body["requires_confirmation"] is False
+        assert "plan" not in search_body
+        assert not ok_fix
+        assert fix_body["error"] == "safe_mode_mutation_blocked"
 
 
 def test_notification_delivery_ledger_blocks_duplicates_and_reconciles_crashes() -> None:

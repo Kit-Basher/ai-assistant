@@ -507,6 +507,18 @@ class ManagedLocalServiceExecutor:
                 journal=journal.to_dict(),
             )
         journal.record_step("preflight_port", ok=True, resource=f"127.0.0.1:{plan.host_port}")
+        config_snapshot, snapshot_error = self._capture_searxng_config_state(plan)
+        if snapshot_error:
+            journal.record_step("preflight_config_writable", ok=False, resource=plan.host_volume_path, reason=snapshot_error)
+            return ManagedLocalServiceExecutionResult(
+                ok=False,
+                service_id=plan.service_id,
+                selected_engine=plan.engine,
+                blocked_reason="managed_service_config_snapshot_failed",
+                error=snapshot_error,
+                plan=plan,
+                journal=journal.to_dict(),
+            )
         writable, writable_error = self._check_searxng_config_writable(plan)
         if not writable:
             journal.record_step("preflight_config_writable", ok=False, resource=plan.host_volume_path, reason=writable_error)
@@ -524,6 +536,14 @@ class ManagedLocalServiceExecutor:
         seeded, seed_error = self._seed_searxng_config(plan)
         if not seeded:
             journal.record_step("seed_config", ok=False, resource=plan.host_volume_path, error=seed_error)
+            config_rollback_ok, config_rollback_error = self._restore_searxng_config_state(plan, config_snapshot)
+            journal.record_rollback_step(
+                "restore_config",
+                ok=config_rollback_ok,
+                resource=plan.host_volume_path,
+                error=config_rollback_error,
+            )
+            journal.mark_rollback(ok=config_rollback_ok, restored_config=config_rollback_ok, error=config_rollback_error)
             return ManagedLocalServiceExecutionResult(
                 ok=False,
                 service_id=plan.service_id,
@@ -531,6 +551,10 @@ class ManagedLocalServiceExecutor:
                 blocked_reason="managed_service_config_dir_not_writable" if seed_error == "PermissionError" else "managed_service_config_seed_failed",
                 error=seed_error,
                 plan=plan,
+                rollback_attempted=True,
+                rollback_ok=config_rollback_ok,
+                cleanup_performed=config_rollback_ok,
+                cleanup_incomplete=not config_rollback_ok,
                 diagnostics={"operator_handoff": self._config_ownership_handoff(plan)} if seed_error == "PermissionError" else {},
                 journal=journal.to_dict(),
             )
@@ -539,6 +563,9 @@ class ManagedLocalServiceExecutor:
         pulled = self._run_fixed(plan.pull_argv())
         if pulled.returncode != 0:
             journal.record_step("pull_image", ok=False, resource=plan.image, error=self._short_process_error(pulled))
+            config_rollback_ok, config_rollback_error = self._restore_searxng_config_state(plan, config_snapshot)
+            journal.record_rollback_step("restore_config", ok=config_rollback_ok, resource=plan.host_volume_path, error=config_rollback_error)
+            journal.mark_rollback(ok=config_rollback_ok, restored_config=config_rollback_ok, error=config_rollback_error)
             return ManagedLocalServiceExecutionResult(
                 ok=False,
                 service_id=plan.service_id,
@@ -546,6 +573,10 @@ class ManagedLocalServiceExecutor:
                 blocked_reason="managed_service_pull_failed",
                 error=self._short_process_error(pulled),
                 plan=plan,
+                rollback_attempted=True,
+                rollback_ok=config_rollback_ok,
+                cleanup_performed=config_rollback_ok,
+                cleanup_incomplete=not config_rollback_ok,
                 journal=journal.to_dict(),
             )
         journal.record_step("pull_image", ok=True, resource=plan.image)
@@ -553,6 +584,9 @@ class ManagedLocalServiceExecutor:
         ran = self._run_fixed(plan.run_argv())
         if ran.returncode != 0:
             journal.record_step("run_container", ok=False, resource=plan.container_name, error=self._short_process_error(ran))
+            config_rollback_ok, config_rollback_error = self._restore_searxng_config_state(plan, config_snapshot)
+            journal.record_rollback_step("restore_config", ok=config_rollback_ok, resource=plan.host_volume_path, error=config_rollback_error)
+            journal.mark_rollback(ok=config_rollback_ok, restored_config=config_rollback_ok, error=config_rollback_error)
             return ManagedLocalServiceExecutionResult(
                 ok=False,
                 service_id=plan.service_id,
@@ -561,6 +595,10 @@ class ManagedLocalServiceExecutor:
                 blocked_reason="managed_service_run_failed",
                 error=self._short_process_error(ran),
                 plan=plan,
+                rollback_attempted=True,
+                rollback_ok=config_rollback_ok,
+                cleanup_performed=config_rollback_ok,
+                cleanup_incomplete=not config_rollback_ok,
                 journal=journal.to_dict(),
             )
         journal.record_step("run_container", ok=True, resource=plan.container_name)
@@ -572,6 +610,24 @@ class ManagedLocalServiceExecutor:
             diagnostics = self._capture_failure_diagnostics(plan, health_diagnostics)
             journal.record_step("capture_failure_diagnostics", ok=True, resource=plan.container_name, diagnostics=diagnostics)
             rollback_ok, rollback_error = self._rollback_owned_setup(plan, journal)
+            container_rollback_ok = rollback_ok
+            config_rollback_ok, config_rollback_error = self._restore_searxng_config_state(plan, config_snapshot)
+            journal.record_rollback_step(
+                "restore_config",
+                ok=config_rollback_ok,
+                resource=plan.host_volume_path,
+                error=config_rollback_error,
+            )
+            rollback_ok = rollback_ok and config_rollback_ok
+            rollback_error = "; ".join(
+                item for item in (rollback_error, config_rollback_error) if item
+            ) or None
+            journal.mark_rollback(
+                ok=rollback_ok,
+                removed_created_container=container_rollback_ok,
+                restored_config=config_rollback_ok,
+                error=rollback_error,
+            )
             message = (
                 "Health check failed after the approved container started. I cleaned up the failed setup. Nothing was left running."
                 if rollback_ok
@@ -605,6 +661,63 @@ class ManagedLocalServiceExecutor:
             diagnostics=health_diagnostics,
             journal=journal.to_dict(),
         )
+
+    def _capture_searxng_config_state(
+        self,
+        plan: ManagedLocalServiceSetupPlan,
+    ) -> tuple[dict[str, Any], str | None]:
+        root = Path(str(plan.host_volume_path or "")).expanduser().resolve()
+        approved = (self._managed_root / APPROVED_SEARXNG_VOLUME).resolve()
+        if root != approved:
+            return {}, "config_volume_not_approved"
+        settings = root / "settings.yml"
+        try:
+            if settings.is_symlink():
+                return {}, "approved_settings_symlink_forbidden"
+            missing_directories: list[str] = []
+            cursor = root
+            while cursor != self._managed_root and self._managed_root in cursor.parents:
+                if not cursor.exists():
+                    missing_directories.append(str(cursor))
+                cursor = cursor.parent
+            return {
+                "settings_existed": settings.is_file(),
+                "settings_content": settings.read_bytes() if settings.is_file() else None,
+                "missing_directories": missing_directories,
+            }, None
+        except OSError as exc:
+            return {}, exc.__class__.__name__
+
+    @staticmethod
+    def _restore_searxng_config_state(
+        plan: ManagedLocalServiceSetupPlan,
+        snapshot: dict[str, Any],
+    ) -> tuple[bool, str | None]:
+        settings = Path(str(plan.host_volume_path or "")).expanduser().resolve() / "settings.yml"
+        incomplete: list[str] = []
+        try:
+            if bool(snapshot.get("settings_existed")):
+                content = snapshot.get("settings_content")
+                if not isinstance(content, bytes):
+                    return False, "config_snapshot_invalid"
+                settings.parent.mkdir(parents=True, exist_ok=True)
+                settings.write_bytes(content)
+            elif settings.exists():
+                settings.unlink()
+            for raw_path in snapshot.get("missing_directories") or []:
+                path = Path(str(raw_path)).resolve()
+                try:
+                    path.rmdir()
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    # Never remove a directory that now contains anything else.
+                    incomplete.append(f"{path.name}:{exc.__class__.__name__}")
+        except OSError as exc:
+            return False, exc.__class__.__name__
+        if incomplete:
+            return False, "config_rollback_incomplete:" + ",".join(incomplete)
+        return True, None
 
     def execute_from_pending(self, params: dict[str, Any]) -> ManagedLocalServiceExecutionResult:
         service_id = str(params.get("service_id") or "searxng").strip().lower() or "searxng"
@@ -845,6 +958,20 @@ class ManagedLocalServiceExecutor:
                 diagnostics={"repaired_existing_container": True, "repair_action": "start_existing_container", **health_diagnostics},
                 journal=journal.to_dict(),
             )
+        stopped = self._run_fixed([effective_plan.engine, "stop", effective_plan.container_name])
+        rollback_ok = stopped.returncode == 0
+        rollback_error = None if rollback_ok else self._short_process_error(stopped)
+        journal.record_rollback_step(
+            "restore_existing_container_stopped_state",
+            ok=rollback_ok,
+            resource=effective_plan.container_name,
+            error=rollback_error,
+        )
+        journal.mark_rollback(
+            ok=rollback_ok,
+            restored_prior_stopped_state=rollback_ok,
+            error=rollback_error,
+        )
         return ManagedLocalServiceExecutionResult(
             ok=False,
             service_id=effective_plan.service_id,
@@ -852,10 +979,18 @@ class ManagedLocalServiceExecutor:
             reachable=False,
             blocked_reason="managed_service_startup_pending",
             error=(
-                "The approved SearXNG container was started, but it was not reachable within the bounded chat readiness window. "
-                "Startup may still be continuing; check /search/status and retry the lookup when it reports configured_running."
+                "The approved SearXNG container was started but failed the bounded chat readiness window; "
+                + (
+                    "its prior stopped state was restored."
+                    if rollback_ok
+                    else f"restoring its prior stopped state failed: {rollback_error or 'unknown rollback error'}."
+                )
             ),
             plan=effective_plan,
+            rollback_attempted=True,
+            rollback_ok=rollback_ok,
+            cleanup_performed=rollback_ok,
+            cleanup_incomplete=not rollback_ok,
             diagnostics={"repaired_existing_container": True, "repair_action": "start_existing_container", **health_diagnostics},
             journal=journal.to_dict(),
         )

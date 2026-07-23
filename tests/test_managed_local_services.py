@@ -1292,16 +1292,16 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertFalse(runtime.config.search_enabled)
         self.assertEqual([], runner.calls)
 
-    def test_search_setup_apply_podman_prerequisite_safe_mode_blocks_clearly(self) -> None:
+    def test_podman_prerequisite_safe_mode_denies_without_impossible_approval_preview(self) -> None:
         runtime, runner = self._runtime_with_podman_prerequisite()
         runtime.config = replace(runtime.config, safe_mode_enabled=True)
-        plan_payload = runtime.search_setup_plan({})
-        plan = plan_payload["plan"]
-
-        result = runtime.apply_search_setup(_universal_apply(plan))
+        result = runtime.search_setup_plan({})
 
         self.assertFalse(result["ok"])
         self.assertEqual("safe_mode_mutation_blocked", result["error"])
+        self.assertEqual("policy", result["failure_stage"])
+        self.assertFalse(result["requires_confirmation"])
+        self.assertNotIn("plan", result)
         self.assertFalse(result["mutated"])
         self.assertEqual([], runner.calls)
         self.assertFalse(runtime.config.search_enabled)
@@ -1645,7 +1645,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertFalse(setup.get("requires_docker_fallback_confirmation"))
         plan_mode = setup.get("plan_mode") if isinstance(setup.get("plan_mode"), dict) else {}
         self.assertEqual("universal_mutation_plan", plan_mode.get("policy_layer"))
-        self.assertEqual("search.setup", plan_mode.get("action_type"))
+        self.assertEqual("search.searxng.repair", plan_mode.get("action_type"))
         self.assertEqual("mutating", plan_mode.get("classification"))
         self.assertTrue(plan_mode.get("requires_confirmation"))
         self.assertTrue(plan_mode.get("plan_id"))
@@ -1754,6 +1754,78 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         setup_payload = body.get("setup", {}) if isinstance(body.get("setup"), dict) else {}
         self.assertTrue(setup_payload.get("did_configure"))
 
+    def test_approved_searxng_repair_succeeds_in_safe_mode_without_llm_fix(self) -> None:
+        runtime = self._runtime_with_engine("podman")
+        runtime.config = replace(runtime.config, safe_mode_enabled=True)
+        runtime.llm_fixit = mock.Mock(side_effect=AssertionError("generic llm.fix must not run"))  # type: ignore[method-assign]
+        runner = runtime._managed_local_service_executor._runner  # noqa: SLF001
+
+        preview = runtime.search_setup_plan({})
+        self.assertTrue(preview["ok"])
+        self.assertTrue(preview["requires_confirmation"])
+        self.assertEqual("search.searxng.repair", preview["plan"]["action_type"])
+        self.assertEqual([], runner.calls)
+
+        with mock.patch("agent.search.safe_web_search.build_opener", return_value=_FakeSearchOpener({"results": []})):
+            result = runtime.apply_search_setup(_universal_apply(preview["plan"]))
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["did_configure"])
+        self.assertTrue(runtime.config.search_enabled)
+        runtime.llm_fixit.assert_not_called()
+
+    def test_safe_mode_searxng_repair_denies_execution_without_valid_approval(self) -> None:
+        runtime = self._runtime_with_engine("podman")
+        runtime.config = replace(runtime.config, safe_mode_enabled=True)
+        runner = runtime._managed_local_service_executor._runner  # noqa: SLF001
+
+        ok, result = runtime.route_pack_search_mutation("search.searxng.repair", {"confirm": True})
+
+        self.assertFalse(ok)
+        self.assertEqual("boolean_or_legacy_confirmation_not_authorization", result["error"])
+        self.assertFalse(result["mutated"])
+        self.assertEqual([], runner.calls)
+
+    def test_safe_mode_searxng_repair_uses_8888_when_8080_is_occupied(self) -> None:
+        runtime = self._runtime_with_engine("podman", ports={8080: False, 8888: True})
+        runtime.config = replace(runtime.config, safe_mode_enabled=True)
+
+        preview = runtime.search_setup_plan({})
+        self.assertEqual("127.0.0.1:8888:8080", preview["plan"]["loopback_bind"])
+        with mock.patch("agent.search.safe_web_search.build_opener", return_value=_FakeSearchOpener({"results": []})):
+            result = runtime.apply_search_setup(_universal_apply(preview["plan"]))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("http://127.0.0.1:8888", runtime.config.searxng_base_url)
+
+    def test_safe_mode_failed_readiness_restores_only_changed_searxng_resources(self) -> None:
+        runtime = self._runtime_with_engine("podman")
+        runtime.config = replace(runtime.config, safe_mode_enabled=True)
+        config_path = Path(self.tmpdir.name) / "memory" / "local_services" / "searxng" / "settings.yml"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text("prior assistant-owned config\n", encoding="utf-8")
+        runner = _FakeManagedServiceRunner()
+        runtime._managed_local_service_executor = ManagedLocalServiceExecutor(  # noqa: SLF001
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "podman" else None,
+            runner=runner,
+            health_checker=lambda _url: False,
+            port_checker=lambda _port: True,
+            health_timeout_seconds=0.01,
+            health_poll_interval_seconds=0.01,
+        )
+
+        preview = runtime.search_setup_plan({})
+        result = runtime.apply_search_setup(_universal_apply(preview["plan"]))
+
+        self.assertFalse(result["ok"])
+        self.assertEqual("readiness", result["failure_stage"])
+        self.assertTrue(result["rollback_ok"])
+        self.assertEqual("prior assistant-owned config\n", config_path.read_text(encoding="utf-8"))
+        argv_rows = [call["argv"] for call in runner.calls]
+        self.assertIn(["podman", "stop", "personal-agent-searxng"], argv_rows)
+        self.assertIn(["podman", "rm", "personal-agent-searxng"], argv_rows)
+
     def test_existing_fallback_container_reuse_configures_runtime_to_actual_port(self) -> None:
         runtime = self._runtime_with_engine("podman")
         runner = _FakeManagedServiceRunner(
@@ -1839,11 +1911,17 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         )
         _body, first_text = self._chat(runtime, "enable web search")
 
-        self._chat(runtime, "yes", history=[{"role": "user", "content": "enable web search"}, {"role": "assistant", "content": first_text}])
+        _body, second_text = self._chat(
+            runtime,
+            "yes",
+            history=[{"role": "user", "content": "enable web search"}, {"role": "assistant", "content": first_text}],
+        )
 
         row = runtime._managed_action_journal_store.recent(limit=1)[0]  # noqa: SLF001
         self.assertEqual("recovery_needed", row["status"])
         self.assertTrue(row["recovery_needed"])
+        self.assertIn("rollback did not complete", second_text)
+        self.assertIn("original failure was during readiness", second_text.lower())
 
     def test_expired_yes_returns_explicit_expiry_and_does_not_execute_setup(self) -> None:
         runtime = self._runtime_with_engine("podman")
@@ -1911,6 +1989,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         _body, second_text = self._chat(runtime, "yes", history=[{"role": "user", "content": "enable web search"}, {"role": "assistant", "content": first_text}])
 
         self.assertIn("SearXNG setup did not complete", second_text)
+        self.assertIn("readiness verification failed", second_text)
         self.assertIn("cleaned up the failed setup", second_text)
         self.assertIn("Nothing was left running", second_text)
         argv_rows = [call["argv"] for call in runner.calls]

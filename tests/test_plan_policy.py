@@ -150,9 +150,9 @@ class TestPlanModePolicy(unittest.TestCase):
         body = runtime.search_setup_plan({"base_url": "http://127.0.0.1:8888"})
 
         plan = body["plan"]
-        self.assertEqual("search.setup", plan["action_type"])
-        self.assertEqual("search.service.configure", plan["capability_id"])
-        self.assertEqual("search.setup.v1", plan["executor_id"])
+        self.assertEqual("search.searxng.repair", plan["action_type"])
+        self.assertEqual("search.searxng.repair", plan["capability_id"])
+        self.assertEqual("search.searxng.repair.v1", plan["executor_id"])
         self.assertTrue(plan["confirmation_requirement"]["required"])
         self.assertTrue(plan["recovery"]["rollback_available"])
         self.assertIn("service:personal-agent-searxng", str(plan["mutation_inventory"]))
