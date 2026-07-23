@@ -24,8 +24,13 @@ def select_model_for_task(
     policy_name: str = "default",
     policy: dict[str, Any] | ValuePolicy | None = None,
     optimization_profile: str | None = None,
+    exclude_model_ids: Iterable[str] | None = None,
 ) -> dict[str, Any]:
-    normalized_inventory = normalize_model_inventory(inventory)
+    excluded_source = (exclude_model_ids,) if isinstance(exclude_model_ids, str) else (exclude_model_ids or ())
+    excluded = {str(item or "").strip() for item in excluded_source if str(item or "").strip()}
+    normalized_inventory = [
+        item for item in normalize_model_inventory(inventory) if str(item.get("id") or "").strip() not in excluded
+    ]
     normalized_task = normalize_task_request(task_request)
     if isinstance(policy, ValuePolicy):
         normalized_policy = policy

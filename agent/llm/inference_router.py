@@ -429,6 +429,7 @@ class InferenceRouter:
                 llm_config=llm_config,
                 allow_remote_fallback=allow_remote_fallback,
             ),
+            exclude_model_ids=(metadata or {}).get("exclude_model_ids"),
         )
         if selection.get("selected_model"):
             return {"inventory": inventory, "selection": selection}

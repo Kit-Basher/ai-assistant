@@ -175,7 +175,9 @@ class TestInferenceRouter(unittest.TestCase):
             )
         self.assertFalse(bool(result.get("ok")))
         self.assertNotEqual(build_no_llm_public_message(), result.get("text"))
-        self.assertIn("runtime is ready", str(result.get("text") or "").lower())
+        self.assertIn("runtime is healthy", str(result.get("text") or "").lower())
+        self.assertIn("no usable llm chat model", str(result.get("text") or "").lower())
+        self.assertNotIn("chat is temporarily busy", str(result.get("text") or "").lower())
 
     def test_route_inference_emits_selection_and_provider_timing_events(self) -> None:
         llm = _FakeChatLLM()

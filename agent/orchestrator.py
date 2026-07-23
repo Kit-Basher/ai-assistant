@@ -125,7 +125,12 @@ import agent.opinion_gate as opinion_gate
 from agent.skills_loader import SkillLoader
 from agent.ask_timeframe import parse_timeframe
 from agent.cards import render_cards_markdown
-from agent.nl_router import build_cards_payload, looks_like_system_performance_question, nl_route
+from agent.nl_router import (
+    build_cards_payload,
+    looks_like_system_health_request,
+    looks_like_system_performance_question,
+    nl_route,
+)
 from agent.nl_policy import can_run_nl_skill
 from agent.friction import compute_next_action, compute_options, compute_plan, compute_summary
 from agent.identity import (
@@ -198,7 +203,12 @@ from agent.setup_chat_flow import (
 )
 from agent.search.search_setup_ux import build_search_setup_ux, render_search_setup_ux
 from agent.persona import normalize_persona_text
-from agent.public_chat import build_no_llm_public_message, build_public_sentence_text, normalize_public_assistant_text
+from agent.public_chat import (
+    build_llm_timeout_public_message,
+    build_no_llm_public_message,
+    build_public_sentence_text,
+    normalize_public_assistant_text,
+)
 from agent.skills.system_health_analyzer import build_system_health_report
 from agent.skills.system_health import collect_system_health
 from agent.skills.system_health_summary import render_system_health_summary
@@ -436,6 +446,7 @@ _GROUNDED_QUERY_ESCAPE_RE = re.compile(
     r")"
 )
 _INTERPRETATION_FOLLOWUP_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("retry", re.compile(r"^\s*(?:please\s+)?try\s+again(?:\s+please)?[.!?]*\s*$", re.IGNORECASE)),
     ("top_memory", re.compile(r"\b(what is using(?: up)? my memory the most|using the most memory|using up my memory|memory the most)\b", re.IGNORECASE)),
     ("explain", re.compile(r"\b(explain it to me|explain that|what does that mean|summari[sz]e that|what'?s the important part)\b", re.IGNORECASE)),
     ("concern", re.compile(r"\b(should i worry|do i need to worry|is that bad|is that normal|anything unusual|is there anything to be concerned about there)\b", re.IGNORECASE)),
@@ -5731,6 +5742,10 @@ class Orchestrator:
             followup_kind = "explain"
         if not followup_kind:
             return None
+        if followup_kind == "retry":
+            if self._is_system_health_context(context):
+                return self._system_health_response(user_id, "system health check")
+            return None
         if model_status_why:
             payload = context.get("payload") if isinstance(context.get("payload"), dict) else {}
             model_id = (
@@ -6264,6 +6279,20 @@ class Orchestrator:
             return True
         user_text = str(context.get("user_text") or "").strip().lower()
         return any(token in user_text for token in ("pc", "cpu", "gpu", "ram", "storage", "machine", "system"))
+
+    @staticmethod
+    def _is_system_health_context(context: dict[str, Any]) -> bool:
+        if not isinstance(context, dict):
+            return False
+        payload = context.get("payload") if isinstance(context.get("payload"), dict) else {}
+        used_tools = {
+            str(item).strip().lower()
+            for item in (context.get("used_tools") if isinstance(context.get("used_tools"), list) else [])
+            if str(item).strip()
+        }
+        return str(payload.get("kind") or "").strip().lower() == "observe_system_health" or (
+            "observe_system_health" in used_tools
+        )
 
     def _vague_system_trouble_clarification_response(self, *, used_memory: bool, reason: str) -> OrchestratorResponse:
         question = "What symptom should I focus on: slow, broken, full, not detected, or something else?"
@@ -16215,6 +16244,8 @@ class Orchestrator:
                     "summary": str(result.get("user_text") or "").strip() or "Agent status ready.",
                 },
             )
+        if normalized_kind == "operational_observe" and looks_like_system_health_request(text):
+            return self._system_health_response(user_id, text)
         nl_decision = nl_route(text)
         if str(nl_decision.get("intent") or "") not in {"OBSERVE_PC", "EXPLAIN_PREVIOUS"}:
             result = self._tool_handler_observe_system_health({"question": text}, user_id)
@@ -16248,6 +16279,22 @@ class Orchestrator:
                 "kind": str(nl_decision.get("intent") or "OBSERVE_PC"),
                 "summary": summary,
                 **payload,
+            },
+        )
+
+    def _system_health_response(self, user_id: str, text: str) -> OrchestratorResponse:
+        result = self._tool_handler_observe_system_health({"question": text}, user_id)
+        summary = str(result.get("user_text") or "").strip() or "System health report ready."
+        return self._runtime_truth_response(
+            text=summary,
+            route="operational_status",
+            used_runtime_state=False,
+            used_tools=["observe_system_health"],
+            skip_post_response_hooks=True,
+            payload={
+                "type": "operational_status",
+                "kind": "observe_system_health",
+                "summary": summary,
             },
         )
 
@@ -19606,7 +19653,11 @@ class Orchestrator:
         explicit_timeout_seconds = float(payload.get("timeout_seconds") or 0) or None
         request_id = str(context.get("request_id") or "").strip() or None
 
-        def _route_inference_kwargs(*, latency_fallback: bool) -> dict[str, Any]:
+        def _route_inference_kwargs(
+            *,
+            latency_fallback: bool,
+            exclude_model_ids: list[str] | None = None,
+        ) -> dict[str, Any]:
             routed_messages = (
                 list(getattr(prepared, "messages", []))
                 if prepared is not None and isinstance(getattr(prepared, "messages", None), list)
@@ -19627,7 +19678,7 @@ class Orchestrator:
                 if prepared is not None
                 else None
             )
-            if latency_fallback and channel == "telegram" and prepared_selection_reason == "default_target_pin":
+            if latency_fallback and channel == "telegram":
                 provider_override = None
                 model_override = None
             effective_timeout_seconds = explicit_timeout_seconds
@@ -19672,6 +19723,7 @@ class Orchestrator:
                     "latency_fallback": bool(latency_fallback),
                     "runtime_ready": bool(self._runtime_ready_for_chat()),
                     "selection_reason": prepared_selection_reason or None,
+                    "exclude_model_ids": list(exclude_model_ids or []),
                 },
             }
         try:
@@ -19683,6 +19735,25 @@ class Orchestrator:
                 router_result = route_inference(**_route_inference_kwargs(latency_fallback=False))
                 if channel == "telegram" and self._router_error_kind(router_result) == "timeout":
                     slow_model = self._router_attempt_model(router_result)
+                    initial_selection = (
+                        router_result.get("data", {}).get("selection")
+                        if isinstance(router_result.get("data"), dict)
+                        and isinstance(router_result.get("data", {}).get("selection"), dict)
+                        else {}
+                    )
+                    reported_fallbacks = [
+                        str(item).strip()
+                        for item in (
+                            initial_selection.get("fallbacks")
+                            if isinstance(initial_selection.get("fallbacks"), list)
+                            else []
+                        )
+                        if str(item).strip()
+                    ]
+                    distinct_candidates = [
+                        item for item in reported_fallbacks if item != str(slow_model or "").strip()
+                    ]
+                    should_select_fallback = bool(distinct_candidates) or not reported_fallbacks
                     initial_duration_ms = int(router_result.get("duration_ms") or 0)
                     self._record_runtime_event(
                         "telegram_latency_guard",
@@ -19691,22 +19762,50 @@ class Orchestrator:
                         source=source_surface,
                         model_selected=slow_model,
                         duration_ms=initial_duration_ms,
-                        fallback_used=True,
+                        fallback_used=should_select_fallback,
                     )
-                    fallback_result = route_inference(**_route_inference_kwargs(latency_fallback=True))
-                    fallback_model = self._router_attempt_model(fallback_result)
-                    self._record_runtime_event(
-                        "telegram_latency_fallback",
-                        request_id=request_id,
-                        trace_id=trace_id,
-                        source=source_surface,
-                        slow_model=slow_model,
-                        fallback_model=fallback_model,
-                        duration_ms=int(fallback_result.get("duration_ms") or initial_duration_ms),
-                        fallback_used=True,
-                        ok=bool(fallback_result.get("ok")),
-                    )
-                    router_result = fallback_result
+                    if should_select_fallback:
+                        fallback_result = route_inference(
+                            **_route_inference_kwargs(
+                                latency_fallback=True,
+                                exclude_model_ids=[slow_model] if slow_model else [],
+                            )
+                        )
+                        fallback_model = self._router_attempt_model(fallback_result)
+                        duplicate_model = bool(slow_model and fallback_model and fallback_model == slow_model)
+                        distinct_model_selected = bool(fallback_model) and not duplicate_model
+                        self._record_runtime_event(
+                            "telegram_latency_fallback",
+                            request_id=request_id,
+                            trace_id=trace_id,
+                            source=source_surface,
+                            slow_model=slow_model,
+                            fallback_model=fallback_model,
+                            duration_ms=int(fallback_result.get("duration_ms") or initial_duration_ms),
+                            fallback_used=distinct_model_selected,
+                            duplicate_model_rejected=duplicate_model,
+                            skipped_reason=(
+                                "duplicate_model_rejected"
+                                if duplicate_model
+                                else (None if distinct_model_selected else "no_distinct_healthy_fallback")
+                            ),
+                            ok=bool(fallback_result.get("ok")) and distinct_model_selected,
+                        )
+                        if distinct_model_selected:
+                            router_result = fallback_result
+                    else:
+                        self._record_runtime_event(
+                            "telegram_latency_fallback",
+                            request_id=request_id,
+                            trace_id=trace_id,
+                            source=source_surface,
+                            slow_model=slow_model,
+                            fallback_model=None,
+                            duration_ms=initial_duration_ms,
+                            fallback_used=False,
+                            skipped_reason="no_distinct_healthy_fallback",
+                            ok=False,
+                        )
                 router_data = (
                     router_result.get("data")
                     if isinstance(router_result.get("data"), dict)
@@ -19778,6 +19877,13 @@ class Orchestrator:
                 fallback_count=len(selection_fallbacks),
             )
             llm_text = str(router_result.get("text") or "").strip()
+            if self._router_error_kind(router_result) == "timeout":
+                return self._merge_response_data(
+                    OrchestratorResponse(
+                        build_llm_timeout_public_message(runtime_ready=self._runtime_ready_for_chat())
+                    ),
+                    **response_common,
+                )
             degraded_response = self._deterministic_chat_degradation_response(
                 text,
                 error_kind=str(response_common.get("error_kind") or "").strip() or None,
@@ -22019,6 +22125,10 @@ class Orchestrator:
                 text = cleaned_text
                 memory_disabled_for_turn = True
             effective_user_text = cleaned_text if memory_disabled_for_turn else text
+            if not str(effective_user_text or "").strip().startswith("/") and looks_like_system_health_request(
+                effective_user_text
+            ):
+                return self._system_health_response(user_id, effective_user_text)
             command_needs_preview = bool(cmd and cmd.name in MUTATING_ASSISTANT_COMMANDS)
             if cmd and cmd.name == "done" and not str(cmd.args or "").strip().isdigit():
                 command_needs_preview = False

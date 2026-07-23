@@ -40,6 +40,10 @@ class TestSetupChatFlow(unittest.TestCase):
             ("can you dig deeper into my system?", "operational_status", "operational_observe"),
             ("run a system check", "operational_status", "operational_observe"),
             ("quick system health check", "operational_status", "operational_observe"),
+            ("can you run another system check for me please", "operational_status", "operational_observe"),
+            ("run another system check", "operational_status", "operational_observe"),
+            ("check the system again", "operational_status", "operational_observe"),
+            ("system health check", "operational_status", "operational_observe"),
         )
         for text, expected_route, expected_kind in cases:
             with self.subTest(text=text):

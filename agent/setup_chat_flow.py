@@ -5,7 +5,7 @@ from typing import Any
 import re
 
 from agent.packs.capability_recommendation import classify_capability_gap_request
-from agent.nl_router import classify_free_text
+from agent.nl_router import classify_free_text, looks_like_system_health_request
 
 
 _OPENROUTER_KEY_RE = re.compile(r"\b(sk-or-v1-[A-Za-z0-9_-]{16,}|sk-or-[A-Za-z0-9_-]{16,}|sk-[A-Za-z0-9_-]{20,})\b")
@@ -1201,7 +1201,7 @@ def _classify_operational_route(text: str | None, normalized: str) -> dict[str, 
             "generic_allowed": False,
             "fallback_reason": "operational_status",
         }
-    if any(phrase in normalized for phrase in _OPERATIONAL_OBSERVE_PHRASES):
+    if looks_like_system_health_request(text) or any(phrase in normalized for phrase in _OPERATIONAL_OBSERVE_PHRASES):
         return {
             "route": "operational_status",
             "kind": "operational_observe",
@@ -2572,6 +2572,15 @@ def _classify_runtime_chat_route_raw(
             "kind": "assistant_capabilities",
             "generic_allowed": False,
             "fallback_reason": "assistant_capabilities",
+        }
+    # Health checks are observations, not shell commands.  Keep this ahead of
+    # the broad imperative-command classifier (for example, "run another ...").
+    if looks_like_system_health_request(text):
+        return {
+            "route": "operational_status",
+            "kind": "operational_observe",
+            "generic_allowed": False,
+            "fallback_reason": "operational_status",
         }
     shell_route = _classify_shell_route(text, normalized)
     if shell_route is not None:

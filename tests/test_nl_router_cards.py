@@ -33,6 +33,14 @@ class TestNLRouterCards(unittest.TestCase):
         self.assertEqual(classify_free_text("can you run a check and see if you can learn more?"), "OBSERVE_PC")
         self.assertEqual(classify_free_text("can you dig deeper into my system?"), "OBSERVE_PC")
         self.assertEqual(classify_free_text("run a system check"), "OBSERVE_PC")
+        for phrase in (
+            "can you run another system check for me please",
+            "run another system check",
+            "check the system again",
+            "system health check",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertEqual(classify_free_text(phrase), "OBSERVE_PC")
         self.assertEqual(classify_free_text("my download is going slowly, can you tell why?"), "EXPLAIN_PREVIOUS")
         self.assertEqual(classify_free_text("my pc is slow"), "OBSERVE_PC")
         self.assertEqual(classify_free_text("laggy system"), "OBSERVE_PC")

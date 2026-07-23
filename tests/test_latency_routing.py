@@ -170,6 +170,17 @@ class TestLatencyRouting(unittest.TestCase):
             {"ollama:qwen3.5:4b", "ollama:qwen2.5:3b-instruct"},
         )
 
+    def test_latency_fallback_selection_excludes_timed_out_model(self) -> None:
+        selection = select_model_for_task(
+            _inventory_rows(),
+            {"task_type": "chat", "requirements": ["chat"], "preferred_local": True},
+            allow_remote_fallback=True,
+            channel="telegram",
+            latency_fallback=True,
+            exclude_model_ids={"ollama:qwen3.5:4b"},
+        )
+        self.assertNotEqual("ollama:qwen3.5:4b", selection["selected_model"])
+
     def test_telegram_chat_timeout_triggers_latency_fallback(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
         route_calls: list[dict[str, object]] = []

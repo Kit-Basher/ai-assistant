@@ -90,6 +90,13 @@ _OBSERVE_DEEPER = re.compile(
     r"run a system check|check the system|scan the system|inspect the machine more|learn more)\b",
     re.IGNORECASE,
 )
+_SYSTEM_HEALTH_REQUEST = re.compile(
+    r"^\s*(?:can you\s+)?(?:run|do|perform)\s+(?:(?:an?|another|one more)\s+)?(?:quick\s+)?system\s+"
+    r"(?:health\s+)?check(?:\s+for me)?(?:\s+please)?[.!?]*\s*$|"
+    r"^\s*(?:can you\s+)?check\s+(?:the\s+)?system\s+again(?:\s+for me)?(?:\s+please)?[.!?]*\s*$|"
+    r"^\s*system\s+health\s+check[.!?]*\s*$",
+    re.IGNORECASE,
+)
 _EXPLAIN = re.compile(r"\b(explain|why|what changed|change[d]?|previous|last time|since)\b", re.IGNORECASE)
 _MEMORY_WRITE = re.compile(
     r"^(remember that|from now on|remember this|set max cards to|turn confidence (on|off)|default compare (on|off)|daily brief (on|off)|set disk delta threshold to|only send if service unhealthy|set open loops due window to)\b",
@@ -257,6 +264,10 @@ def looks_like_system_performance_question(text: str) -> bool:
     return bool(_OBSERVE_PERFORMANCE.search(lowered) and _OBSERVE_PERFORMANCE_CONTEXT.search(lowered))
 
 
+def looks_like_system_health_request(text: str) -> bool:
+    return bool(_SYSTEM_HEALTH_REQUEST.search(str(text or "")))
+
+
 def _looks_like_network_observation(text: str) -> bool:
     lowered = (text or "").lower()
     return bool(
@@ -311,6 +322,8 @@ def classify_free_text(text: str) -> str:
         return "EXPLAIN_PREVIOUS"
     if _looks_like_coding_request(lowered):
         return "UNKNOWN"
+    if looks_like_system_health_request(lowered):
+        return "OBSERVE_PC"
     if _EXPLAIN.search(lowered) and (
         _OBSERVE_DISK.search(lowered)
         or _OBSERVE_RESOURCE.search(lowered)

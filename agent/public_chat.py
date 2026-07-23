@@ -47,7 +47,11 @@ _INTERNAL_JSON_KEYS = {
 }
 _JSON_OBJECT_RE = re.compile(r"^\s*[\[{].*[\]}]\s*$", re.DOTALL)
 _NO_LLM_PUBLIC_MESSAGE = "I’m not ready to chat yet. Open Setup to finish getting me ready."
-_READY_LLM_PUBLIC_MESSAGE = "The runtime is ready. Chat is temporarily busy, so try again in a moment or ask for status or setup help."
+_READY_LLM_PUBLIC_MESSAGE = (
+    "The Personal Agent runtime is healthy, but no usable LLM chat model is available right now. "
+    "Check model status or try again after the model is healthy."
+)
+_LLM_TIMEOUT_PUBLIC_MESSAGE = "The LLM timed out before producing a response. The Personal Agent runtime itself is still healthy; please try again."
 _NO_LLM_ERROR_KINDS = {
     "llm_unavailable",
     "no_chat_model",
@@ -151,6 +155,12 @@ def build_public_sentence_text(*parts: str | None) -> str:
 
 def build_no_llm_public_message(*, runtime_ready: bool = False) -> str:
     return _READY_LLM_PUBLIC_MESSAGE if runtime_ready else _NO_LLM_PUBLIC_MESSAGE
+
+
+def build_llm_timeout_public_message(*, runtime_ready: bool = False) -> str:
+    if runtime_ready:
+        return _LLM_TIMEOUT_PUBLIC_MESSAGE
+    return "The LLM timed out before producing a response. Please try again."
 
 
 def classify_trivial_social_turn(text: str | None) -> str | None:

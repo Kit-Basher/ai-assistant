@@ -155,6 +155,48 @@ class TestSystemHealthSkill(unittest.TestCase):
             finally:
                 db.close()
 
+    def test_exact_system_health_phrases_and_retry_bypass_llm(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = MemoryDB(os.path.join(tmpdir, "test.db"))
+            schema_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "memory", "schema.sql"))
+            db.init_schema(schema_path)
+            orchestrator = Orchestrator(
+                db=db,
+                skills_path=os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "skills")),
+                log_path=os.path.join(tmpdir, "events.log"),
+                timezone="UTC",
+                llm_client=None,
+            )
+            phrases = (
+                "can you run another system check for me please",
+                "run another system check",
+                "check the system again",
+                "system health check",
+            )
+            try:
+                with patch.object(
+                    orchestrator,
+                    "_tool_handler_observe_system_health",
+                    return_value={"ok": True, "user_text": "System health\nOverall: OK"},
+                ) as health_handler, patch(
+                    "agent.orchestrator.route_inference",
+                    side_effect=AssertionError("system health must not invoke the LLM"),
+                ):
+                    for phrase in phrases:
+                        with self.subTest(phrase=phrase):
+                            response = orchestrator.handle_message(phrase, "user-1")
+                            self.assertEqual("operational_status", response.data.get("route"))
+                            self.assertEqual(["observe_system_health"], response.data.get("used_tools"))
+                            self.assertIn("Overall: OK", response.text)
+
+                    retry = orchestrator.handle_message("try again", "user-1")
+
+                self.assertEqual("operational_status", retry.data.get("route"))
+                self.assertEqual(["observe_system_health"], retry.data.get("used_tools"))
+                self.assertEqual(5, health_handler.call_count)
+            finally:
+                db.close()
+
 
 if __name__ == "__main__":
     unittest.main()

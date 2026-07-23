@@ -3024,6 +3024,62 @@ class TestOrchestrator(unittest.TestCase):
         fallback_meta = route_calls[1].get("metadata") if isinstance(route_calls[1].get("metadata"), dict) else {}
         self.assertTrue(bool(fallback_meta.get("latency_fallback")))
 
+    def test_telegram_timeout_does_not_retry_identical_fallback_model(self) -> None:
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=None,
+            chat_runtime_adapter=_PreparedChatAdapter(),
+        )
+        route_calls: list[dict[str, object]] = []
+
+        def _timed_out_route(**kwargs: object) -> dict[str, object]:
+            route_calls.append(dict(kwargs))
+            return {
+                "ok": False,
+                "text": "The runtime is ready. Chat is temporarily busy.",
+                "provider": "ollama",
+                "model": "ollama:qwen3.5:4b",
+                "task_type": "chat",
+                "selection_reason": "timeout",
+                "fallback_used": False,
+                "error_kind": "timeout",
+                "error_class": "timeout",
+                "duration_ms": 5000,
+                "attempts": [{"provider": "ollama", "model": "ollama:qwen3.5:4b", "reason": "timeout"}],
+                "data": {
+                    "selection": {
+                        "selected_model": "ollama:qwen3.5:4b",
+                        "provider": "ollama",
+                        "fallbacks": ["ollama:qwen3.5:4b"],
+                    }
+                },
+            }
+
+        with patch("agent.orchestrator.route_inference", side_effect=_timed_out_route), patch.object(
+            orchestrator,
+            "_runtime_ready_for_chat",
+            return_value=True,
+        ):
+            response = orchestrator._llm_chat(
+                "user1",
+                "Tell me a joke",
+                chat_context={
+                    "payload": {"source_surface": "telegram"},
+                    "messages": [{"role": "user", "content": "Tell me a joke"}],
+                    "source_surface": "telegram",
+                    "channel": "telegram",
+                },
+            )
+
+        self.assertEqual(1, len(route_calls))
+        self.assertEqual("timeout", response.data.get("error_kind"))
+        self.assertIn("LLM timed out", response.text)
+        self.assertIn("runtime itself is still healthy", response.text)
+        self.assertNotIn("chat is temporarily busy", response.text.lower())
+
     def test_generic_chat_router_failure_uses_deterministic_conversation_fallback(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="unused")
         orchestrator = Orchestrator(
