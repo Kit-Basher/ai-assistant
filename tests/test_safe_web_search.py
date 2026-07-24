@@ -129,6 +129,32 @@ class TestSafeWebSearch(unittest.TestCase):
         self.assertIn("/search?", opener.opened_urls[0])
         self.assertEqual(1, len(opener.opened_urls), "safe search should only contact the SearXNG JSON endpoint")
 
+    def test_partial_engine_failures_keep_usable_results(self) -> None:
+        opener = _FakeOpener(
+            {
+                "results": [
+                    {
+                        "title": "Usable source",
+                        "url": "https://example.com/usable",
+                        "content": "Grounded metadata.",
+                        "engine": "working-engine",
+                    }
+                ],
+                "unresponsive_engines": [["failed-engine", "timeout"]],
+            }
+        )
+        client = SafeWebSearchClient(
+            SafeWebSearchConfig(enabled=True, searxng_base_url="http://127.0.0.1:8888"),
+            opener=opener,
+        )
+
+        result = client.search("current subject")
+
+        self.assertTrue(result.ok)
+        self.assertEqual(1, len(result.results))
+        self.assertEqual(1, result.engine_failure_count)
+        self.assertIn("usable results were returned", result.message)
+
     def test_timeout_or_transport_error_returns_safe_message(self) -> None:
         opener = _FakeOpener(exc=URLError("offline"))
         client = SafeWebSearchClient(
@@ -273,7 +299,14 @@ class TestSafeWebSearchRuntime(unittest.TestCase):
         )
         return opener
 
-    def _chat(self, runtime: AgentRuntime, message: str, *, session_id: str = "safe-search-test") -> tuple[dict, str, dict]:
+    def _chat(
+        self,
+        runtime: AgentRuntime,
+        message: str,
+        *,
+        session_id: str = "safe-search-test",
+        source_surface: str = "webui",
+    ) -> tuple[dict, str, dict]:
         handler = _MemoryHandlerForTest(
             runtime,
             "/chat",
@@ -281,7 +314,7 @@ class TestSafeWebSearchRuntime(unittest.TestCase):
                 "messages": [{"role": "user", "content": message}],
                 "session_id": session_id,
                 "thread_id": f"{session_id}-thread",
-                "source_surface": "webui",
+                "source_surface": source_surface,
                 "purpose": "chat",
                 "task_type": "chat",
             },
@@ -447,7 +480,147 @@ class TestSafeWebSearchRuntime(unittest.TestCase):
         self.assertIn("untrusted", text.lower())
         self.assertIn("did not open pages", text.lower())
         self.assertNotIn("pack", " ".join(str(item) for item in meta.get("used_tools", [])))
+        self.assertEqual(2, len(opener.opened_urls))
+
+    def test_exact_explicit_and_current_search_phrases_route_without_llm(self) -> None:
+        examples = (
+            ("search the web for today’s weather in Saskatoon", "today’s weather in Saskatoon"),
+            ("look up Adam Mockler", "Adam Mockler"),
+            ("find information about Adam Mockler", "Adam Mockler"),
+        )
+        for index, (message, expected_query) in enumerate(examples):
+            with self.subTest(message=message):
+                runtime = self._runtime()
+                opener = self._install_fake_search_client(runtime, "Grounded Adam Mockler source")
+
+                body, text, meta = self._chat(runtime, message, session_id=f"exact-search-{index}")
+
+                self.assertEqual("action_tool", meta.get("route"))
+                self.assertFalse(meta.get("used_llm"))
+                self.assertIn("safe_web_search", meta.get("used_tools", []))
+                self.assertIn("Grounded Adam Mockler source", text)
+                self.assertIn("https://example.com/result", text)
+                self.assertIn(expected_query.replace("’", "%E2%80%99").replace(" ", "+"), opener.opened_urls[-1])
+                runtime_payload = body.get("setup") if isinstance(body.get("setup"), dict) else {}
+                self.assertTrue(runtime_payload.get("grounded"))
+                self.assertEqual(
+                    [{"title": "Grounded Adam Mockler source", "url": "https://example.com/result"}],
+                    runtime_payload.get("grounded_sources"),
+                )
+                self.assertEqual(2, len(opener.opened_urls))
+
+    def test_search_capability_question_uses_verified_runtime_state_without_llm(self) -> None:
+        runtime = self._runtime()
+        opener = self._install_fake_search_client(runtime, "Health probe source")
+
+        _body, text, meta = self._chat(runtime, "can you use search now?", session_id="search-capability-now")
+
+        self.assertEqual("action_tool", meta.get("route"))
+        self.assertFalse(meta.get("used_llm"))
+        self.assertIn("Assistant web search is available", text)
         self.assertEqual(1, len(opener.opened_urls))
+        self.assertIn("personal+agent+test", opener.opened_urls[0])
+
+    def test_combined_search_capability_and_query_verifies_then_searches(self) -> None:
+        runtime = self._runtime()
+        opener = self._install_fake_search_client(runtime, "Adam Mockler — grounded profile")
+
+        _body, text, meta = self._chat(
+            runtime,
+            "can you use search now? can you tell me who Adam Mockler is?",
+            session_id="combined-search-capability-query",
+            source_surface="telegram",
+        )
+
+        self.assertEqual("action_tool", meta.get("route"))
+        self.assertFalse(meta.get("used_llm"))
+        self.assertIn("safe_web_search", meta.get("used_tools", []))
+        self.assertIn("Adam Mockler — grounded profile", text)
+        self.assertIn("https://example.com/result", text)
+        self.assertEqual(2, len(opener.opened_urls))
+        self.assertIn("personal+agent+test", opener.opened_urls[0])
+        self.assertIn("Adam+Mockler", opener.opened_urls[1])
+        events = runtime.runtime_event_history(limit=20)["events"]
+        event_names = [str(row.get("event") or "") for row in events]
+        for expected_event in (
+            "search.intent_detected",
+            "search.state_verified",
+            "search.searxng_request",
+            "search.result_count",
+            "search.final_route",
+        ):
+            self.assertIn(expected_event, event_names)
+        serialized_events = json.dumps(events)
+        self.assertNotIn("Adam Mockler — grounded profile", serialized_events)
+        self.assertNotIn("Metadata-only snippet", serialized_events)
+
+    def test_healthy_searxng_with_no_usable_results_does_not_fall_back_to_llm_knowledge(self) -> None:
+        runtime = self._runtime()
+        opener = _FakeOpener(
+            {
+                "results": [],
+                "unresponsive_engines": [["engine-one", "timeout"], ["engine-two", "error"]],
+            }
+        )
+        runtime._safe_web_search_client = SafeWebSearchClient(  # noqa: SLF001
+            SafeWebSearchConfig(enabled=True, searxng_base_url="http://127.0.0.1:8888"),
+            opener=opener,
+        )
+
+        handler = _MemoryHandlerForTest(
+            runtime,
+            "/chat",
+            {
+                "messages": [{"role": "user", "content": "look up Adam Mockler"}],
+                "session_id": "no-usable-search-results",
+                "thread_id": "no-usable-search-results-thread",
+                "source_surface": "webui",
+                "purpose": "chat",
+                "task_type": "chat",
+            },
+        )
+        handler.do_POST()
+        body = json.loads(handler.body.decode("utf-8"))
+        text = _assistant_text(body)
+        meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+
+        self.assertEqual(400, handler.status_code)
+        self.assertEqual("action_tool", meta.get("route"))
+        self.assertFalse(meta.get("used_llm"))
+        self.assertIn("no usable source results", text)
+        self.assertIn("did not substitute unsupported model knowledge", text)
+        setup = body.get("setup") if isinstance(body.get("setup"), dict) else {}
+        self.assertEqual([], setup.get("grounded_sources"))
+        self.assertEqual(2, len(opener.opened_urls))
+
+    def test_current_search_unavailable_offers_approved_repair_without_llm_fallback(self) -> None:
+        runtime = self._runtime(search_enabled=False)
+        self._install_managed_search_adapter(
+            runtime,
+            search_status={
+                "ok": True,
+                "enabled": False,
+                "provider": "searxng",
+                "available": False,
+                "endpoint_configured": False,
+                "base_url": None,
+                "reason": "search_disabled",
+                "search_state": "never_configured",
+            },
+            services_status=self._managed_services_status(enabled=False, configured=False, reachable=False),
+        )
+
+        _body, text, meta = self._chat(
+            runtime,
+            "search the web for today’s weather in Saskatoon",
+            session_id="current-search-unavailable",
+        )
+
+        self.assertEqual("action_tool", meta.get("route"))
+        self.assertFalse(meta.get("used_llm"))
+        self.assertIn("managed_local_service_setup_preview", meta.get("used_tools", []))
+        self.assertIn("Say yes to continue", text)
+        self.assertNotIn("weather in Saskatoon is", text)
 
     def test_post_setup_online_entity_followup_uses_native_search(self) -> None:
         runtime = self._runtime(search_enabled=False)
@@ -491,6 +664,16 @@ class TestSafeWebSearchRuntime(unittest.TestCase):
             search_provider="searxng",
             searxng_base_url="http://127.0.0.1:8888",
         )
+        runtime.search_status = lambda: {  # type: ignore[method-assign]
+            "ok": True,
+            "enabled": True,
+            "provider": "searxng",
+            "available": True,
+            "endpoint_configured": True,
+            "base_url": "http://127.0.0.1:8888",
+            "reason": None,
+            "search_state": "configured_running",
+        }
         opener = _FakeOpener(
             {
                 "results": [
@@ -555,7 +738,7 @@ class TestSafeWebSearchRuntime(unittest.TestCase):
                 self.assertIn("metadata-only web results", text.lower())
                 self.assertIn("untrusted", text.lower())
                 self.assertIn("did not open pages", text.lower())
-                self.assertEqual(1, len(opener.opened_urls))
+                self.assertEqual(2, len(opener.opened_urls))
 
     def test_explicit_lookup_tts_model_uses_search_not_voice_or_linux_pack(self) -> None:
         runtime = self._runtime()
@@ -574,7 +757,7 @@ class TestSafeWebSearchRuntime(unittest.TestCase):
         self.assertNotIn("Linux Troubleshooting Workflow", text)
         self.assertNotIn("voice output", text.lower())
         self.assertNotIn("127.0.0.1:8888", text)
-        self.assertEqual(1, len(opener.opened_urls))
+        self.assertEqual(2, len(opener.opened_urls))
         self.assertIn("dot.tts", opener.opened_urls[-1])
 
     def test_messy_public_entity_inputs_use_search_not_capability_or_pack_text(self) -> None:
@@ -597,7 +780,7 @@ class TestSafeWebSearchRuntime(unittest.TestCase):
                 self.assertIn(title, text)
                 self.assertNotIn("Linux Troubleshooting Workflow", text)
                 self.assertNotIn("voice output", text.lower())
-                self.assertEqual(1, len(opener.opened_urls))
+                self.assertEqual(2, len(opener.opened_urls))
 
     def test_structured_semantic_intents_cover_daily_driver_boundaries(self) -> None:
         cases = (

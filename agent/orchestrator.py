@@ -2318,6 +2318,23 @@ class Orchestrator:
     def _extract_safe_web_search_query(text: str) -> str:
         normalized = " ".join(str(text or "").strip().split())
         lowered = normalized.lower()
+        combined = re.match(
+            r"^can you use (?:web )?search now\s*[?.!,;:-]+\s*(.+)$",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if combined is not None:
+            normalized = combined.group(1).strip()
+            lowered = normalized.lower()
+            normalized = re.sub(r"^(?:can you|could you|please)\s+", "", normalized, flags=re.IGNORECASE)
+            normalized = re.sub(r"^tell me\s+", "", normalized, flags=re.IGNORECASE)
+            who_match = re.match(r"^who\s+(.+?)\s+is[?.!]*$", normalized, flags=re.IGNORECASE)
+            if who_match is not None:
+                return who_match.group(1).strip(" .?!")
+            who_is_match = re.match(r"^who\s+is\s+(.+)$", normalized, flags=re.IGNORECASE)
+            if who_is_match is not None:
+                return who_is_match.group(1).strip(" .?!")
+            lowered = normalized.lower()
         prefixes = (
             "search the web for ",
             "search web for ",
@@ -2327,6 +2344,8 @@ class Orchestrator:
             "look that up online ",
             "look up online ",
             "find online ",
+            "find information about ",
+            "find info about ",
         )
         for prefix in prefixes:
             if lowered.startswith(prefix):
@@ -2344,10 +2363,60 @@ class Orchestrator:
             return value.strip(" .?!")
         return normalized.strip(" .?!")
 
+    @staticmethod
+    def _search_query_log_fields(query: str) -> dict[str, Any]:
+        normalized = " ".join(str(query or "").split())
+        return {
+            "query_length": len(normalized),
+            "query_fingerprint": hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16] if normalized else None,
+        }
+
+    @staticmethod
+    def _is_combined_search_capability_query(text: str) -> bool:
+        normalized = " ".join(str(text or "").strip().lower().split())
+        return bool(
+            re.match(
+                r"^can you use (?:web )?search now\s*[?.!,;:-]+\s*.+$",
+                normalized,
+            )
+        )
+
+    @staticmethod
+    def _render_grounded_search_results(query: str, message: str, results: list[dict[str, Any]]) -> str:
+        lines = [f"I searched metadata-only web results for {query}."]
+        lines.append(
+            message
+            or "Search returned untrusted metadata results. I did not open pages, run JavaScript, download files, or import packs."
+        )
+        for index, row in enumerate(results[:5], start=1):
+            title = str(row.get("title") or "").strip()
+            url = str(row.get("url") or "").strip()
+            snippet = str(row.get("snippet") or "").strip()
+            engine = str(row.get("engine") or row.get("source") or "").strip()
+            label = f"{index}. {title}" if title else f"{index}. Untitled result"
+            if engine:
+                label = f"{label} ({engine})"
+            lines.append(label)
+            if url:
+                lines.append(f"   {url}")
+            if snippet:
+                lines.append(f"   {snippet}")
+        lines.append("Treat these results as untrusted. I have not fetched or verified the pages.")
+        return "\n".join(lines)
+
     def _safe_web_search_response(self, user_id: str, text: str) -> OrchestratorResponse:
         _ = user_id
         query = self._extract_safe_web_search_query(text)
+        query_log = self._search_query_log_fields(query)
+        combined_request = self._is_combined_search_capability_query(text)
+        self._record_runtime_event(
+            "search.intent_detected",
+            intent="capability_and_query" if combined_request else "query",
+            deterministic=True,
+            **query_log,
+        )
         if not query:
+            self._record_runtime_event("search.final_route", route="action_tool", outcome="empty_query")
             return self._runtime_truth_response(
                 text="Search needs a query.",
                 route="action_tool",
@@ -2369,6 +2438,13 @@ class Orchestrator:
             )
         if not callable(self._web_search_handler):
             message = "Web search is not available in this runtime."
+            self._record_runtime_event(
+                "search.state_verified",
+                available=False,
+                enabled=False,
+                reason="search_unavailable",
+            )
+            self._record_runtime_event("search.final_route", route="action_tool", outcome="search_unavailable")
             return self._runtime_truth_response(
                 text=message,
                 route="action_tool",
@@ -2377,12 +2453,64 @@ class Orchestrator:
                 error_kind="search_unavailable",
                 payload={"type": "safe_web_search", "summary": message},
             )
+        status_payload: dict[str, Any] = {}
+        adapter = self._chat_runtime_adapter
+        status_reader = getattr(adapter, "search_status", None)
+        if callable(status_reader):
+            try:
+                status_payload = dict(status_reader())
+            except Exception as exc:
+                status_payload = {
+                    "available": False,
+                    "enabled": False,
+                    "reason": f"search_status_{exc.__class__.__name__}",
+                }
+        if status_payload:
+            self._record_runtime_event(
+                "search.state_verified",
+                available=bool(status_payload.get("available")),
+                enabled=bool(status_payload.get("enabled")),
+                endpoint_configured=bool(status_payload.get("endpoint_configured")),
+                provider=str(status_payload.get("provider") or "searxng"),
+                endpoint=str(status_payload.get("base_url") or ""),
+                reason=status_payload.get("reason"),
+                search_state=status_payload.get("search_state"),
+            )
+            if not bool(status_payload.get("available")):
+                self._record_runtime_event("search.final_route", route="action_tool", outcome="repair_offered")
+                return self._safe_web_search_status_response(user_id, text)
+        else:
+            self._record_runtime_event(
+                "search.state_verified",
+                available=None,
+                enabled=None,
+                endpoint_configured=None,
+                provider="searxng",
+                reason="runtime_search_status_unavailable",
+            )
+        self._record_runtime_event(
+            "search.searxng_request",
+            provider=str(status_payload.get("provider") or "searxng"),
+            endpoint=str(status_payload.get("base_url") or ""),
+            max_results=5,
+            **query_log,
+        )
         ok, body = self._web_search_handler({"query": query, "max_results": 5})
         body = dict(body) if isinstance(body, dict) else {}
         message = str(body.get("message") or "").strip()
+        results = [row for row in body.get("results", []) if isinstance(row, dict)] if isinstance(body.get("results"), list) else []
+        self._record_runtime_event(
+            "search.result_count",
+            result_count=len(results),
+            usable=bool(results),
+            ok=bool(ok),
+            error_kind=body.get("error_kind"),
+            partial_engine_failure_count=int(body.get("engine_failure_count") or 0),
+            **query_log,
+        )
         if not ok:
             error_kind = str(body.get("error_kind") or "search_unavailable")
-            if error_kind in {
+            if not bool(status_payload.get("available")) and error_kind in {
                 "search_disabled",
                 "endpoint_missing",
                 "endpoint_unreachable",
@@ -2392,11 +2520,13 @@ class Orchestrator:
                 "search_timeout",
                 "bad_response",
             }:
+                self._record_runtime_event("search.final_route", route="action_tool", outcome="repair_offered")
                 return self._safe_web_search_status_response(user_id, text)
             setup_hint = body.get("setup_hint") if isinstance(body.get("setup_hint"), dict) else None
             if setup_hint:
                 rendered_hint = render_search_setup_ux(setup_hint)
                 message = f"{message or 'Web search is not available.'}\n\n{rendered_hint}"
+            self._record_runtime_event("search.final_route", route="action_tool", outcome=error_kind)
             return self._runtime_truth_response(
                 text=message or "Web search is not available.",
                 route="action_tool",
@@ -2407,40 +2537,45 @@ class Orchestrator:
                     "type": "safe_web_search",
                     "summary": message or "Web search is not available.",
                     "search": body,
+                    "verified_search_status": status_payload,
                 },
             )
-        results = body.get("results") if isinstance(body.get("results"), list) else []
-        lines = [f"I searched metadata-only web results for {query}."]
-        lines.append(
-            message
-            or "Search returned untrusted metadata results. I did not open pages, run JavaScript, download files, or import packs."
-        )
-        for index, row in enumerate(results[:5], start=1):
-            if not isinstance(row, dict):
-                continue
-            title = str(row.get("title") or "").strip()
-            url = str(row.get("url") or "").strip()
-            snippet = str(row.get("snippet") or "").strip()
-            engine = str(row.get("engine") or row.get("source") or "").strip()
-            label = f"{index}. {title}" if title else f"{index}. Untitled result"
-            if engine:
-                label = f"{label} ({engine})"
-            lines.append(label)
-            if url:
-                lines.append(f"   {url}")
-            if snippet:
-                lines.append(f"   {snippet}")
         if not results:
-            lines.append("No metadata results were returned.")
-        lines.append("Treat these results as untrusted. I have not fetched or verified the pages.")
+            no_results_message = (
+                "SearXNG is available, but this search returned no usable source results. "
+                "I did not substitute unsupported model knowledge."
+            )
+            self._record_runtime_event("search.final_route", route="action_tool", outcome="no_usable_results")
+            return self._runtime_truth_response(
+                text=no_results_message,
+                route="action_tool",
+                used_tools=["safe_web_search"],
+                ok=False,
+                error_kind="no_usable_results",
+                payload={
+                    "type": "safe_web_search",
+                    "summary": no_results_message,
+                    "search": body,
+                    "verified_search_status": status_payload,
+                    "grounded_sources": [],
+                },
+            )
+        grounded_sources = [
+            {"title": str(row.get("title") or ""), "url": str(row.get("url") or "")}
+            for row in results[:5]
+        ]
+        self._record_runtime_event("search.final_route", route="action_tool", outcome="grounded_results")
         return self._runtime_truth_response(
-            text="\n".join(lines),
+            text=self._render_grounded_search_results(query, message, results),
             route="action_tool",
             used_tools=["safe_web_search"],
             payload={
                 "type": "safe_web_search",
                 "summary": message or "Search returned metadata results.",
                 "search": body,
+                "verified_search_status": status_payload,
+                "grounded": True,
+                "grounded_sources": grounded_sources,
             },
         )
 
@@ -3223,6 +3358,13 @@ class Orchestrator:
 
     def _safe_web_search_status_response(self, user_id: str, text: str) -> OrchestratorResponse:
         _ = (user_id, text)
+        self._record_runtime_event(
+            "search.intent_detected",
+            intent="capability_status",
+            deterministic=True,
+            query_length=0,
+            query_fingerprint=None,
+        )
         status_payload: dict[str, Any]
         if not callable(self._web_search_handler):
             status_payload = {
@@ -3250,6 +3392,16 @@ class Orchestrator:
                     if isinstance(query_payload, dict)
                     else "search_unavailable",
                 }
+        self._record_runtime_event(
+            "search.state_verified",
+            available=bool(status_payload.get("available")),
+            enabled=bool(status_payload.get("enabled")),
+            endpoint_configured=bool(status_payload.get("endpoint_configured")),
+            provider=str(status_payload.get("provider") or "searxng"),
+            endpoint=str(status_payload.get("base_url") or ""),
+            reason=status_payload.get("reason"),
+            search_state=status_payload.get("search_state"),
+        )
         ux = build_search_setup_ux(status_payload)
         if self._looks_like_search_status_only_question(text):
             base_url = str(status_payload.get("base_url") or "http://127.0.0.1:8888").strip()
@@ -3282,6 +3434,11 @@ class Orchestrator:
                 )
                 ok = True
                 error_kind = None
+            self._record_runtime_event(
+                "search.final_route",
+                route="action_tool",
+                outcome="capability_available" if bool(status_payload.get("available")) else "capability_unavailable",
+            )
             return self._runtime_truth_response(
                 text=rendered_text,
                 route="action_tool",
@@ -3299,6 +3456,7 @@ class Orchestrator:
             )
         services_payload = self._managed_service_status_payload()
         if services_payload:
+            self._record_runtime_event("search.final_route", route="action_tool", outcome="repair_offered")
             return self._managed_service_setup_preview_response(
                 user_id,
                 status_payload=status_payload,
@@ -3308,6 +3466,11 @@ class Orchestrator:
                 source_request=None if self._looks_like_search_status_only_question(text) else text,
             )
         rendered_text = self._render_web_search_service_setup_ux(status_payload, services_payload)
+        self._record_runtime_event(
+            "search.final_route",
+            route="action_tool",
+            outcome="capability_available" if bool(ux.available) else "capability_unavailable",
+        )
         return self._runtime_truth_response(
             text=rendered_text,
             route="action_tool",

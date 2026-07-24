@@ -1518,6 +1518,15 @@ def _looks_like_safe_web_search_request(normalized: str) -> bool:
         return False
     if _contains_safe_web_search_suppression(working):
         return False
+    combined_capability_query = re.match(
+        r"^can you use (?:web )?search now\s+(.+)$",
+        working,
+    )
+    if combined_capability_query is not None and re.search(
+        r"\b(?:tell me|who|what|where|when|why|how|look up|find|search for)\b",
+        combined_capability_query.group(1),
+    ):
+        return True
     explicit_prefixes = (
         "search for ",
         "search the web for ",
@@ -1528,6 +1537,8 @@ def _looks_like_safe_web_search_request(normalized: str) -> bool:
         "look this up online ",
         "look that up online ",
         "find online ",
+        "find information about ",
+        "find info about ",
     )
     if any(working.startswith(prefix) and len(working) > len(prefix) for prefix in explicit_prefixes):
         return True
@@ -1536,13 +1547,7 @@ def _looks_like_safe_web_search_request(normalized: str) -> bool:
     explicit_lookup = re.match(r"^(?:can you|could you|please)?\s*look up\s+(.+)$", working)
     if explicit_lookup is not None:
         lookup_target = explicit_lookup.group(1).strip()
-        if lookup_target.startswith(("whether ", "if ")):
-            return True
-        if re.search(r"\b(chrome|chromium|firefox|browser)\b", lookup_target) and re.search(r"\b(ram|memory|cpu|usage)\b", lookup_target):
-            return True
-        if re.search(r"\b[a-z0-9][a-z0-9_.-]*\.[a-z0-9_.-]+\b", lookup_target):
-            return True
-        if re.search(r"\b(model|tool|library|project|package|repo|company|site|website|channel|creator)\b", lookup_target):
+        if lookup_target:
             return True
     if working.startswith("find ") and (" on the web" in working or " online" in working):
         return True
@@ -1612,6 +1617,11 @@ def _looks_like_safe_web_search_fallback_request(working: str) -> bool:
     if re.search(r"\bwhat is (?:using|eating) (?:resources|memory|cpu|ram)\b", working):
         return False
     if re.search(r"\b(still active|active anymore|latest|currently|recent|newest|release|released|changelog|price|pricing|compatibility|compatible|recommendations?)\b", working):
+        return True
+    if re.search(
+        r"\b(today|today's|todays|tonight|tomorrow|yesterday|weather|forecast|breaking news|current events)\b",
+        working,
+    ):
         return True
     if re.search(r"\bstill around\b", working):
         return True
@@ -1717,6 +1727,15 @@ def _looks_like_safe_web_search_status_request(normalized: str) -> bool:
     working = " ".join(str(normalized or "").strip().lower().split())
     if not working:
         return False
+    combined_capability_query = re.match(
+        r"^can you use (?:web )?search now\s+(.+)$",
+        working,
+    )
+    if combined_capability_query is not None and re.search(
+        r"\b(?:tell me|who|what|where|when|why|how|look up|find|search for)\b",
+        combined_capability_query.group(1),
+    ):
+        return False
     if "searxng" in working and any(phrase in working for phrase in ("set up", "setup", "configure", "status", "enabled")):
         return True
     if re.search(r"\b(?:127\.0\.0\.1|localhost):(?:8080|8888)\b", working) and re.search(
@@ -1743,6 +1762,8 @@ def _looks_like_safe_web_search_status_request(normalized: str) -> bool:
         "why cant you search the internet",
         "why can t you search the internet",
         "can you search online",
+        "can you use search now",
+        "can you use web search now",
         "what is your search status",
         "what's your search status",
         "web search status",

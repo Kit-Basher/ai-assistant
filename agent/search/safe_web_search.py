@@ -136,6 +136,7 @@ class SafeWebSearchResponse:
     error_kind: str | None = None
     untrusted: bool = True
     redactions_applied: bool = False
+    engine_failure_count: int = 0
     setup_hint: dict[str, Any] | None = None
     safety: dict[str, Any] = field(
         default_factory=lambda: {
@@ -290,10 +291,17 @@ class SafeWebSearchClient:
                 redactions_applied=redacted,
             )
         results = tuple(self._normalize_results(payload, limit=limit))
+        engine_failures = payload.get("unresponsive_engines")
+        engine_failure_count = len(engine_failures) if isinstance(engine_failures, list) else 0
         message = (
             f"Search returned {len(results)} untrusted metadata result"
             f"{'' if len(results) == 1 else 's'}. I did not open pages, run JavaScript, download files, or import packs."
         )
+        if results and engine_failure_count:
+            message += (
+                f" {engine_failure_count} search engine"
+                f"{'' if engine_failure_count == 1 else 's'} failed, but usable results were returned."
+            )
         return SafeWebSearchResponse(
             ok=True,
             enabled=True,
@@ -303,6 +311,7 @@ class SafeWebSearchClient:
             results=results,
             query_redacted=redacted_query,
             redactions_applied=redacted,
+            engine_failure_count=engine_failure_count,
         )
 
     def _failure(

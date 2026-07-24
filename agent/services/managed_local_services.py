@@ -1353,6 +1353,8 @@ class ManagedLocalServiceDetector:
         searxng = self._searxng_status(
             docker_available=docker_available,
             podman_available=podman_available,
+            docker_path=docker_path,
+            podman_path=podman_path,
             podman_rootless=podman_rootless,
             docker_rootless=docker_rootless,
         )
@@ -1389,6 +1391,8 @@ class ManagedLocalServiceDetector:
         *,
         docker_available: bool,
         podman_available: bool,
+        docker_path: str | None,
+        podman_path: str | None,
         podman_rootless: bool | None,
         docker_rootless: bool | None,
     ) -> dict[str, Any]:
@@ -1405,6 +1409,11 @@ class ManagedLocalServiceDetector:
         expected_url = configured_url or spec.default_local_url
         should_probe_reachability = (enabled or configured) and _is_loopback_http_url(expected_url)
         reachable = self._check_reachable(expected_url) if should_probe_reachability else False
+        container_detection = (
+            self._detect_managed_searxng_container(podman_path=podman_path, docker_path=docker_path)
+            if enabled or configured
+            else {"checked": False, "found": False, "reason": "search_not_configured"}
+        )
         if enabled and configured and reachable:
             next_step = "ready"
         elif not configured or not enabled:
@@ -1426,10 +1435,70 @@ class ManagedLocalServiceDetector:
             "podman_rootless": podman_rootless,
             "docker_rootless": docker_rootless,
             "preferred_engine": "podman",
-            "container_detection": {
-                "checked": False,
-                "reason": "read_only_v1_uses_cli_presence_only",
-            },
+            "container_detection": container_detection,
+        }
+
+    def _detect_managed_searxng_container(
+        self,
+        *,
+        podman_path: str | None,
+        docker_path: str | None,
+    ) -> dict[str, Any]:
+        engines: dict[str, dict[str, Any]] = {}
+        found_engine: str | None = None
+        # Podman is checked independently and first because the approved managed
+        # runtime is rootless Podman. Docker absence must never erase a Podman hit.
+        for engine, command_path in (("podman", podman_path), ("docker", docker_path)):
+            if not command_path:
+                engines[engine] = {"checked": False, "found": False, "reason": "cli_unavailable"}
+                continue
+            filter_value = (
+                f"name=^{APPROVED_SEARXNG_CONTAINER}$"
+                if engine == "podman"
+                else f"name=^/{APPROVED_SEARXNG_CONTAINER}$"
+            )
+            argv = [
+                command_path,
+                "ps",
+                "-a",
+                "--filter",
+                filter_value,
+                "--format",
+                "{{.Names}}",
+            ]
+            try:
+                result = self._command_runner(
+                    argv,
+                    capture_output=True,
+                    text=True,
+                    timeout=self._timeout_seconds,
+                    shell=False,
+                )
+            except Exception as exc:
+                engines[engine] = {
+                    "checked": True,
+                    "found": False,
+                    "reason": exc.__class__.__name__,
+                }
+                continue
+            names = {
+                line.strip().lstrip("/")
+                for line in str(getattr(result, "stdout", "") or "").splitlines()
+                if line.strip()
+            }
+            found = int(getattr(result, "returncode", 1) or 0) == 0 and APPROVED_SEARXNG_CONTAINER in names
+            engines[engine] = {
+                "checked": True,
+                "found": found,
+                "returncode": int(getattr(result, "returncode", 1) or 0),
+            }
+            if found and found_engine is None:
+                found_engine = engine
+        return {
+            "checked": any(bool(row.get("checked")) for row in engines.values()),
+            "found": found_engine is not None,
+            "engine": found_engine,
+            "engines": engines,
         }
 
     def _podman_rootless(self, podman_path: str | None) -> bool | None:

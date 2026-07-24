@@ -238,6 +238,48 @@ class TestManagedLocalServices(unittest.TestCase):
         self.assertEqual("PATH_OR_TRUSTED_ABSOLUTE_PATH", payload["detection_source"])
         self.assertEqual([0.25, 0.25], timeouts)
 
+    def test_detector_finds_podman_managed_searxng_even_when_docker_reports_absent(self) -> None:
+        calls: list[list[str]] = []
+
+        def _runner(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            calls.append(list(argv))
+            engine = Path(str(argv[0])).name
+            if len(argv) > 1 and argv[1] == "info":
+                output = "true" if engine == "podman" else "name=seccomp"
+                return subprocess.CompletedProcess(argv, 0, stdout=output, stderr="")
+            if len(argv) > 1 and argv[1] == "--version":
+                return subprocess.CompletedProcess(argv, 0, stdout=f"{engine} version test", stderr="")
+            if len(argv) > 1 and argv[1] == "ps":
+                output = "personal-agent-searxng\n" if engine == "podman" else ""
+                return subprocess.CompletedProcess(argv, 0, stdout=output, stderr="")
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="unsupported")
+
+        detector = ManagedLocalServiceDetector(
+            search_status_provider=lambda: {
+                "enabled": True,
+                "available": True,
+                "endpoint_configured": True,
+                "base_url": "http://127.0.0.1:8888",
+            },
+            command_finder=lambda name: f"/usr/bin/{name}" if name in {"podman", "docker"} else None,
+            command_runner=_runner,
+            health_checker=lambda url: url == "http://127.0.0.1:8888",
+        )
+
+        status = detector.status()
+        service = status["services"][0]
+        detection = service["container_detection"]
+
+        self.assertTrue(service["reachable"])
+        self.assertTrue(detection["found"])
+        self.assertEqual("podman", detection["engine"])
+        self.assertTrue(detection["engines"]["podman"]["found"])
+        self.assertFalse(detection["engines"]["docker"]["found"])
+        self.assertIn(
+            ["/usr/bin/podman", "ps", "-a", "--filter", "name=^personal-agent-searxng$", "--format", "{{.Names}}"],
+            calls,
+        )
+
     def test_trusted_command_path_finds_podman_from_absolute_fallback_when_path_lookup_misses(self) -> None:
         fake_bin = Path(self.tmpdir.name) / "podman"
         fake_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
