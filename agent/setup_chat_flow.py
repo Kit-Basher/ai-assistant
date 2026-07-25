@@ -1856,6 +1856,7 @@ def _extract_filesystem_search_query(text: str | None, normalized: str) -> tuple
         r"\bfind files? named (?P<query>.+)$",
         r"\bfind directories? named (?P<query>.+)$",
         r"\bfind folders? named (?P<query>.+)$",
+        r"\b(?:look|search) for (?:the )?(?P<query>.+?) (?:files?|folders?|directories?)(?:[?.!,]|$)",
         r"\bsearch for (?P<query>.+?) in (?:this repo|this folder|this directory|the repo|the folder|the directory|workspace root|repo root|~[^\s]+|/[^\s]+|\./[^\s]+|\.\./[^\s]+)$",
         r"\bfind (?P<query>.+?) in (?:this repo|this folder|this directory|the repo|the folder|the directory|workspace root|repo root|~[^\s]+|/[^\s]+|\./[^\s]+|\.\./[^\s]+)$",
     )
@@ -1899,13 +1900,32 @@ def _classify_filesystem_route(text: str | None, normalized: str) -> dict[str, A
     search_kind, search_query = _extract_filesystem_search_query(text, normalized)
     if search_kind and search_query:
         normalized_root_hint = path_hint or "."
-        if path_hint and search_query and str(path_hint).strip().lower() == str(search_query).strip().lower():
+        if (
+            path_hint
+            and (
+                str(path_hint).strip().lower() == str(search_query).strip().lower()
+                or str(path_hint).strip().lower() in {"file", "files", "system", "system files"}
+            )
+        ):
             normalized_root_hint = "."
         return {
             "route": "action_tool",
             "kind": "filesystem_search_text" if search_kind == "search_text" else "filesystem_search_filenames",
             "path_hint": normalized_root_hint,
             "query": search_query,
+            "generic_allowed": False,
+            "fallback_reason": "action_tool",
+        }
+    if re.search(
+        r"\b(?:(?:do|run|perform) (?:a )?)?(?:system |computer |filesystem |file system )?file search\b",
+        normalized_space,
+    ) or re.fullmatch(r"(?:can you )?(?:search|find|look for) (?:my |the |system )?files?[?.!\s]*", normalized_space):
+        return {
+            "route": "action_tool",
+            "kind": "filesystem_search_filenames",
+            "path_hint": None,
+            "query": None,
+            "root_required": True,
             "generic_allowed": False,
             "fallback_reason": "action_tool",
         }
@@ -2487,6 +2507,9 @@ def _classify_runtime_chat_route_raw(
     operator_lifecycle_route = _classify_operator_lifecycle_route(normalized)
     if operator_lifecycle_route is not None:
         return operator_lifecycle_route
+    filesystem_route = _classify_filesystem_route(text, normalized)
+    if filesystem_route is not None:
+        return filesystem_route
     if any(phrase in normalized for phrase in _OPERATIONAL_OBSERVE_PHRASES):
         return {
             "route": "operational_status",
@@ -2672,9 +2695,6 @@ def _classify_runtime_chat_route_raw(
     agent_memory_route = _classify_agent_memory_route(normalized)
     if agent_memory_route is not None:
         return agent_memory_route
-    filesystem_route = _classify_filesystem_route(text, normalized)
-    if filesystem_route is not None:
-        return filesystem_route
     operational_route = _classify_operational_route(text, normalized)
     if operational_route is not None:
         return operational_route

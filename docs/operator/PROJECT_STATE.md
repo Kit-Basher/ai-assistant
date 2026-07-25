@@ -825,8 +825,10 @@ Provider/model/configuration/secret/setup HTTP mutations now enter
 `ProviderModelAuthorizationService`: Universal Mutation Plan, durable scoped
 confirmation, Capability Policy, Executor Registry, bounded executor, durable
 result, and redacted receipt. Bare `confirm: true` is rejected. SAFE MODE
-blocks provider/model acquisition and routing changes; changing the mode itself
-still requires a scoped Plan. The 94-surface inventory retains 19 legacy
+blocks provider/model acquisition and remote routing changes; a switch to an
+already-installed, usable local Ollama target still requires its scoped Plan
+and explicit confirmation. Changing the mode itself still requires a scoped
+Plan. The 94-surface inventory retains 19 legacy
 surfaces outside this domain. Universal authorization remains incomplete.
 No public secret-delete/import/repair or bulk configuration-import/reset
 surface exists; those five functions are recorded as `unimplemented_denied`,

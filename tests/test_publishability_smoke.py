@@ -571,38 +571,29 @@ class TestPublishabilitySmoke(unittest.TestCase):
     def test_publishability_mutating_preview_confirm_flows(self) -> None:
         runtime = self._make_runtime(safe_mode_enabled=True)
         self._scope_filesystem_to_smoke_workspace(runtime)
+        readiness = runtime.runtime_truth_service().model_readiness_status()
+        qwen_readiness = next(
+            row
+            for row in readiness.get("models", [])
+            if row.get("model_id") == "ollama:qwen2.5:7b-instruct"
+        )
+        self.assertTrue(bool(qwen_readiness.get("usable_now")))
 
-        # This section is model-control policy, not Capability Rescue. SAFE MODE
-        # may produce a mutating preview, but confirmation must still be blocked.
+        # SAFE MODE permits only a confirmed switch to an already-installed,
+        # usable local model. The preview remains non-mutating.
         switch_preview, _ = self._chat(
             runtime,
             "switch temporarily to ollama:qwen2.5:7b-instruct",
             user_id="smoke-mutate",
             thread_id="smoke-mutate-thread",
-            expected_status=400,
         )
         switch_preview_meta = self._chat_meta(switch_preview)
+        switch_preview_setup = switch_preview.get("setup") if isinstance(switch_preview.get("setup"), dict) else {}
         self.assertEqual("model_status", switch_preview_meta.get("route"))
         self.assertEqual(["model_controller"], switch_preview_meta.get("used_tools"))
         self.assertFalse(bool(switch_preview_meta.get("used_llm")))
-        self.assertEqual("safe_mode_mutation_blocked", switch_preview.get("error_kind"))
+        self.assertTrue(bool(switch_preview_setup.get("requires_confirmation")))
         self.assertFalse(bool(switch_preview.get("mutated")))
-
-        controlled = self._authorized(runtime, "runtime.control_mode", {"mode": "controlled"})
-        self.assertEqual("controlled", ((controlled.get("policy") or {}).get("mode")))
-
-        switch_preview_controlled, _ = self._chat(
-            runtime,
-            "switch temporarily to ollama:qwen2.5:7b-instruct",
-            user_id="smoke-mutate",
-            thread_id="smoke-mutate-thread",
-        )
-        switch_preview_controlled_setup = (
-            switch_preview_controlled.get("setup")
-            if isinstance(switch_preview_controlled.get("setup"), dict)
-            else {}
-        )
-        self.assertTrue(bool(switch_preview_controlled_setup.get("requires_confirmation")))
 
         switch_confirm, _ = self._chat(
             runtime,
@@ -615,6 +606,9 @@ class TestPublishabilitySmoke(unittest.TestCase):
         self.assertEqual(["model_controller"], switch_confirm_meta.get("used_tools"))
         self.assertFalse(bool(switch_confirm_meta.get("used_llm")))
         self.assertIn("Temporary chat model switched to ollama:qwen2.5:7b-instruct.", str(switch_confirm.get("message") or ""))
+
+        controlled = self._authorized(runtime, "runtime.control_mode", {"mode": "controlled"})
+        self.assertEqual("controlled", ((controlled.get("policy") or {}).get("mode")))
 
         mkdir_preview, _ = self._chat(
             runtime,

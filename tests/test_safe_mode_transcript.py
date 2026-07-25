@@ -1717,6 +1717,15 @@ class TestSafeModeTranscript(unittest.TestCase):
                     "thread_id": "api:scout-v2:thread",
                 },
             )
+            switched_confirm = self._invoke_chat_http(
+                runtime,
+                {
+                    "messages": [{"role": "user", "content": "yes"}],
+                    "source_surface": "api",
+                    "user_id": "api:scout-v2",
+                    "thread_id": "api:scout-v2:thread",
+                },
+            )
             after_switch = self._invoke_chat_http(
                 runtime,
                 {
@@ -1730,6 +1739,15 @@ class TestSafeModeTranscript(unittest.TestCase):
                 runtime,
                 {
                     "messages": [{"role": "user", "content": "switch back"}],
+                    "source_surface": "api",
+                    "user_id": "api:scout-v2",
+                    "thread_id": "api:scout-v2:thread",
+                },
+            )
+            rollback_confirm = self._invoke_chat_http(
+                runtime,
+                {
+                    "messages": [{"role": "user", "content": "yes"}],
                     "source_surface": "api",
                     "user_id": "api:scout-v2",
                     "thread_id": "api:scout-v2:thread",
@@ -1749,8 +1767,14 @@ class TestSafeModeTranscript(unittest.TestCase):
         recommendation_text = str((recommendation.get("assistant") or {}).get("content") or recommendation.get("message") or "")
         test_text = str((test_target.get("assistant") or {}).get("content") or test_target.get("message") or "")
         switched_text = str((switched.get("assistant") or {}).get("content") or switched.get("message") or "")
+        switched_confirm_text = str(
+            (switched_confirm.get("assistant") or {}).get("content") or switched_confirm.get("message") or ""
+        )
         after_switch_text = str((after_switch.get("assistant") or {}).get("content") or after_switch.get("message") or "")
         rollback_text = str((rollback.get("assistant") or {}).get("content") or rollback.get("message") or "")
+        rollback_confirm_text = str(
+            (rollback_confirm.get("assistant") or {}).get("content") or rollback_confirm.get("message") or ""
+        )
         rolled_back_text = str((rolled_back.get("assistant") or {}).get("content") or rolled_back.get("message") or "")
 
         self.assertEqual("action_tool", recommendation_meta.get("route"))
@@ -1764,9 +1788,11 @@ class TestSafeModeTranscript(unittest.TestCase):
         )
         self.assertEqual("ollama:qwen3.5:4b", str(runtime.runtime_truth_service().current_chat_target_status().get("model") or "").strip())
         self.assertIn("without switching", test_text.lower())
-        self.assertIn("safe mode blocked this mutation", switched_text.lower())
-        self.assertIn("ollama:qwen3.5:4b", after_switch_text.lower())
-        self.assertIn("i do not have a recent trial model switch to roll back", rollback_text.lower())
+        self.assertIn("switch preview", switched_text.lower())
+        self.assertIn("ollama:qwen2.5:7b-instruct", switched_confirm_text.lower())
+        self.assertIn("ollama:qwen2.5:7b-instruct", after_switch_text.lower())
+        self.assertIn("switch this chat back", rollback_text.lower())
+        self.assertIn("ollama:qwen3.5:4b", rollback_confirm_text.lower())
         self.assertIn("ollama:qwen3.5:4b", rolled_back_text.lower())
 
     def test_safe_mode_cheap_cloud_recommendation_prompts_stay_grounded_and_local_only(self) -> None:
@@ -1926,11 +1952,32 @@ class TestSafeModeTranscript(unittest.TestCase):
                     "thread_id": "api:controller-explicit:thread",
                 },
             )
+            temporary_confirm = self._invoke_chat_http(
+                runtime,
+                {
+                    "messages": [{"role": "user", "content": "yes"}],
+                    "source_surface": "api",
+                    "user_id": "api:controller-explicit",
+                    "thread_id": "api:controller-explicit:thread",
+                },
+            )
+            active_after_temporary_model = str(
+                runtime.runtime_truth_service().current_chat_target_status().get("model") or ""
+            ).strip()
             default_after_temporary = str(runtime.registry_document.get("defaults", {}).get("chat_model") or "").strip()
             switch_back = self._invoke_chat_http(
                 runtime,
                 {
                     "messages": [{"role": "user", "content": "switch back"}],
+                    "source_surface": "api",
+                    "user_id": "api:controller-explicit",
+                    "thread_id": "api:controller-explicit:thread",
+                },
+            )
+            switch_back_confirm = self._invoke_chat_http(
+                runtime,
+                {
+                    "messages": [{"role": "user", "content": "yes"}],
                     "source_surface": "api",
                     "user_id": "api:controller-explicit",
                     "thread_id": "api:controller-explicit:thread",
@@ -1954,10 +2001,28 @@ class TestSafeModeTranscript(unittest.TestCase):
                     "thread_id": "api:controller-default:thread",
                 },
             )
+            temporary_for_default_confirm = self._invoke_chat_http(
+                runtime,
+                {
+                    "messages": [{"role": "user", "content": "yes"}],
+                    "source_surface": "api",
+                    "user_id": "api:controller-default",
+                    "thread_id": "api:controller-default:thread",
+                },
+            )
             make_default = self._invoke_chat_http(
                 runtime,
                 {
                     "messages": [{"role": "user", "content": "make ollama:deepseek-r1:7b the default"}],
+                    "source_surface": "api",
+                    "user_id": "api:controller-default",
+                    "thread_id": "api:controller-default:thread",
+                },
+            )
+            make_default_confirm = self._invoke_chat_http(
+                runtime,
+                {
+                    "messages": [{"role": "user", "content": "yes"}],
                     "source_surface": "api",
                     "user_id": "api:controller-default",
                     "thread_id": "api:controller-default:thread",
@@ -1987,13 +2052,27 @@ class TestSafeModeTranscript(unittest.TestCase):
         test_text = str((test_target.get("assistant") or {}).get("content") or test_target.get("message") or "")
         temporary_meta = temporary.get("meta") if isinstance(temporary.get("meta"), dict) else {}
         temporary_text = str((temporary.get("assistant") or {}).get("content") or temporary.get("message") or "")
+        temporary_confirm_text = str(
+            (temporary_confirm.get("assistant") or {}).get("content") or temporary_confirm.get("message") or ""
+        )
         temporary_for_default_meta = temporary_for_default.get("meta") if isinstance(temporary_for_default.get("meta"), dict) else {}
+        temporary_for_default_confirm_text = str(
+            (temporary_for_default_confirm.get("assistant") or {}).get("content")
+            or temporary_for_default_confirm.get("message")
+            or ""
+        )
         default_meta = make_default.get("meta") if isinstance(make_default.get("meta"), dict) else {}
         default_text = str((make_default.get("assistant") or {}).get("content") or make_default.get("message") or "")
+        default_confirm_text = str(
+            (make_default_confirm.get("assistant") or {}).get("content") or make_default_confirm.get("message") or ""
+        )
         active_after_default_text = str((active_after_default.get("assistant") or {}).get("content") or active_after_default.get("message") or "")
         switch_back_after_default_text = str((switch_back_after_default.get("assistant") or {}).get("content") or switch_back_after_default.get("message") or "")
         switch_back_meta = switch_back.get("meta") if isinstance(switch_back.get("meta"), dict) else {}
         switch_back_text = str((switch_back.get("assistant") or {}).get("content") or switch_back.get("message") or "")
+        switch_back_confirm_text = str(
+            (switch_back_confirm.get("assistant") or {}).get("content") or switch_back_confirm.get("message") or ""
+        )
         after_rollback_text = str((after_rollback.get("assistant") or {}).get("content") or after_rollback.get("message") or "")
 
         self.assertEqual("action_tool", test_meta.get("route"))
@@ -2004,25 +2083,26 @@ class TestSafeModeTranscript(unittest.TestCase):
 
         self.assertEqual("model_status", temporary_meta.get("route"))
         self.assertFalse(bool(temporary_meta.get("used_llm", False)))
-        self.assertIn("SAFE MODE blocked this mutation.", temporary_text)
-        self.assertEqual(
-            "ollama:qwen3.5:4b",
-            str(runtime.runtime_truth_service().current_chat_target_status().get("model") or "").strip(),
-        )
+        self.assertIn("switch preview", temporary_text.lower())
+        self.assertIn("ollama:qwen2.5:7b-instruct", temporary_confirm_text.lower())
+        self.assertEqual("ollama:qwen2.5:7b-instruct", active_after_temporary_model)
         self.assertEqual("ollama:qwen2.5:7b-instruct", default_after_temporary)
 
         self.assertEqual("model_status", switch_back_meta.get("route"))
         self.assertFalse(bool(switch_back_meta.get("used_llm", False)))
-        self.assertIn("i do not have a recent trial model switch to roll back", switch_back_text.lower())
+        self.assertIn("switch this chat back", switch_back_text.lower())
+        self.assertIn("ollama:qwen3.5:4b", switch_back_confirm_text.lower())
         self.assertIn("ollama:qwen3.5:4b", after_rollback_text.lower())
 
         self.assertEqual("model_status", temporary_for_default_meta.get("route"))
         self.assertFalse(bool(temporary_for_default_meta.get("used_llm", False)))
+        self.assertIn("ollama:qwen2.5:7b-instruct", temporary_for_default_confirm_text.lower())
         self.assertEqual("model_status", default_meta.get("route"))
         self.assertFalse(bool(default_meta.get("used_llm", False)))
-        self.assertIn("SAFE MODE blocked this mutation.", default_text)
-        self.assertEqual("ollama:qwen2.5:7b-instruct", default_after_make_default)
-        self.assertIn("ollama:qwen3.5:4b", active_after_default_text.lower())
+        self.assertIn("make ollama:deepseek-r1:7b the default chat model", default_text.lower())
+        self.assertIn("ollama:deepseek-r1:7b", default_confirm_text.lower())
+        self.assertEqual("ollama:deepseek-r1:7b", default_after_make_default)
+        self.assertIn("ollama:deepseek-r1:7b", active_after_default_text.lower())
         self.assertIn("do not have a recent trial model switch to roll back", switch_back_after_default_text.lower())
         self.assertIn("changing the default alone does not create a trial rollback", switch_back_after_default_text.lower())
 
@@ -2333,6 +2413,15 @@ class TestSafeModeTranscript(unittest.TestCase):
                     "thread_id": "api:switch:thread",
                 },
             )
+            qwen_confirm = self._invoke_chat_http(
+                runtime,
+                {
+                    "messages": [{"role": "user", "content": "yes"}],
+                    "source_surface": "api",
+                    "user_id": "api:switch",
+                    "thread_id": "api:switch:thread",
+                },
+            )
             qwen_status = self._invoke_chat_http(
                 runtime,
                 {
@@ -2346,6 +2435,15 @@ class TestSafeModeTranscript(unittest.TestCase):
                 runtime,
                 {
                     "messages": [{"role": "user", "content": "use deepseek-r1:7b"}],
+                    "source_surface": "api",
+                    "user_id": "api:switch",
+                    "thread_id": "api:switch:thread",
+                },
+            )
+            deepseek_confirm = self._invoke_chat_http(
+                runtime,
+                {
+                    "messages": [{"role": "user", "content": "yes"}],
                     "source_surface": "api",
                     "user_id": "api:switch",
                     "thread_id": "api:switch:thread",
@@ -2369,6 +2467,15 @@ class TestSafeModeTranscript(unittest.TestCase):
                     "thread_id": "api:switch:thread",
                 },
             )
+            switch_back_confirm = self._invoke_chat_http(
+                runtime,
+                {
+                    "messages": [{"role": "user", "content": "yes"}],
+                    "source_surface": "api",
+                    "user_id": "api:switch",
+                    "thread_id": "api:switch:thread",
+                },
+            )
             restored_status = self._invoke_chat_http(
                 runtime,
                 {
@@ -2381,30 +2488,39 @@ class TestSafeModeTranscript(unittest.TestCase):
 
         qwen_meta = qwen_switch.get("meta") if isinstance(qwen_switch.get("meta"), dict) else {}
         qwen_text = str((qwen_switch.get("assistant") or {}).get("content") or qwen_switch.get("message") or "")
+        qwen_confirm_text = str((qwen_confirm.get("assistant") or {}).get("content") or qwen_confirm.get("message") or "")
         qwen_status_text = str((qwen_status.get("assistant") or {}).get("content") or qwen_status.get("message") or "")
         deepseek_meta = deepseek_switch.get("meta") if isinstance(deepseek_switch.get("meta"), dict) else {}
         deepseek_text = str((deepseek_switch.get("assistant") or {}).get("content") or deepseek_switch.get("message") or "")
+        deepseek_confirm_text = str(
+            (deepseek_confirm.get("assistant") or {}).get("content") or deepseek_confirm.get("message") or ""
+        )
         deepseek_status_text = str((deepseek_status.get("assistant") or {}).get("content") or deepseek_status.get("message") or "")
         switch_back_meta = switch_back.get("meta") if isinstance(switch_back.get("meta"), dict) else {}
         switch_back_text = str((switch_back.get("assistant") or {}).get("content") or switch_back.get("message") or "")
+        switch_back_confirm_text = str(
+            (switch_back_confirm.get("assistant") or {}).get("content") or switch_back_confirm.get("message") or ""
+        )
         restored_status_text = str((restored_status.get("assistant") or {}).get("content") or restored_status.get("message") or "")
 
         self.assertEqual("model_status", qwen_meta.get("route"))
         self.assertFalse(bool(qwen_meta.get("used_llm", False)))
-        self.assertIn("safe mode blocked this mutation", qwen_text.lower())
-        self.assertNotIn("deepseek", qwen_text.lower())
-        self.assertIn("ollama:qwen3.5:4b", qwen_status_text.lower())
+        self.assertIn("switch preview", qwen_text.lower())
+        self.assertIn("ollama:qwen2.5:7b-instruct", qwen_confirm_text.lower())
+        self.assertIn("ollama:qwen2.5:7b-instruct", qwen_status_text.lower())
 
         self.assertEqual("model_status", deepseek_meta.get("route"))
         self.assertFalse(bool(deepseek_meta.get("used_llm", False)))
-        self.assertIn("safe mode blocked this mutation", deepseek_text.lower())
+        self.assertIn("switch preview", deepseek_text.lower())
         self.assertNotIn("what are you referring to", deepseek_text.lower())
-        self.assertIn("ollama:qwen3.5:4b", deepseek_status_text.lower())
+        self.assertIn("ollama:deepseek-r1:7b", deepseek_confirm_text.lower())
+        self.assertIn("ollama:deepseek-r1:7b", deepseek_status_text.lower())
 
         self.assertEqual("model_status", switch_back_meta.get("route"))
         self.assertFalse(bool(switch_back_meta.get("used_llm", False)))
-        self.assertIn("i do not have a recent trial model switch to roll back", switch_back_text.lower())
-        self.assertIn("ollama:qwen3.5:4b", restored_status_text.lower())
+        self.assertIn("switch this chat back", switch_back_text.lower())
+        self.assertIn("ollama:qwen2.5:7b-instruct", switch_back_confirm_text.lower())
+        self.assertIn("ollama:qwen2.5:7b-instruct", restored_status_text.lower())
 
     def test_safe_mode_repair_followup_reuses_recent_unhealthy_runtime_context(self) -> None:
         runtime = self._runtime()

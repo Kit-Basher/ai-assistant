@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
 from typing import Any
 
 
@@ -386,6 +387,9 @@ class FileSystemSkill:
             maximum=_HARD_SEARCH_DEPTH,
         )
         query_lower = normalized_query.lower()
+        normalized_name_query = " ".join(
+            token for token in re.split(r"[^a-z0-9]+", query_lower) if token
+        )
         results: list[dict[str, Any]] = []
         truncated = False
         for _current, entries in self._walk_search_entries(resolved_root, max_depth=bounded_depth):
@@ -393,7 +397,13 @@ class FileSystemSkill:
                 if len(results) >= bounded_results:
                     truncated = True
                     break
-                if query_lower not in entry.name.lower():
+                entry_name_lower = entry.name.lower()
+                normalized_entry_name = " ".join(
+                    token for token in re.split(r"[^a-z0-9]+", entry_name_lower) if token
+                )
+                if query_lower not in entry_name_lower and (
+                    not normalized_name_query or normalized_name_query not in normalized_entry_name
+                ):
                     continue
                 resolved_entry, entry_error = self._resolve_request_path(entry.path)
                 if resolved_entry is None or entry_error is not None:

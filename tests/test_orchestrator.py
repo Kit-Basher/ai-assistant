@@ -3444,8 +3444,53 @@ class TestOrchestrator(unittest.TestCase):
 
         response = orchestrator.handle_message("wat?", "user1", chat_context={"source_surface": "webui"})
 
-        self.assertIn("continue with that", response.text.lower())
+        self.assertNotIn("ollama is reachable", response.text.lower())
+        self.assertNotIn("i was following", response.text.lower())
+        self.assertIn("what would you like to do", response.text.lower())
         self.assertNotIn("not ready to chat yet", response.text.lower())
+
+    def test_readiness_output_does_not_hijack_a_clear_new_question(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="A mutex protects shared state.")
+        runtime_truth = _FakeRuntimeTruthService()
+        runtime_truth.current_provider = "ollama"
+        runtime_truth.current_model = "ollama:Gemma:latest"
+        runtime_truth.default_provider = "ollama"
+        runtime_truth.default_model = "ollama:Gemma:latest"
+        runtime_truth.effective_provider = "ollama"
+        runtime_truth.effective_model = "ollama:Gemma:latest"
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            runtime_truth_service=runtime_truth,
+            chat_runtime_adapter=_FrontdoorRuntimeAdapter(),
+        )
+
+        ready = orchestrator.handle_message("what is the agent status?", "user1")
+        next_answer = orchestrator.handle_message("What is a mutex?", "user1")
+
+        self.assertEqual("Ready.", ready.text)
+        self.assertEqual("A mutex protects shared state.", next_answer.text)
+        self.assertEqual("generic_chat", next_answer.data.get("route"))
+        self.assertEqual(1, len(llm.chat_calls))
+        self.assertNotIn("I was following", next_answer.text)
+
+    def test_action_result_remains_available_for_legitimate_confusion_followup(self) -> None:
+        orchestrator = self._orchestrator()
+        orchestrator._last_interpretable_result["user1"] = {  # noqa: SLF001
+            "created_ts": int(time.time()),
+            "route": "action_tool",
+            "kind": "model_scout",
+            "summary": "Compared the installed local models.",
+            "payload": {"type": "model_scout", "summary": "Compared the installed local models."},
+            "resumable": True,
+        }
+
+        response = orchestrator.handle_message("wat?", "user1")
+
+        self.assertIn("I was following: Compared the installed local models.", response.text)
 
     def test_correction_turn_reassesses_without_generic_choice_prompt(self) -> None:
         runtime_truth = _FakeRuntimeTruthService()
@@ -4607,6 +4652,46 @@ class TestOrchestrator(unittest.TestCase):
         self.assertFalse(text_response.data["used_llm"])
         self.assertIn("TODO", text_response.text)
         self.assertIn(("filesystem_search_text", (".", "TODO")), runtime_truth.calls)
+        self.assertEqual(0, len(llm.chat_calls))
+
+    def test_natural_filesystem_search_and_missing_scope_never_fall_through_to_llm(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        runtime_truth = _FakeRuntimeTruthService()
+        safe_root = os.path.join(self.tmpdir.name, "workspace")
+        os.makedirs(safe_root, exist_ok=True)
+        with open(os.path.join(safe_root, "personal-agent-notes.md"), "w", encoding="utf-8") as handle:
+            handle.write("bounded search fixture\n")
+        runtime_truth.filesystem_skill = FileSystemSkill(
+            allowed_roots=[safe_root],
+            base_dir=safe_root,
+            sensitive_roots=[os.path.join(safe_root, "private")],
+        )
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            runtime_truth_service=runtime_truth,
+            chat_runtime_adapter=_FrontdoorRuntimeAdapter(),
+        )
+
+        with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
+            result = orchestrator.handle_message(
+                "can you see my system files? can you look for the personal agent files?",
+                "user1",
+            )
+            clarification = orchestrator.handle_message("can you do a system file search?", "user2")
+
+        self.assertEqual("action_tool", result.data["route"])
+        self.assertEqual(["filesystem"], result.data["used_tools"])
+        self.assertIn("personal-agent-notes.md", result.text)
+        self.assertIn(("filesystem_search_filenames", (".", "personal agent")), runtime_truth.calls)
+        self.assertEqual("action_tool", clarification.data["route"])
+        self.assertEqual("action_clarification", clarification.data["runtime_payload"]["type"])
+        self.assertEqual("filesystem_search_filenames", clarification.data["runtime_payload"]["kind"])
+        self.assertIn("which allowed directory", clarification.text.lower())
+        self.assertIn("filename", clarification.text.lower())
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_shell_queries_use_native_skill_without_llm_fallback(self) -> None:

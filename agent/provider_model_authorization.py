@@ -229,9 +229,58 @@ class ProviderModelAuthorizationService:
         if spec.safe_mode_blocked and bool(self.runtime._safe_mode_enabled()):
             provider = str(payload.get("provider") or payload.get("provider_id") or "").strip().lower()
             model = str(payload.get("model_id") or payload.get("model") or "").strip()
-            if operation in {"model.switch", "model.switch_temporary"} and provider != "ollama":
-                return False, {**self.runtime._safe_mode_remote_switch_response(model), "mutated": False, "operation": operation}
-            return False, {"ok": False, "error": "safe_mode_mutation_blocked", "error_kind": "safe_mode_mutation_blocked", "message": "SAFE MODE blocked this mutation.", "mutated": False, "operation": operation}
+            if operation in {"model.switch", "model.switch_temporary"}:
+                model_provider = str(model.split(":", 1)[0]).strip().lower() if ":" in model else ""
+                if provider != "ollama" and model_provider != "ollama":
+                    return False, {**self.runtime._safe_mode_remote_switch_response(model), "mutated": False, "operation": operation}
+                eligible, eligibility = self.runtime._resolve_switch_target_with_policy_guard(
+                    model,
+                    provider_id="ollama",
+                    require_available=True,
+                    require_usable=True,
+                )
+                if not eligible:
+                    eligibility_body = dict(eligibility) if isinstance(eligibility, dict) else {}
+                    if str(eligibility_body.get("error") or "").strip() == "switch_target_unavailable":
+                        why = (
+                            "The target is not present as an installed, enabled, available local Ollama chat model."
+                        )
+                        next_action = (
+                            "Choose a model reported as usable in the local inventory. "
+                            "Downloading another model still requires leaving SAFE MODE through the approved control-mode flow."
+                        )
+                        eligibility_body.update(
+                            {
+                                "error_kind": "switch_target_unavailable",
+                                "message": f"I did not switch to {model}. {why} {next_action}",
+                                "why": why,
+                                "next_action": next_action,
+                            }
+                        )
+                    return False, {
+                        **eligibility_body,
+                        "ok": False,
+                        "mutated": False,
+                        "operation": operation,
+                    }
+            elif operation == "model.acquire":
+                why = "SAFE MODE does not allow model downloads or acquisition."
+                next_action = (
+                    "Choose an already-installed usable local model, or explicitly enter Controlled Mode "
+                    "before requesting a download."
+                )
+                return False, {
+                    "ok": False,
+                    "error": "safe_mode_model_acquisition_blocked",
+                    "error_kind": "safe_mode_model_acquisition_blocked",
+                    "message": f"I did not download {model or 'that model'}. {why} {next_action}",
+                    "why": why,
+                    "next_action": next_action,
+                    "mutated": False,
+                    "operation": operation,
+                }
+            else:
+                return False, {"ok": False, "error": "safe_mode_mutation_blocked", "error_kind": "safe_mode_mutation_blocked", "message": "SAFE MODE blocked this mutation.", "mutated": False, "operation": operation}
         actor, thread, session = self._scope(payload)
         bound_request = self._bound_request(operation, payload)
         runtime_snapshot = self._runtime_snapshot()
@@ -367,7 +416,19 @@ class ProviderModelAuthorizationService:
 
     def route(self, operation: str, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         spec = SPECS.get(operation)
-        if spec is not None and spec.safe_mode_blocked and bool(self.runtime._safe_mode_enabled()):
+        provider = str(payload.get("provider") or payload.get("provider_id") or "").strip().lower()
+        model = str(payload.get("model_id") or payload.get("model") or "").strip()
+        model_provider = str(model.split(":", 1)[0]).strip().lower() if ":" in model else ""
+        safe_local_switch = bool(
+            operation in {"model.switch", "model.switch_temporary"}
+            and (provider == "ollama" or model_provider == "ollama")
+        )
+        if (
+            spec is not None
+            and spec.safe_mode_blocked
+            and bool(self.runtime._safe_mode_enabled())
+            and not safe_local_switch
+        ):
             return self.preview(operation, payload)
         if payload.get("confirm") is True and not isinstance(payload.get("confirmation"), dict):
             return False, {"ok": False, "error": "boolean_confirmation_not_authorization", "mutated": False}

@@ -4463,6 +4463,7 @@ class Orchestrator:
             elif ok and operation == "model_switch_back":
                 self._clear_model_trial_state(user_id)
             if ok and operation == "model_set_target" and bool(params.get("promote_default")):
+                self._clear_model_trial_state(user_id)
                 applied_model = str(
                     response_body.get("model_id") or domain_request.get("model_id") or ""
                 ).strip()
@@ -5628,6 +5629,25 @@ class Orchestrator:
             "summary": summary,
             "payload": dict(payload),
             "used_tools": used_tools,
+            "resumable": route not in {
+                "operational_status",
+                "runtime_status",
+                "provider_status",
+                "model_status",
+            },
+        }
+
+    @staticmethod
+    def _is_resumable_interpretable_context(context: dict[str, Any]) -> bool:
+        if not context:
+            return False
+        if "resumable" in context:
+            return bool(context.get("resumable"))
+        return str(context.get("route") or "").strip().lower() not in {
+            "operational_status",
+            "runtime_status",
+            "provider_status",
+            "model_status",
         }
 
     @staticmethod
@@ -8748,26 +8768,15 @@ class Orchestrator:
         previous_default_model = str(current_target.get("configured_model") or previous_model or "").strip() or None
         previous_default_provider = str(current_target.get("configured_provider") or previous_provider or "").strip().lower() or None
         if promote_default:
-            policy_status = (
-                truth.model_controller_policy_status()
-                if callable(getattr(truth, "model_controller_policy_status", None))
-                else {}
-            )
-            use_explicit_controller = not bool(policy_status.get("safe_mode", False))
             explicit_setter = getattr(truth, "set_confirmed_chat_model_target", None)
             default_setter = getattr(truth, "set_default_chat_model", None)
-            if use_explicit_controller and callable(explicit_setter):
+            if callable(explicit_setter):
                 default_ok, default_body = explicit_setter(
                     matched_model,
                     provider_id=normalized_provider,
                 )
             elif callable(default_setter):
                 default_ok, default_body = default_setter(matched_model)
-            elif callable(explicit_setter):
-                default_ok, default_body = explicit_setter(
-                    matched_model,
-                    provider_id=normalized_provider,
-                )
             else:
                 default_ok, default_body = truth.set_default_chat_model(matched_model)
         else:
@@ -9255,9 +9264,12 @@ class Orchestrator:
         reason: str,
     ) -> OrchestratorResponse:
         context = self._current_interpretable_result(user_id)
-        summary = str(context.get("summary") or "").strip()
+        resumable_context = self._is_resumable_interpretable_context(context)
+        summary = str(context.get("summary") or "").strip() if resumable_context else ""
         if summary:
             message = f"I was following: {summary} Do you want me to continue with that or switch to something else?"
+        elif context and not resumable_context:
+            message = "That last response was status information, not an active task. What would you like to do next?"
         else:
             message = "I was following your last request. Do you want me to continue with that or switch topics?"
         return self._runtime_truth_response(
@@ -9876,7 +9888,7 @@ class Orchestrator:
                 setup_state = str(setup.get("setup_state") or "").strip().lower() or "unavailable"
                 if setup_state != "ready":
                     return self._setup_explanation_response(used_memory=used_memory)
-            if context:
+            if self._is_resumable_interpretable_context(context):
                 return self._assistant_confusion_recovery_response(
                     user_id=user_id,
                     used_memory=used_memory,
@@ -9887,7 +9899,7 @@ class Orchestrator:
                 reason="short_help_prompt",
             )
 
-        if context:
+        if self._is_resumable_interpretable_context(context):
             return self._assistant_confusion_recovery_response(
                 user_id=user_id,
                 used_memory=used_memory,
@@ -15330,9 +15342,15 @@ class Orchestrator:
         *,
         root_hint: str | None,
         query: str | None,
+        root_required: bool = False,
     ) -> OrchestratorResponse:
         normalized_query = str(query or "").strip()
         if not normalized_query:
+            if root_required:
+                return self._filesystem_clarification_response(
+                    kind="filesystem_search_filenames",
+                    question="What filename should I search for, and which allowed directory should I search under?",
+                )
             return self._filesystem_clarification_response(
                 kind="filesystem_search_filenames",
                 question="Tell me the filename you want me to search for.",
@@ -19211,6 +19229,7 @@ class Orchestrator:
             return self._filesystem_search_filenames_response(
                 root_hint=str(decision.get("path_hint") or "").strip() or None,
                 query=str(decision.get("query") or "").strip() or None,
+                root_required=bool(decision.get("root_required", False)),
             )
         if kind == "filesystem_search_text":
             return self._filesystem_search_text_response(

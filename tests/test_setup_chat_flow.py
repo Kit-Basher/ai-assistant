@@ -87,6 +87,14 @@ class TestSetupChatFlow(unittest.TestCase):
             ("list the files under /tmp", "action_tool", "filesystem_list_directory"),
             ("inspect this file", "action_tool", "filesystem_read_text_file"),
             ("read the file", "action_tool", "filesystem_read_text_file"),
+            (
+                "can you see my system files? can you look for the personal agent files?",
+                "action_tool",
+                "filesystem_search_filenames",
+            ),
+            ("can you do a system file search?", "action_tool", "filesystem_search_filenames"),
+            ("look for the personal agent files", "action_tool", "filesystem_search_filenames"),
+            ("find files named personal-agent", "action_tool", "filesystem_search_filenames"),
         )
         for text, expected_route, expected_kind in cases:
             with self.subTest(text=text):
@@ -94,6 +102,12 @@ class TestSetupChatFlow(unittest.TestCase):
                 self.assertEqual(expected_route, decision.get("route"))
                 self.assertEqual(expected_kind, decision.get("kind"))
                 self.assertFalse(bool(decision.get("generic_allowed")))
+
+        natural_search = classify_runtime_chat_route("look for the personal agent files")
+        self.assertEqual("personal agent", natural_search.get("query"))
+        underspecified = classify_runtime_chat_route("can you do a system file search?")
+        self.assertIsNone(underspecified.get("query"))
+        self.assertTrue(bool(underspecified.get("root_required")))
 
     def test_agent_health_stays_runtime_status_while_machine_stats_stay_operational(self) -> None:
         agent_health = classify_runtime_chat_route("agent health")

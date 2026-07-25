@@ -126,6 +126,113 @@ def test_safe_mode_blocks_provider_change_but_allows_control_mode_plan(monkeypat
         assert ok and preview["requires_confirmation"]
 
 
+def test_safe_mode_allows_confirmed_installed_usable_ollama_switch_once(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        runtime = _runtime(Path(raw), safe_mode_enabled=True)
+        target = "ollama:qwen2.5:3b-instruct"
+        eligibility_calls: list[tuple[str, str | None, bool, bool]] = []
+        dispatched: list[dict[str, object]] = []
+
+        def _eligible(
+            model_id: str,
+            *,
+            provider_id: str | None = None,
+            require_available: bool = True,
+            require_usable: bool = False,
+        ) -> tuple[bool, dict[str, object]]:
+            eligibility_calls.append((model_id, provider_id, require_available, require_usable))
+            return True, {"ok": True, "provider": "ollama", "model_id": target, "local": True}
+
+        def _switch(payload: dict[str, object]) -> tuple[bool, dict[str, object]]:
+            dispatched.append(dict(payload))
+            return True, {
+                "ok": True,
+                "provider": "ollama",
+                "model_id": target,
+                "message": f"Now using {target} for chat.",
+            }
+
+        monkeypatch.setattr(runtime, "_resolve_switch_target_with_policy_guard", _eligible)
+        monkeypatch.setattr(runtime, "llm_models_switch", _switch)
+        request = {
+            "provider": "ollama",
+            "model_id": target,
+            "actor_id": "actor-local",
+            "thread_id": "thread-local",
+            "session_id": "session-local",
+        }
+
+        ok, preview = runtime.route_provider_model_mutation("model.switch", request)
+        assert ok, preview
+        assert preview["requires_confirmation"]
+        plan = preview["plan"]
+        apply = {**request, "mutation_plan": plan, "confirmation": _confirmation(plan)}
+        ok, receipt = runtime.route_provider_model_mutation("model.switch", apply)
+        assert ok, receipt
+        replay_ok, replay = runtime.route_provider_model_mutation("model.switch", apply)
+
+        assert not replay_ok
+        assert (replay.get("error") or replay.get("error_code")) in {
+            "mutation_confirmation_consumed",
+            "mutation_confirmation_replayed",
+            "confirmation_consumed",
+        }
+        assert eligibility_calls == [(target, "ollama", True, True)]
+        assert dispatched == [
+            {
+                "provider": "ollama",
+                "model_id": "qwen2.5:3b-instruct",
+                "model": "qwen2.5:3b-instruct",
+                "confirm": True,
+            }
+        ]
+
+
+def test_safe_mode_rejects_uninstalled_local_switch_before_confirmation(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        runtime = _runtime(Path(raw), safe_mode_enabled=True)
+
+        def _unavailable(*_args: object, **_kwargs: object) -> tuple[bool, dict[str, object]]:
+            return False, {
+                "ok": False,
+                "error": "switch_target_unavailable",
+                "error_kind": "switch_target_unavailable",
+                "message": "That local model is not installed and usable.",
+            }
+
+        monkeypatch.setattr(runtime, "_resolve_switch_target_with_policy_guard", _unavailable)
+        ok, body = runtime.route_provider_model_mutation(
+            "model.switch",
+            {"provider": "ollama", "model_id": "ollama:not-installed"},
+        )
+
+        assert not ok
+        assert body["error"] == "switch_target_unavailable"
+        assert body.get("requires_confirmation") is not True
+        assert "not present as an installed" in body["message"]
+        assert "local inventory" in body["next_action"]
+
+
+def test_safe_mode_still_blocks_remote_switch_and_model_download() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        runtime = _runtime(Path(raw), safe_mode_enabled=True)
+
+        remote_ok, remote = runtime.route_provider_model_mutation(
+            "model.switch",
+            {"provider": "openrouter", "model_id": "openrouter:openai/gpt-4o-mini"},
+        )
+        download_ok, download = runtime.route_provider_model_mutation(
+            "model.acquire",
+            {"provider": "ollama", "model_id": "ollama:qwen2.5:3b-instruct"},
+        )
+
+        assert not remote_ok
+        assert remote["error"] == "safe_mode_remote_switch_blocked"
+        assert not download_ok
+        assert download["error"] == "safe_mode_model_acquisition_blocked"
+        assert "does not allow model downloads" in download["why"]
+
+
 def test_confirmation_scope_and_changed_secret_are_rejected(monkeypatch) -> None:
     with tempfile.TemporaryDirectory() as raw:
         runtime = _runtime(Path(raw))

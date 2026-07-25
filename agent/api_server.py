@@ -22305,24 +22305,6 @@ class AgentRuntime:
         }
 
     @staticmethod
-    def _safe_mode_model_mutation_response(model_id: str) -> dict[str, Any]:
-        blocked_model = str(model_id or "").strip() or "that model"
-        why = "SAFE MODE blocks model switch and default mutations, including local targets."
-        next_action = "Switch to Controlled Mode explicitly before retrying a model change."
-        return {
-            "ok": False,
-            "error": "safe_mode_blocked",
-            "error_kind": "safe_mode_blocked",
-            "message": compose_actionable_message(
-                what_happened=f"SAFE MODE is active, so I did not change chat to {blocked_model}",
-                why=why,
-                next_action=next_action,
-            ),
-            "why": why,
-            "next_action": next_action,
-        }
-
-    @staticmethod
     def _safe_mode_provider_mutation_response(action: str) -> dict[str, Any]:
         blocked_action = str(action or "provider/model mutation").strip()
         why = "SAFE MODE blocks provider and model configuration changes."
@@ -22350,8 +22332,7 @@ class AgentRuntime:
         if bool(policy.get("allow_remote_switch", True)):
             return True, None
         if bool((resolved_body or {}).get("local", False)):
-            blocked_model = str((resolved_body or {}).get("model_id") or requested_model).strip()
-            return False, self._safe_mode_model_mutation_response(blocked_model)
+            return True, None
         blocked_model = str((resolved_body or {}).get("model_id") or requested_model).strip()
         return False, self._safe_mode_remote_switch_response(blocked_model)
 
@@ -23105,11 +23086,7 @@ class AgentRuntime:
             }
 
         canonical_model = f"{provider}:{model_id}"
-        switch_action = (
-            "runtime.configure_local_chat_model"
-            if provider == "ollama"
-            else "runtime.set_confirmed_chat_model_target"
-        )
+        switch_action = "runtime.set_confirmed_chat_model_target"
         if not confirm:
             return True, {
                 "ok": True,
@@ -23136,10 +23113,7 @@ class AgentRuntime:
                 },
             }
 
-        if provider == "ollama":
-            ok, body = self.configure_local_chat_model(canonical_model)
-        else:
-            ok, body = self.set_confirmed_chat_model_target(canonical_model, provider_id=provider)
+        ok, body = self.set_confirmed_chat_model_target(canonical_model, provider_id=provider)
         message = str((body if isinstance(body, dict) else {}).get("message") or "Model switch failed.")
         if not ok:
             failure_error_kind = str(

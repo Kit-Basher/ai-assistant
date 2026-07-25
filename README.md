@@ -87,6 +87,8 @@ local activation marker; purge uninstall remains unsupported.
 - Local-first and advisory-first.
 - Remote switching is blocked.
 - Install/download/import actions are blocked.
+- A switch to an already-installed, currently usable local Ollama model is
+  allowed only through its bounded preview and explicit confirmation.
 - Recommendations can still be shown, but they do not execute anything.
 
 ### Controlled Mode
