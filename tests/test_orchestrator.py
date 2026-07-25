@@ -2019,6 +2019,223 @@ class TestOrchestrator(unittest.TestCase):
             llm_client=None,
         )
 
+    def _approval_preview(self, orchestrator: Orchestrator, user_id: str = "approval-user") -> OrchestratorResponse:
+        orchestrator._set_active_thread_id_for_user(user_id, "approval-thread", persist=False)  # noqa: SLF001
+        return orchestrator._confirmation_preview_response(  # noqa: SLF001
+            user_id,
+            route="action_tool",
+            question="I can repair managed search. Say yes to continue, or no to cancel.",
+            used_tools=["managed_local_service_setup_preview"],
+            action={
+                "operation": "managed_local_service_setup_preview",
+                "params": {"service_id": "searxng", "selected_engine": "podman"},
+            },
+            title="SearXNG setup preview",
+            preview_payload={"service_id": "searxng"},
+            skip_post_response_hooks=True,
+        )
+
+    def test_pending_approval_typos_preserve_exact_action_and_never_use_generic_chat(self) -> None:
+        orchestrator = self._orchestrator()
+        self._approval_preview(orchestrator)
+        original = orchestrator.confirmations.get("approval-user")
+        self.assertIsNotNone(original)
+        assert original is not None
+        original_action = json.dumps(original.action, sort_keys=True)
+        original_expiry = original.expires_at
+
+        with patch.object(orchestrator, "_llm_chat", side_effect=AssertionError("generic chat must not run")), patch.object(
+            orchestrator,
+            "_record_runtime_event",
+        ) as event_mock:
+            for typo in ("yex", "ye", "yse", "yep"):
+                response = orchestrator.handle_message(
+                    typo,
+                    "approval-user",
+                    chat_context={"thread_id": "approval-thread"},
+                )
+                self.assertEqual("Did you mean yes to approve this change? Say yes or no.", response.text)
+                self.assertEqual("plan_mode", response.data.get("route"))
+
+        preserved = orchestrator.confirmations.get("approval-user")
+        self.assertIs(original, preserved)
+        assert preserved is not None
+        self.assertEqual(original_expiry, preserved.expires_at)
+        self.assertEqual(original_action, json.dumps(preserved.action, sort_keys=True))
+        event_names = [call.args[0] for call in event_mock.call_args_list]
+        self.assertIn("approval.pending_preserved", event_names)
+        self.assertIn("approval.typo_clarification", event_names)
+        self.assertIn("approval.final_route", event_names)
+        for call in event_mock.call_args_list:
+            self.assertNotIn("token", json.dumps(call.kwargs).lower())
+            self.assertNotIn("pending_id", call.kwargs)
+
+    def test_pending_approval_typo_then_yes_executes_original_once(self) -> None:
+        orchestrator = self._orchestrator()
+        self._approval_preview(orchestrator)
+        original = orchestrator.confirmations.get("approval-user")
+
+        with patch.object(orchestrator, "_llm_chat", side_effect=AssertionError("generic chat must not run")), patch.object(
+            orchestrator,
+            "_execute_confirmed_native_mutation",
+            return_value=OrchestratorResponse("SearXNG setup finished.", {"route": "action_tool", "ok": True}),
+        ) as execute_mock:
+            clarification = orchestrator.handle_message(
+                "yex",
+                "approval-user",
+                chat_context={"thread_id": "approval-thread"},
+            )
+            confirmed = orchestrator.handle_message(
+                "yes",
+                "approval-user",
+                chat_context={"thread_id": "approval-thread"},
+            )
+            replay = orchestrator.handle_message(
+                "yes",
+                "approval-user",
+                chat_context={"thread_id": "approval-thread"},
+            )
+
+        self.assertEqual("Did you mean yes to approve this change? Say yes or no.", clarification.text)
+        execute_mock.assert_called_once()
+        assert original is not None
+        self.assertIs(original.action, execute_mock.call_args.args[1])
+        self.assertEqual("SearXNG setup finished.", confirmed.text)
+        self.assertIn("don’t have a current action", replay.text)
+        self.assertIsNone(orchestrator.confirmations.get("approval-user"))
+
+    def test_pending_approval_typo_then_no_cancels_without_execution(self) -> None:
+        orchestrator = self._orchestrator()
+        self._approval_preview(orchestrator)
+
+        with patch.object(orchestrator, "_llm_chat", side_effect=AssertionError("generic chat must not run")), patch.object(
+            orchestrator,
+            "_execute_confirmed_native_mutation",
+            side_effect=AssertionError("cancelled approval must not execute"),
+        ):
+            orchestrator.handle_message("yex", "approval-user", chat_context={"thread_id": "approval-thread"})
+            cancelled = orchestrator.handle_message("no", "approval-user", chat_context={"thread_id": "approval-thread"})
+
+        self.assertIn("cancelled", cancelled.text.lower())
+        self.assertIsNone(orchestrator.confirmations.get("approval-user"))
+
+    def test_pending_approval_can_expire_after_typo_clarification(self) -> None:
+        orchestrator = self._orchestrator()
+        self._approval_preview(orchestrator)
+        with patch.object(orchestrator, "_llm_chat", side_effect=AssertionError("generic chat must not run")):
+            orchestrator.handle_message("yex", "approval-user", chat_context={"thread_id": "approval-thread"})
+            pending = orchestrator.confirmations.get("approval-user")
+            self.assertIsNotNone(pending)
+            assert pending is not None
+            pending.expires_at = int(time.time()) - 1
+            if isinstance(pending.action, dict):
+                pending.action["expires_at"] = pending.expires_at
+            expired = orchestrator.handle_message(
+                "yes",
+                "approval-user",
+                chat_context={"thread_id": "approval-thread"},
+            )
+
+        self.assertIn("confirmation expired", expired.text)
+        self.assertIn("didn’t make any changes", expired.text)
+        self.assertIsNone(orchestrator.confirmations.get("approval-user"))
+
+    def test_unrelated_pending_reply_does_not_approve_or_invoke_generic_chat(self) -> None:
+        orchestrator = self._orchestrator()
+        self._approval_preview(orchestrator)
+        original = orchestrator.confirmations.get("approval-user")
+
+        with patch.object(orchestrator, "_llm_chat", side_effect=AssertionError("generic chat must not run")), patch.object(
+            orchestrator,
+            "_execute_confirmed_native_mutation",
+            side_effect=AssertionError("unrelated text must not approve"),
+        ):
+            response = orchestrator.handle_message(
+                "maybe later",
+                "approval-user",
+                chat_context={"thread_id": "approval-thread"},
+            )
+
+        self.assertIn("still a change awaiting approval", response.text)
+        self.assertIs(original, orchestrator.confirmations.get("approval-user"))
+
+    def test_exact_searxng_transcript_replaces_pending_only_after_deterministic_routing(self) -> None:
+        orchestrator = self._orchestrator()
+        self._approval_preview(orchestrator)
+        original = orchestrator.confirmations.get("approval-user")
+        self.assertIsNotNone(original)
+        assert original is not None
+        original_pending_id = str(original.action.get("pending_id") or "")
+
+        def _replacement_preview(user_id: str, text: str) -> OrchestratorResponse:
+            self.assertEqual("set up searcXNG", text)
+            return orchestrator._confirmation_preview_response(  # noqa: SLF001
+                user_id,
+                route="action_tool",
+                question="Fresh SearXNG repair preview. Say yes to continue, or no to cancel.",
+                used_tools=["managed_local_service_setup_preview"],
+                action={
+                    "operation": "managed_local_service_setup_preview",
+                    "params": {"service_id": "searxng", "selected_engine": "podman"},
+                },
+                title="Fresh SearXNG setup preview",
+                preview_payload={"service_id": "searxng"},
+                skip_post_response_hooks=True,
+            )
+
+        with patch.object(orchestrator, "_llm_chat", side_effect=AssertionError("generic chat must not run")), patch.object(
+            orchestrator,
+            "_managed_service_start_restart_preview_response",
+            side_effect=_replacement_preview,
+        ) as repair_route:
+            typo = orchestrator.handle_message(
+                "yex",
+                "approval-user",
+                chat_context={"thread_id": "approval-thread"},
+            )
+            replacement = orchestrator.handle_message(
+                "set up searcXNG",
+                "approval-user",
+                chat_context={"thread_id": "approval-thread"},
+            )
+
+        self.assertEqual("Did you mean yes to approve this change? Say yes or no.", typo.text)
+        repair_route.assert_called_once_with("approval-user", "set up searcXNG")
+        self.assertEqual("Fresh SearXNG repair preview. Say yes to continue, or no to cancel.", replacement.text)
+        current = orchestrator.confirmations.get("approval-user")
+        self.assertIsNotNone(current)
+        self.assertIsNot(original, current)
+        self.assertEqual("Fresh SearXNG setup preview", current.title if current is not None else None)
+        pending_rows = orchestrator._memory_runtime.list_pending_items(  # noqa: SLF001
+            "approval-user",
+            include_expired=True,
+        )
+        original_rows = [row for row in pending_rows if row.get("pending_id") == original_pending_id]
+        self.assertEqual("ABORTED", original_rows[0].get("status"))
+
+    def test_searxng_setup_phrases_route_deterministically_without_generic_chat(self) -> None:
+        orchestrator = self._orchestrator()
+        phrases = (
+            "set up SearXNG",
+            "setup searxng",
+            "start SearXNG",
+            "repair SearXNG",
+            "set up search",
+            "set up searcXNG",
+        )
+        with patch.object(orchestrator, "_llm_chat", side_effect=AssertionError("generic chat must not run")), patch.object(
+            orchestrator,
+            "_managed_service_start_restart_preview_response",
+            return_value=OrchestratorResponse("repair preview", {"route": "action_tool", "ok": True}),
+        ) as preview_mock:
+            for index, phrase in enumerate(phrases):
+                with self.subTest(phrase=phrase):
+                    response = orchestrator.handle_message(phrase, f"search-user-{index}")
+                    self.assertEqual("repair preview", response.text)
+                    self.assertEqual("action_tool", response.data.get("route"))
+
+        self.assertEqual(len(phrases), preview_mock.call_count)
+
     def test_handle_message_no_longer_raises(self) -> None:
         orchestrator = self._orchestrator()
         response = orchestrator.handle_message("hello there", "user1")

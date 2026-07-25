@@ -1697,6 +1697,21 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         runner = runtime._managed_local_service_executor._runner  # noqa: SLF001
         self.assertEqual([], runner.calls)
 
+    def test_searcxng_case_typo_routes_to_existing_repair_flow(self) -> None:
+        runtime = self._runtime_with_engine("podman")
+        runtime.orchestrator()._llm_chat = mock.Mock(  # type: ignore[method-assign]  # noqa: SLF001
+            side_effect=AssertionError("generic chat must not run")
+        )
+
+        body, text = self._chat(runtime, "set up searcXNG")
+
+        self.assertTrue("Web search is not set up yet" in text or "Search is not currently working" in text)
+        setup = body.get("setup", {}) if isinstance(body.get("setup"), dict) else {}
+        plan_mode = setup.get("plan_mode") if isinstance(setup.get("plan_mode"), dict) else {}
+        self.assertEqual("search.searxng.repair", plan_mode.get("action_type"))
+        self.assertTrue(setup.get("requires_confirmation"))
+        runtime.orchestrator()._llm_chat.assert_not_called()  # type: ignore[attr-defined]  # noqa: SLF001
+
     def test_declining_search_setup_plan_does_not_mutate(self) -> None:
         runtime = self._runtime_with_engine("podman")
         runner = runtime._managed_local_service_executor._runner  # noqa: SLF001

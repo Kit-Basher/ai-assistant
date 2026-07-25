@@ -797,6 +797,7 @@ _CRITICAL_INTENT_TYPO_MAP = {
     "useing": "using",
     "olama": "ollama",
     "ollma": "ollama",
+    "searcxng": "searxng",
 }
 
 

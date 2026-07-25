@@ -3250,9 +3250,10 @@ class Orchestrator:
         if "external pack" in normalized or "skill pack" in normalized or "imported pack" in normalized:
             return False
         service_target = r"(?:search|web search|searxng|search service|managed search)"
-        if re.search(rf"\b(start|restart|bring up|turn on|repair|fix)\b.*\b{service_target}\b", normalized):
+        action = r"(?:start|restart|bring up|turn on|repair|fix|set up|setup|configure|enable)"
+        if re.search(rf"\b{action}\b.*\b{service_target}\b", normalized):
             return True
-        if re.search(rf"\b{service_target}\b.*\b(start|restart|bring up|turn on|repair|fix)\b", normalized):
+        if re.search(rf"\b{service_target}\b.*\b{action}\b", normalized):
             return True
         return bool(re.search(r"\b(can you|could you|please)?\s*(restart|start)\s+it\s+(for me|again)\b", normalized))
 
@@ -3826,7 +3827,7 @@ class Orchestrator:
         mutating: bool = True,
         skip_post_response_hooks: bool = False,
     ) -> OrchestratorResponse:
-        self._clear_pending_confirmation(user_id, status=PENDING_STATUS_ABORTED)
+        prior_pending = self.confirmations.get(user_id)
         now_epoch = int(datetime.now(timezone.utc).timestamp())
         pending_id = f"confirm-{uuid.uuid4().hex[:10]}"
         expires_at = now_epoch + 600
@@ -3982,6 +3983,16 @@ class Orchestrator:
             expires_at=expires_at,
             title=title,
         )
+        replaced_pending = self._clear_pending_confirmation(user_id, status=PENDING_STATUS_ABORTED)
+        if replaced_pending is not None:
+            replaced_action_type = self._pending_confirmation_action_type(replaced_pending)
+            self._cancel_pending_confirmation_plan(replaced_pending)
+            self._record_runtime_event(
+                "approval.replaced",
+                action_type=replaced_action_type,
+                replacement_action_type=str(canonical_plan.get("action_type") or action.get("operation") or "unknown").strip().lower(),
+                route=route,
+            )
         self.confirmations.set(pending)
         self._memory_runtime.add_pending_item(
             user_id,
@@ -4001,6 +4012,12 @@ class Orchestrator:
                     "plan_id": pending_id,
                 },
             },
+        )
+        self._record_runtime_event(
+            "approval.final_route",
+            action_type=str(canonical_plan.get("action_type") or action.get("operation") or "unknown").strip().lower(),
+            route=route,
+            outcome="pending_created" if prior_pending is None else "pending_replaced",
         )
         payload = dict(preview_payload) if isinstance(preview_payload, dict) else {}
         payload.update(
@@ -22212,7 +22229,163 @@ class Orchestrator:
     @staticmethod
     def _looks_like_plan_confirmation_accept(text: str | None) -> bool:
         normalized = " ".join(str(text or "").strip().lower().split())
-        return normalized in {"yes", "confirm", "ok", "okay", "ok do it", "do it", "proceed", "go ahead"}
+        return normalized in {
+            "yes",
+            "yes do it",
+            "sure go ahead",
+            "please do it",
+            "confirm",
+            "ok",
+            "okay",
+            "ok do it",
+            "do it",
+            "proceed",
+            "go ahead",
+        }
+
+    @staticmethod
+    def _pending_confirmation_action_type(pending: PendingAction | None) -> str:
+        if pending is None or not isinstance(pending.action, dict):
+            return "unknown"
+        plan = pending.action.get("canonical_plan")
+        if isinstance(plan, dict):
+            action_type = str(plan.get("action_type") or "").strip().lower()
+            if action_type:
+                return action_type
+        return str(pending.action.get("operation") or "unknown").strip().lower() or "unknown"
+
+    def _cancel_pending_confirmation_plan(self, pending: PendingAction | None) -> None:
+        if pending is None or not isinstance(pending.action, dict):
+            return
+        plan = pending.action.get("canonical_plan")
+        plan_id = str(
+            (plan.get("plan_id") if isinstance(plan, dict) else None)
+            or pending.action.get("pending_id")
+            or ""
+        ).strip()
+        if plan_id:
+            self._mutation_plan_store.cancel(plan_id)
+
+    def _pending_confirmation_guard_response(
+        self,
+        user_id: str,
+        text: str | None,
+    ) -> OrchestratorResponse | None:
+        pending = self.confirmations.get(user_id)
+        if pending is None:
+            return None
+        normalized = normalize_setup_text(text)
+        action_type = self._pending_confirmation_action_type(pending)
+        now_epoch = int(datetime.now(timezone.utc).timestamp())
+        if normalized in {"yex", "ye", "yse", "yep"}:
+            if int(pending.expires_at or 0) <= now_epoch:
+                return self._expired_confirmation_response(user_id, pending=pending)
+            message = "Did you mean yes to approve this change? Say yes or no."
+            self._record_runtime_event(
+                "approval.pending_preserved",
+                action_type=action_type,
+                reason="ambiguous_short_reply",
+            )
+            self._record_runtime_event(
+                "approval.typo_clarification",
+                action_type=action_type,
+                route="plan_mode",
+            )
+            self._record_runtime_event(
+                "approval.final_route",
+                action_type=action_type,
+                route="plan_mode",
+                outcome="clarification",
+            )
+            return self._runtime_truth_response(
+                text=message,
+                route="plan_mode",
+                used_runtime_state=False,
+                used_memory=True,
+                used_tools=[],
+                next_question=message,
+                payload={
+                    "type": "approval_typo_clarification",
+                    "summary": message,
+                    "requires_confirmation": True,
+                    "mutated": False,
+                },
+                skip_post_response_hooks=True,
+            )
+        if normalized in {"no", "n"}:
+            cancelled = self._clear_pending_confirmation(user_id, status=PENDING_STATUS_ABORTED)
+            self._cancel_pending_confirmation_plan(cancelled)
+            self._record_runtime_event(
+                "approval.cancelled",
+                action_type=action_type,
+                reason="explicit_no",
+            )
+            self._record_runtime_event(
+                "approval.final_route",
+                action_type=action_type,
+                route="plan_mode",
+                outcome="cancelled",
+            )
+            message = "Okay — I cancelled that pending confirmation."
+            return self._runtime_truth_response(
+                text=message,
+                route="plan_mode",
+                used_runtime_state=False,
+                used_memory=True,
+                used_tools=[],
+                payload={
+                    "type": "approval_cancelled",
+                    "summary": message,
+                    "mutated": False,
+                },
+                skip_post_response_hooks=True,
+            )
+        if self._looks_like_plan_confirmation_accept(normalized):
+            return None
+        if self._looks_like_managed_service_start_restart_request(normalized):
+            self._record_runtime_event(
+                "approval.replacement_requested",
+                action_type=action_type,
+                replacement_action_type="search.searxng.repair",
+                route="action_tool",
+            )
+            return self._managed_service_start_restart_preview_response(user_id, str(text or ""))
+        if (
+            self._looks_like_context_reset_request(normalized)
+            or self._looks_like_fresh_intent_override(normalized)
+            or normalized in {"switch back", "switch model back"}
+            or len(normalized.split()) > 3
+        ):
+            return None
+        if int(pending.expires_at or 0) <= now_epoch:
+            return self._expired_confirmation_response(user_id, pending=pending)
+        message = "There’s still a change awaiting approval. Say yes to approve it or no to cancel it."
+        self._record_runtime_event(
+            "approval.pending_preserved",
+            action_type=action_type,
+            reason="unrecognized_reply",
+        )
+        self._record_runtime_event(
+            "approval.final_route",
+            action_type=action_type,
+            route="plan_mode",
+            outcome="pending_reminder",
+        )
+        return self._runtime_truth_response(
+            text=message,
+            route="plan_mode",
+            used_runtime_state=False,
+            used_memory=True,
+            used_tools=[],
+            next_question=message,
+            payload={
+                "type": "approval_pending_reminder",
+                "summary": message,
+                "requires_confirmation": True,
+                "mutated": False,
+            },
+            skip_post_response_hooks=True,
+        )
 
     @staticmethod
     def _looks_like_fresh_intent_override(text: str | None) -> bool:
@@ -22407,6 +22580,20 @@ class Orchestrator:
                 return self._cancel_current_plan_response(user_id)
             if not cmd and self._looks_like_plan_revise_request(effective_user_text):
                 return self._revise_current_plan_response(user_id)
+            if not cmd:
+                pending_guard_response = self._pending_confirmation_guard_response(
+                    user_id,
+                    effective_user_text,
+                )
+                if pending_guard_response is not None:
+                    return pending_guard_response
+            if not cmd and self._looks_like_managed_service_start_restart_request(effective_user_text):
+                self._record_runtime_event(
+                    "search.final_route",
+                    route="action_tool",
+                    outcome="repair_requested",
+                )
+                return self._managed_service_start_restart_preview_response(user_id, effective_user_text)
             if not cmd:
                 normalized_social_candidate = " ".join(str(effective_user_text or "").strip().lower().split())
                 social_reply = None
@@ -24950,6 +25137,18 @@ class Orchestrator:
                         if pending_id:
                             self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_DONE)
                         action = pending_action.action
+                        confirmed_action_type = self._pending_confirmation_action_type(pending_action)
+                        self._record_runtime_event(
+                            "approval.confirmed",
+                            action_type=confirmed_action_type,
+                            route="action_tool",
+                        )
+                        self._record_runtime_event(
+                            "approval.final_route",
+                            action_type=confirmed_action_type,
+                            route="action_tool",
+                            outcome="executing",
+                        )
                         if str(action.get("kind") or "").strip().lower() == "native_mutation":
                             return self._execute_confirmed_native_mutation(user_id, action)
                         return self._call_skill(
