@@ -1,0 +1,3 @@
+Personal Agent end-user closure fixture.
+Marker: PERSONAL_AGENT_CLOSURE_FILE_OK
+This file is intentionally harmless and exists only for bounded read-only smoke tests.

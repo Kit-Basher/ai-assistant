@@ -102,6 +102,7 @@ required = [
     repo_root / "sitecustomize.py",
     repo_root / "agent" / "webui" / "dist" / "index.html",
     repo_root / "docs" / "releases",
+    repo_root / "docs" / "operator" / "INTERNAL_WRITER_REGISTRY_V1.json",
     repo_root / "assets" / "icons" / "personal-agent.svg",
     repo_root / "scripts" / "launch_webui.sh",
 ]
@@ -135,6 +136,11 @@ copy_tree(repo_root / "skills", payload_dir / "skills")
 copy_tree(repo_root / "telegram_adapter", payload_dir / "telegram_adapter")
 copy_tree(repo_root / "systemd", payload_dir / "systemd")
 copy_tree(repo_root / "docs" / "releases", payload_dir / "docs" / "releases")
+(payload_dir / "docs" / "operator").mkdir(parents=True, exist_ok=True)
+shutil.copy2(
+    repo_root / "docs" / "operator" / "INTERNAL_WRITER_REGISTRY_V1.json",
+    payload_dir / "docs" / "operator" / "INTERNAL_WRITER_REGISTRY_V1.json",
+)
 
 (payload_dir / "bin").mkdir(parents=True, exist_ok=True)
 (payload_dir / "assets" / "icons").mkdir(parents=True, exist_ok=True)
@@ -172,6 +178,7 @@ manifest = {
         "telegram_adapter",
         "systemd",
         "docs/releases",
+        "docs/operator/INTERNAL_WRITER_REGISTRY_V1.json",
         "assets/icons/personal-agent.svg",
         "bin/personal-agent-webui",
         "build_backend.py",

@@ -59,7 +59,8 @@ digging through logs first.
 
 ## Backup / Restore Story
 
-Supported today is a manual export/restore story, not a full backup subsystem.
+Backup v1 provides the bounded assistant-managed backup/validation path.
+For a full operator export, use the manual stopped-service copy below.
 
 Backup/export:
 
@@ -73,7 +74,7 @@ Restore/import:
 
 - restore those copied paths to the same locations
 - run `python -m agent doctor --fix`
-- restart the user services
+- restart `personal-agent-api.service`
 - verify `python -m agent status` and `/ready`
 
 If restore does not produce a clean `/ready`, `/state`, and `/packs/state`

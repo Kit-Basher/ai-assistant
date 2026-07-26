@@ -522,9 +522,7 @@ def _token_preview(token: str | None) -> str:
     value = str(token or "").strip()
     if not value:
         return "missing"
-    if len(value) <= 8:
-        return "***redacted***"
-    return f"{value[:4]}...{value[-4:]}"
+    return "<redacted>"
 
 
 def _check_python_runtime() -> DoctorCheck:

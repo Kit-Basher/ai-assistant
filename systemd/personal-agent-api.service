@@ -4,8 +4,8 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/personal-agent
-ExecStart=%h/personal-agent/.venv/bin/python -m agent.api_server --host 127.0.0.1 --port 8765
+WorkingDirectory=%h/.local/share/personal-agent/runtime/current
+ExecStart=%h/.local/share/personal-agent/runtime/current/.venv/bin/python -m agent.api_server --host 127.0.0.1 --port 8765
 Restart=on-failure
 RestartSec=2
 Environment=LLM_REGISTRY_PATH=%h/.local/share/personal-agent/llm_registry.json
@@ -15,6 +15,10 @@ Environment=AGENT_DB_PATH=%h/.local/share/personal-agent/agent.db
 Environment=AGENT_LOG_PATH=%h/.local/share/personal-agent/agent.jsonl
 Environment=AGENT_PERMISSIONS_PATH=%h/.config/personal-agent/permissions.json
 Environment=AGENT_AUDIT_LOG_PATH=%h/.local/share/personal-agent/audit.jsonl
+Environment=AGENT_SKILLS_PATH=%h/.local/share/personal-agent/runtime/current/skills
+Environment=AGENT_WEBUI_DIST_PATH=%h/.local/share/personal-agent/runtime/current/agent/webui/dist
+Environment=PERSONAL_AGENT_RUNTIME_ROOT=%h/.local/share/personal-agent/runtime/current
+Environment=PERSONAL_AGENT_INSTANCE=stable
 Environment=AGENT_SAFE_MODE=1
 StandardOutput=journal
 StandardError=journal

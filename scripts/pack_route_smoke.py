@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import tempfile
 import time
 import urllib.error
@@ -11,6 +12,12 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from agent.mutation_plan import build_mutation_confirmation
 
 
 DEFAULT_BASE_URL = os.environ.get("AGENT_API_BASE_URL") or "http://127.0.0.1:8765"
@@ -177,6 +184,39 @@ def _status_text(result: dict[str, Any]) -> str:
     return "ok" if bool(result.get("ok")) else "error"
 
 
+def _failure_code(result: dict[str, Any]) -> str:
+    payload = result.get("payload") if isinstance(result.get("payload"), dict) else {}
+    return str(payload.get("error") or payload.get("error_code") or result.get("error") or "unknown_failure")
+
+
+def _confirmed_mutation(
+    base_url: str,
+    method: str,
+    path: str,
+    payload: dict[str, Any],
+    *,
+    timeout: float,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    preview_result = _request_json(base_url, method, path, payload, timeout=timeout)
+    preview_body = preview_result.get("payload") if isinstance(preview_result.get("payload"), dict) else {}
+    if not preview_result.get("ok"):
+        return preview_result, preview_result
+    plan = preview_body.get("plan") if isinstance(preview_body.get("plan"), dict) else None
+    if not bool(preview_body.get("requires_confirmation")) or plan is None or bool(preview_body.get("mutated")):
+        return preview_result, {
+            "ok": False,
+            "status": 0,
+            "payload": {"error": "mutation_preview_contract_invalid"},
+            "error": "mutation preview did not return an unexecuted confirmation plan",
+        }
+    apply_payload = {
+        **payload,
+        "mutation_plan": plan,
+        "confirmation": build_mutation_confirmation(plan, confirmation_id=f"pack-route-smoke-{time.time_ns()}"),
+    }
+    return preview_result, _request_json(base_url, method, path, apply_payload, timeout=timeout)
+
+
 def _step_result(route: str, result: dict[str, Any], text: str, *, warnings: list[str] | None = None) -> None:
     print(f"route: {route}")
     print(f"status: {_status_text(result)}")
@@ -194,7 +234,17 @@ def main(argv: list[str] | None = None) -> int:
 
     exit_code = 0
     created_source_id = ""
-    with tempfile.TemporaryDirectory() as tmpdir:
+    catalog_state = _request_json(str(args.base_url), "GET", "/pack_sources/catalog", timeout=8.0)
+    catalog_body = catalog_state.get("payload") if isinstance(catalog_state.get("payload"), dict) else {}
+    catalog_path = Path(str(catalog_body.get("path") or "").strip()).expanduser()
+    if not catalog_state.get("ok") or not catalog_path.is_absolute() or not catalog_path.parent.is_dir():
+        print("route: GET /pack_sources/catalog")
+        print(f"status: {_status_text(catalog_state)}")
+        print("first_line: assistant-owned catalog storage path is unavailable")
+        print("dead_end_warnings: cannot create a bounded local catalog fixture")
+        return 1
+
+    with tempfile.TemporaryDirectory(prefix="pack-route-smoke-", dir=str(catalog_path.parent)) as tmpdir:
         fixture = _make_local_fixture(Path(tmpdir))
         source_id = fixture["source_id"]
         created_source_id = source_id
@@ -214,7 +264,9 @@ def main(argv: list[str] | None = None) -> int:
             "supports_compare_hint": False,
             "notes": "temporary operator smoke source",
         }
-        create_result = _request_json(str(args.base_url), "POST", "/pack_sources/catalog", create_payload, timeout=8.0)
+        create_preview, create_result = _confirmed_mutation(
+            str(args.base_url), "POST", "/pack_sources/catalog", create_payload, timeout=8.0
+        )
         create_body = create_result.get("payload") if isinstance(create_result.get("payload"), dict) else {}
         source_payload = create_body.get("source") if isinstance(create_body.get("source"), dict) else {}
         source_name = str(source_payload.get("name") or create_payload["name"]).strip()
@@ -226,8 +278,12 @@ def main(argv: list[str] | None = None) -> int:
             or ""
         )
         create_warnings: list[str] = []
+        create_preview_body = create_preview.get("payload") if isinstance(create_preview.get("payload"), dict) else {}
+        if not create_preview.get("ok") or not bool(create_preview_body.get("requires_confirmation")):
+            create_warnings.append("source creation was not confirmation gated")
+            exit_code = 1
         if not create_result.get("ok"):
-            create_warnings.append("source creation failed")
+            create_warnings.append(f"source creation failed: {_failure_code(create_result)}")
             exit_code = 1
         elif str(source_payload.get("id") or "").strip() != source_id:
             create_warnings.append("source id mismatch")
@@ -361,11 +417,11 @@ def main(argv: list[str] | None = None) -> int:
         if trust_probe_result.get("status") != 400:
             trust_probe_warnings.append(f"unexpected trust rejection status: {_status_text(trust_probe_result)}")
             exit_code = 1
-        if str(trust_probe_body.get("error") or "").strip() != "source_trust_required":
-            trust_probe_warnings.append("unexpected trust rejection error")
+        if str(trust_probe_body.get("error") or "").strip() != "remote_pack_fetch_stage_unimplemented_denied":
+            trust_probe_warnings.append("unexpected remote acquisition rejection error")
             exit_code = 1
-        if "trusted source" not in lowered_trust_probe:
-            trust_probe_warnings.append("trust rejection wording missing")
+        if not any(token in lowered_trust_probe for token in ("unavailable", "no url was opened", "no content")):
+            trust_probe_warnings.append("remote acquisition rejection wording missing")
             exit_code = 1
         if _is_dead_end(trust_probe_text):
             trust_probe_warnings.append("trust rejection dead-end wording")
@@ -379,7 +435,9 @@ def main(argv: list[str] | None = None) -> int:
 
         install_target = str((preview.get("install_handoff") or {}).get("source") or pack_dir).strip()
         install_payload = {"path": install_target}
-        install_result = _request_json(str(args.base_url), "POST", "/packs/install", install_payload, timeout=20.0)
+        install_preview, install_result = _confirmed_mutation(
+            str(args.base_url), "POST", "/packs/install/plan", install_payload, timeout=20.0
+        )
         install_body = install_result.get("payload") if isinstance(install_result.get("payload"), dict) else {}
         install_text = str(
             install_body.get("message")
@@ -391,10 +449,17 @@ def main(argv: list[str] | None = None) -> int:
         install_status = str((install_body.get("normalization_result") or {}).get("status") or "").strip().lower()
         install_warnings: list[str] = []
         lowered_install = install_text.lower()
-        if not install_result.get("ok"):
-            install_warnings.append("install failed")
+        safe_mode_policy_block = (
+            install_result.get("status") == 400
+            and str(install_body.get("error") or "") == "safe_mode_mutation_blocked"
+            and str(install_body.get("failure_stage") or "") == "policy"
+            and install_body.get("requires_confirmation") is False
+            and install_body.get("mutated") is False
+        )
+        if not install_result.get("ok") and not safe_mode_policy_block:
+            install_warnings.append("install failed without the expected precise policy reason")
             exit_code = 1
-        if install_status not in {"normalized", "partial_safe_import", "blocked"}:
+        if install_result.get("ok") and install_status not in {"normalized", "partial_safe_import", "blocked"}:
             install_warnings.append(f"unexpected install status: {install_status or 'missing'}")
             exit_code = 1
         if install_status == "normalized" and "normalized" not in lowered_install:
@@ -405,6 +470,9 @@ def main(argv: list[str] | None = None) -> int:
             exit_code = 1
         if install_status == "blocked" and "blocked" not in lowered_install:
             install_warnings.append("blocked install wording missing")
+            exit_code = 1
+        if safe_mode_policy_block and "safe mode" not in lowered_install:
+            install_warnings.append("Safe Mode policy wording missing")
             exit_code = 1
         if _is_dead_end(install_text):
             install_warnings.append("install dead-end wording")
@@ -418,10 +486,11 @@ def main(argv: list[str] | None = None) -> int:
         removal_text = ""
         removal_warnings: list[str] = []
         if canonical_id:
-            removal_result = _request_json(
+            _removal_preview, removal_result = _confirmed_mutation(
                 str(args.base_url),
                 "DELETE",
                 f"/packs/{urllib.parse.quote(canonical_id)}",
+                {"pack_id": canonical_id},
                 timeout=8.0,
             )
             removal_body = removal_result.get("payload") if isinstance(removal_result.get("payload"), dict) else {}
@@ -435,9 +504,12 @@ def main(argv: list[str] | None = None) -> int:
             if not removal_result.get("ok"):
                 removal_warnings.append("remove failed")
                 exit_code = 1
-        else:
+        elif not safe_mode_policy_block:
             removal_warnings.append("no canonical pack id to remove")
             exit_code = 1
+        else:
+            removal_result = {"ok": True, "status": 200, "payload": {"message": "No pack was created in Safe Mode."}}
+            removal_text = "No pack was created in Safe Mode."
         _step_result(f"DELETE /packs/{canonical_id or 'unknown'}", removal_result, removal_text, warnings=removal_warnings)
 
         removed_pack_check = _request_json(str(args.base_url), "GET", "/packs", timeout=8.0)
@@ -464,12 +536,8 @@ def main(argv: list[str] | None = None) -> int:
             warnings=removal_cleanup_warnings,
         )
 
-        native_install_result = _request_json(
-            str(args.base_url),
-            "POST",
-            "/packs/install",
-            {"source": native_pack_dir},
-            timeout=20.0,
+        _native_preview, native_install_result = _confirmed_mutation(
+            str(args.base_url), "POST", "/packs/install/plan", {"source": native_pack_dir}, timeout=20.0
         )
         native_install_body = native_install_result.get("payload") if isinstance(native_install_result.get("payload"), dict) else {}
         native_install_text = str(
@@ -482,14 +550,24 @@ def main(argv: list[str] | None = None) -> int:
         native_install_status = str((native_install_body.get("normalization_result") or {}).get("status") or "").strip().lower()
         native_install_warnings: list[str] = []
         lowered_native_install = native_install_text.lower()
-        if not native_install_result.get("ok"):
-            native_install_warnings.append("blocked native install failed")
+        native_safe_mode_block = (
+            native_install_result.get("status") == 400
+            and str(native_install_body.get("error") or "") == "safe_mode_mutation_blocked"
+            and str(native_install_body.get("failure_stage") or "") == "policy"
+            and native_install_body.get("requires_confirmation") is False
+            and native_install_body.get("mutated") is False
+        )
+        if not native_install_result.get("ok") and not native_safe_mode_block:
+            native_install_warnings.append("native install failed without the expected precise policy reason")
             exit_code = 1
-        if native_install_status != "blocked":
+        if native_install_result.get("ok") and native_install_status != "blocked":
             native_install_warnings.append(f"unexpected blocked-native status: {native_install_status or 'missing'}")
             exit_code = 1
-        if "blocked" not in lowered_native_install:
+        if "blocked" not in lowered_native_install and not native_safe_mode_block:
             native_install_warnings.append("blocked install wording missing")
+            exit_code = 1
+        if native_safe_mode_block and "safe mode" not in lowered_native_install:
+            native_install_warnings.append("Safe Mode policy wording missing")
             exit_code = 1
         if _is_dead_end(native_install_text):
             native_install_warnings.append("blocked install dead-end wording")
@@ -557,14 +635,19 @@ def main(argv: list[str] | None = None) -> int:
             )
 
         if not args.keep_source:
-            cleanup_result = _request_json(
+            _cleanup_preview, cleanup_result = _confirmed_mutation(
                 str(args.base_url),
                 "DELETE",
                 f"/pack_sources/catalog/{urllib.parse.quote(created_source_id)}",
+                {"source_id": created_source_id},
                 timeout=8.0,
             )
             if not cleanup_result.get("ok"):
-                print(f"cleanup_warning: could not delete temporary source {created_source_id}")
+                print(
+                    f"cleanup_warning: could not delete temporary source {created_source_id}: "
+                    f"{_failure_code(cleanup_result)}"
+                )
+                exit_code = 1
 
     if exit_code == 0:
         print("dead_end_warnings: none")

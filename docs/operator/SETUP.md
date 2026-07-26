@@ -127,6 +127,7 @@ Canonical packaging/build path:
 - Debian/Ubuntu install from a built package:
   - `sudo apt install ./dist/personal-agent_<version>_amd64.deb`
 - canonical release gate: `python scripts/release_gate.py`
+- live end-user closure proof: `python scripts/end_user_closure_smoke.py`
 - web build: `bash scripts/build_webui.sh`
 - web provenance check: `python scripts/webui_build_manifest.py verify`
 
@@ -144,6 +145,23 @@ Install surface contract:
 Only one stable delivery mechanism should own `personal-agent-api.service` on a
 machine. The release bundle and Debian package are alternatives, not two
 simultaneous installations.
+
+Canonical service environment contract:
+
+| Variable | Normal location |
+| --- | --- |
+| `AGENT_DB_PATH` | `~/.local/share/personal-agent/agent.db` |
+| `AGENT_LOG_PATH` | `~/.local/share/personal-agent/agent.jsonl` |
+| `AGENT_WEBUI_DIST_PATH` | the active runtime's `agent/webui/dist` |
+| `LLM_REGISTRY_PATH` | `~/.local/share/personal-agent/llm_registry.json` |
+| `AGENT_SECRET_STORE_PATH` | `~/.local/share/personal-agent/secrets.enc.json` |
+| `LLM_USAGE_STATS_PATH` | `~/.local/share/personal-agent/llm_usage_stats.json` |
+| `AGENT_PERMISSIONS_PATH` | `~/.config/personal-agent/permissions.json` |
+| `AGENT_AUDIT_LOG_PATH` | `~/.local/share/personal-agent/audit.jsonl` |
+
+The checkout unit, release-bundle installer, and Debian service template must
+all preserve this state/config split. Only the active runtime and Web UI code
+paths vary by delivery mechanism.
 - fast pre-check before the heavier gate: `python scripts/release_smoke.py`
 - pre-VM readiness gate: `python scripts/prove_ready.py`
 - v0.2.1 sequential release-closure gate:
@@ -210,29 +228,33 @@ Bundle update / uninstall basics:
   - not implemented by Uninstall Executor v1; use only a separately reviewed
     purge/reset procedure on a disposable or explicitly backed-up installation
 
-## Optional Desktop Launcher
+## Desktop Launcher Repair
 
-If you want a normal desktop app entry for the checkout/dev install, install
-the user-local launcher:
+The stable bundle installer normally installs the launcher. To repair only the
+stable launcher for an existing checkout-backed service, run:
 
 - `bash scripts/install_desktop_launcher.sh`
 
 That installs:
 
-- a desktop menu entry at `~/.local/share/applications/personal-agent-dev.desktop`
-- a launcher command at `~/.local/bin/personal-agent-webui-dev`
+- a desktop menu entry at `~/.local/share/applications/personal-agent.desktop`
+- a launcher command at `~/.local/bin/personal-agent-webui`
 - a user-local icon at `~/.local/share/icons/hicolor/scalable/apps/personal-agent.svg`
 
 What it does when clicked:
 
-- registers, starts, or wakes `personal-agent-api-dev.service` if needed
+- registers, starts, or wakes `personal-agent-api.service` if needed
 - waits briefly for `GET /ready`
 - opens the local web UI in your default browser
 
 If it fails, use:
 
-- `http://127.0.0.1:18765/`
-- `systemctl --user status personal-agent-api-dev.service`
+- `http://127.0.0.1:8765/`
+- `systemctl --user status personal-agent-api.service`
+
+For the explicitly isolated dev launcher, use
+`bash scripts/install_dev.sh --desktop-launcher`; it supplies the dev service,
+port, names, and labels explicitly.
 
 ## First Run
 

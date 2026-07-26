@@ -255,7 +255,7 @@ from agent.packs.managed_adapters import (
 )
 from agent.packs.policy import is_iface_allowed
 from agent.packs.state_truth import build_pack_state_snapshot, normalize_available_pack_truth, normalize_installed_pack_truth
-from agent.packs.registry_discovery import PackRegistryDiscoveryService, RegistrySourcePolicyError
+from agent.packs.registry_discovery import CatalogSchemaError, PackRegistryDiscoveryService, RegistrySourcePolicyError
 from agent.packs.remote_fetch import RemotePackFetcher
 from agent.packs.store import PackStore
 from agent.failure_ux import build_failure_recovery
@@ -1871,6 +1871,14 @@ class AgentRuntime:
                 next_question="Use GET /pack_sources to inspect allowed sources and their policy state.",
                 extra={"policy": exc.policy.to_dict()},
             )
+        except (CatalogSchemaError, ValueError) as exc:
+            reason = str(exc or "pack_source_catalog_invalid").strip() or "pack_source_catalog_invalid"
+            return self._pack_error(
+                error=reason,
+                error_kind="bad_request",
+                message=f"pack source {source_id} could not be read because its local catalog failed policy validation: {reason}",
+                next_question="Use a local catalog inside assistant-owned pack storage and retry with a confirmed source update.",
+            )
         return True, {
             "ok": True,
             **payload,
@@ -1899,6 +1907,14 @@ class AgentRuntime:
                 next_action="Use GET /pack_sources to inspect allowed sources, or update discovery source policy first.",
                 next_question="Use GET /pack_sources to inspect allowed sources and their policy state.",
                 extra={"policy": exc.policy.to_dict()},
+            )
+        except (CatalogSchemaError, ValueError) as exc:
+            reason = str(exc or "pack_source_catalog_invalid").strip() or "pack_source_catalog_invalid"
+            return self._pack_error(
+                error=reason,
+                error_kind="bad_request",
+                message=f"pack source {source_id} could not be searched because its local catalog failed policy validation: {reason}",
+                next_question="Use a local catalog inside assistant-owned pack storage and retry with a confirmed source update.",
             )
         return True, {
             "ok": True,
@@ -1936,6 +1952,14 @@ class AgentRuntime:
                 error_kind="bad_request",
                 message=f"pack listing not found: {remote_id}",
                 next_question="Use a remote_id returned by the source listing or search endpoint.",
+            )
+        except (CatalogSchemaError, ValueError) as exc:
+            reason = str(exc or "pack_source_catalog_invalid").strip() or "pack_source_catalog_invalid"
+            return self._pack_error(
+                error=reason,
+                error_kind="bad_request",
+                message=f"pack source {source_id} could not be previewed because its local catalog failed policy validation: {reason}",
+                next_question="Use a local catalog inside assistant-owned pack storage and retry with a confirmed source update.",
             )
         return True, {
             "ok": True,

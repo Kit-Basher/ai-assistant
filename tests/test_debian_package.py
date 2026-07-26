@@ -71,6 +71,7 @@ class TestDebianPackage(unittest.TestCase):
         self.assertIn("/usr/lib/systemd/user/personal-agent-api.service", listing.stdout)
         self.assertIn("/usr/share/applications/personal-agent.desktop", listing.stdout)
         self.assertIn("/usr/share/icons/hicolor/scalable/apps/personal-agent.svg", listing.stdout)
+        self.assertIn("/docs/operator/INTERNAL_WRITER_REGISTRY_V1.json", listing.stdout)
         self.assertNotIn("/usr/lib/personal-agent/runtime/releases/" + version + "/llm_registry.json", listing.stdout)
 
         self.assertTrue((stage_root / "usr" / "share" / "doc" / "personal-agent" / "README.Debian").is_file())

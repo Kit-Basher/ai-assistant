@@ -359,7 +359,9 @@ class TestDoctorCLI(unittest.TestCase):
             check = _check_telegram_token(online=False)
         self.assertEqual("OK", check.status)
         self.assertNotIn(token, check.detail_short)
-        self.assertIn("...", check.detail_short)
+        self.assertIn("token=<redacted>", check.detail_short)
+        self.assertNotIn(token[:4], check.detail_short)
+        self.assertNotIn(token[-4:], check.detail_short)
 
     def test_main_json_output_is_valid_object(self) -> None:
         checks = [DoctorCheck("x", "OK", "ok")]

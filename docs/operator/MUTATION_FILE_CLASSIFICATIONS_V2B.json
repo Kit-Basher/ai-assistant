@@ -1,6 +1,6 @@
 {
   "schema": "personal-agent.mutation-file-classification.v2b",
-  "reviewed_count": 158,
+  "reviewed_count": 159,
   "required_fields": [
     "path",
     "disposition",
@@ -2370,6 +2370,21 @@
       "confirmation_requirements": "explicit --write invocation",
       "rollback_scope": "single checked-in generated inventory file",
       "audit_evidence": "Audit v2F deterministic write/check comparison",
+      "contract_identity": "not_applicable"
+    },
+    {
+      "path": "scripts/end_user_closure_smoke.py",
+      "disposition": "offline_tool",
+      "capability": "developer.proof_or_build",
+      "entry_point": "explicit command-line main",
+      "actor": "developer/release operator",
+      "target_resources": "live loopback API and one temporary assistant-owned pack discovery fixture",
+      "mutation_type": "offline end-user closure proof with confirmation-gated fixture mutation",
+      "policy_path": "not imported by shipping runtime; explicit operator invocation; public mutation policy remains authoritative",
+      "executor": "script-owned fixed HTTP checks using the public API",
+      "confirmation_requirements": "explicit command invocation plus exact scoped mutation confirmation in the nested pack smoke",
+      "rollback_scope": "temporary pack source and fixture directory only",
+      "audit_evidence": "manual review and tests/test_end_user_closure_contract.py",
       "contract_identity": "not_applicable"
     },
     {

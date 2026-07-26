@@ -52,6 +52,11 @@ def test_remote_combined_fetch_install_is_explicitly_denied_but_local_install_is
         runtime = _runtime(tmp)
         ok, body = runtime.route_pack_search_mutation("external_pack.install", {"source": "https://example.invalid/a.zip"})
         assert not ok and body["error"] == "remote_pack_fetch_stage_unimplemented_denied"
+        assert body["failure_stage"] == "validation"
+        assert body["requires_confirmation"] is False
+        assert body["mutated"] is False
+        assert "no url was opened" in body["message"].lower()
+        assert "local text-pack directory" in body["next_action"].lower()
         for remote_payload in (
             {"source": {"kind": "generic_archive_url", "url": "https://example.invalid/a.zip"}},
             {"download_url": "https://example.invalid/a.zip"},
@@ -66,6 +71,76 @@ def test_remote_combined_fetch_install_is_explicitly_denied_but_local_install_is
         ok, body = runtime.route_pack_search_mutation("external_pack.install", {"path": str(pack)})
         assert ok and body["requires_confirmation"]
         assert body["plan"]["capability_id"] == "pack.lifecycle.install"
+
+
+def test_local_catalog_outside_owned_storage_is_a_precise_bad_request_not_internal_error() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = Path(raw)
+        runtime = _runtime(tmp)
+        outside_catalog = tmp / "outside-catalog.json"
+        outside_catalog.write_text('{"packs": []}\n', encoding="utf-8")
+        ok, created = runtime.create_pack_source_catalog(
+            {
+                "source_id": "outside-local",
+                "name": "Outside Local",
+                "kind": "local_catalog",
+                "base_url": str(outside_catalog),
+                "enabled": True,
+            }
+        )
+        assert ok and created["source"]["id"] == "outside-local"
+
+        for action in (
+            lambda: runtime.list_pack_source_packs("outside-local"),
+            lambda: runtime.search_pack_source("outside-local", "fixture"),
+            lambda: runtime.preview_pack_source_listing("outside-local", "fixture"),
+        ):
+            allowed, body = action()
+            assert not allowed
+            assert body["error"] == "local_catalog_path_outside_root"
+            assert body["error_kind"] == "bad_request"
+            assert "failed policy validation" in body["message"].lower()
+            assert "assistant-owned pack storage" in body["next_question"].lower()
+
+
+def test_confirmed_catalog_source_create_and_delete_return_success_receipts() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = Path(raw)
+        runtime = _runtime(tmp)
+        catalog = Path(runtime.pack_store.external_storage_root()) / "confirmation-fixture-catalog.json"
+        catalog.parent.mkdir(parents=True, exist_ok=True)
+        catalog.write_text('{"packs": []}\n', encoding="utf-8")
+        request = {
+            "source_id": "confirmation-fixture",
+            "name": "Confirmation Fixture",
+            "kind": "local_catalog",
+            "base_url": str(catalog),
+            "enabled": True,
+        }
+
+        ok, preview = runtime.route_pack_search_mutation("pack_source.catalog.create", request)
+        assert ok and preview["requires_confirmation"]
+        plan = preview["plan"]
+        ok, created = runtime.route_pack_search_mutation(
+            "pack_source.catalog.create",
+            {**request, "mutation_plan": plan, "confirmation": _confirmation(plan)},
+        )
+        assert ok, created
+        assert created["ok"] is True
+        assert created["mutated"] is True
+        assert created["source"]["id"] == "confirmation-fixture"
+
+        delete_request = {"source_id": "confirmation-fixture"}
+        ok, preview = runtime.route_pack_search_mutation("pack_source.catalog.delete", delete_request)
+        assert ok and preview["requires_confirmation"]
+        plan = preview["plan"]
+        ok, deleted = runtime.route_pack_search_mutation(
+            "pack_source.catalog.delete",
+            {**delete_request, "mutation_plan": plan, "confirmation": _confirmation(plan)},
+        )
+        assert ok, deleted
+        assert deleted["ok"] is True
+        assert deleted["mutated"] is True
 
 
 def test_cross_operation_stale_target_and_single_use_confirmation_are_rejected() -> None:

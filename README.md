@@ -273,9 +273,9 @@ repo`, `switch temporarily to ...`, `make this the default`, and explicit model
 acquisition requests.
 
 ## Quick Start
-Daily-driver install path:
-1. Download or build a stable bundle, or install the packaged release.
-2. Run its bundled `install.sh`.
+Daily-driver install from the canonical checkout:
+1. Clone or place the repository at `~/personal-agent`.
+2. Run `bash scripts/install_local.sh` from that checkout.
 3. Open Personal Agent from the desktop menu or browse to `http://127.0.0.1:8765/`.
 
 That stable install:
@@ -283,6 +283,11 @@ That stable install:
 - keeps mutable state in `~/.local/share/personal-agent`
 - installs the desktop launcher and user service
 - is the path to use for normal daily use
+
+The source checkout is the build input. The daily-driver runtime produced by
+that command is versioned under `~/.local/share/personal-agent/runtime`; mutable
+state remains under `~/.local/share/personal-agent`, and operator policy remains
+under `~/.config/personal-agent`.
 
 Developer checkout install:
 1. Clone the repo to `~/personal-agent`.

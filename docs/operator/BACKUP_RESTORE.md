@@ -22,6 +22,10 @@ The canonical confirmation ledger is:
 
 - `~/.local/share/personal-agent/confirmation_transactions.sqlite3`
 
+Operator permissions remain configuration rather than mutable runtime state:
+
+- `~/.config/personal-agent/permissions.json`
+
 Internal-writer receipts use bounded `*.internal-writer.sqlite3` files under
 the same canonical state root. Backing up the whole state directory includes
 all of them.

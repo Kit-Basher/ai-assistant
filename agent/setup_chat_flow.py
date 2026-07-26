@@ -1852,7 +1852,14 @@ def _extract_filesystem_path_hint(text: str | None, normalized: str) -> str | No
 def _extract_filesystem_search_query(text: str | None, normalized: str) -> tuple[str | None, str | None]:
     raw_text = str(text or "").strip()
     normalized_space = str(normalized or "").replace("/", " ")
+    explicit_root = (
+        r"(?:this repo|this folder|this directory|the repo|the folder|the directory|"
+        r"workspace root|repo root|~[^\s]+|/[^\s]+|\./[^\s]+|\.\./[^\s]+)"
+    )
     filename_patterns = (
+        rf"\bfind files? named (?P<query>.+?) in {explicit_root}$",
+        rf"\bfind directories? named (?P<query>.+?) in {explicit_root}$",
+        rf"\bfind folders? named (?P<query>.+?) in {explicit_root}$",
         r"\bfind files? named (?P<query>.+)$",
         r"\bfind directories? named (?P<query>.+)$",
         r"\bfind folders? named (?P<query>.+)$",

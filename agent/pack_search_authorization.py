@@ -174,6 +174,35 @@ class PackSearchAuthorizationService:
                     return "permission_action_value_invalid"
         return None
 
+    @staticmethod
+    def _validation_failure(reason: str) -> dict[str, Any]:
+        messages = {
+            "remote_pack_fetch_stage_unimplemented_denied": (
+                "Remote pack acquisition is unavailable. No URL was opened and no content was fetched or imported."
+            ),
+            "local_pack_path_required": "A local pack directory is required. No pack was imported.",
+            "pack_source_id_required": "A pack source id is required. No source configuration was changed.",
+            "pack_id_required": "A canonical pack id is required. No pack state was changed.",
+        }
+        next_actions = {
+            "remote_pack_fetch_stage_unimplemented_denied": (
+                "Use metadata-only discovery, or provide a local text-pack directory inside assistant-owned pack storage."
+            ),
+            "local_pack_path_required": "Provide one local text-pack directory and request a new preview.",
+            "pack_source_id_required": "Use a source id from GET /pack_sources and request a new preview.",
+            "pack_id_required": "Use a canonical pack id from GET /packs and request a new preview.",
+        }
+        return {
+            "ok": False,
+            "error": reason,
+            "error_kind": "bad_request",
+            "failure_stage": "validation",
+            "message": messages.get(reason, f"The requested pack operation failed validation: {reason}."),
+            "next_action": next_actions.get(reason, "Correct the request and ask for a new preview."),
+            "requires_confirmation": False,
+            "mutated": False,
+        }
+
     def preview(self, operation: str, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         spec = SPECS.get(operation)
         if spec is None:
@@ -181,7 +210,7 @@ class PackSearchAuthorizationService:
         request = self._request(payload)
         invalid = self._validate(operation, request)
         if invalid:
-            return False, {"ok": False, "error": invalid, "mutated": False}
+            return False, self._validation_failure(invalid)
         if spec.safe_mode_blocked and self.runtime._safe_mode_enabled():
             return False, {
                 "ok": False,
@@ -231,7 +260,7 @@ class PackSearchAuthorizationService:
         request = self._request(payload)
         invalid = self._validate(operation, request)
         if invalid:
-            return False, {"ok": False, "error": invalid, "mutated": False}
+            return False, self._validation_failure(invalid)
         try:
             validate_mutation_plan(plan)
         except ValueError as exc:

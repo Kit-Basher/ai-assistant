@@ -57,10 +57,10 @@ class TestDesktopLauncher(unittest.TestCase):
             second = _run_script(script, env=env)
             self.assertEqual(0, second.returncode, second.stderr)
 
-            launcher_path = home / ".local" / "share" / "personal-agent" / "bin" / "personal-agent-webui-dev"
-            desktop_path = home / ".local" / "share" / "applications" / "personal-agent-dev.desktop"
+            launcher_path = home / ".local" / "share" / "personal-agent" / "bin" / "personal-agent-webui"
+            desktop_path = home / ".local" / "share" / "applications" / "personal-agent.desktop"
             icon_path = home / ".local" / "share" / "icons" / "hicolor" / "scalable" / "apps" / "personal-agent.svg"
-            shell_alias = home / ".local" / "bin" / "personal-agent-webui-dev"
+            shell_alias = home / ".local" / "bin" / "personal-agent-webui"
 
             self.assertTrue(launcher_path.is_file())
             self.assertTrue(desktop_path.is_file())
@@ -75,7 +75,10 @@ class TestDesktopLauncher(unittest.TestCase):
             self.assertEqual(str(launcher_path), entry.get("Exec"))
             self.assertEqual("personal-agent", entry.get("Icon"))
             self.assertEqual("false", entry.get("Terminal"))
-            self.assertEqual("Personal Agent (Dev)", entry.get("Name"))
+            self.assertEqual("Personal Agent", entry.get("Name"))
+            launcher_text = launcher_path.read_text(encoding="utf-8")
+            self.assertIn('AGENT_LAUNCHER_SERVICE_NAME="personal-agent-api.service"', launcher_text)
+            self.assertIn('AGENT_WEBUI_URL="http://127.0.0.1:8765/"', launcher_text)
 
     def test_launcher_opens_after_service_is_ready(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

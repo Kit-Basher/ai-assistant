@@ -63,6 +63,7 @@ fi
 need_command "$xdg_open_bin" "xdg-open is required for the desktop launcher. Install it, then rerun."
 
 state_root="$install_root"
+config_root="${XDG_CONFIG_HOME:-$HOME/.config}/personal-agent"
 runtime_root="$install_root/runtime"
 releases_root="$runtime_root/releases"
 release_root="$releases_root/$version"
@@ -82,7 +83,7 @@ if "$systemctl_bin" --user is-active --quiet personal-agent-api.service >/dev/nu
     "$systemctl_bin" --user stop personal-agent-api.service >/dev/null 2>&1 || true
 fi
 
-mkdir -p "$releases_root" "$stable_bin_root" "$host_lifecycle_root" "$desktop_root" "$icon_root" "$service_dir"
+mkdir -p "$config_root" "$releases_root" "$stable_bin_root" "$host_lifecycle_root" "$desktop_root" "$icon_root" "$service_dir"
 chmod 700 "$host_lifecycle_root"
 rm -rf "$release_root"
 cp -a "$bundle_root/payload/." "$release_root/"
@@ -112,6 +113,10 @@ Categories=Utility;Office;
 StartupNotify=true
 EOF
 
+# A previous checkout install may have registered this path as a symlink into
+# the repository. Remove only that service entry before writing the generated
+# stable unit so redirection cannot overwrite the checkout template.
+rm -f "$service_path"
 cat > "$service_path" <<EOF
 [Unit]
 Description=Personal Agent API
@@ -128,7 +133,7 @@ Environment=AGENT_SECRET_STORE_PATH=$state_root/secrets.enc.json
 Environment=LLM_USAGE_STATS_PATH=$state_root/llm_usage_stats.json
 Environment=AGENT_DB_PATH=$state_root/agent.db
 Environment=AGENT_LOG_PATH=$state_root/agent.jsonl
-Environment=AGENT_PERMISSIONS_PATH=$state_root/permissions.json
+Environment=AGENT_PERMISSIONS_PATH=$config_root/permissions.json
 Environment=AGENT_AUDIT_LOG_PATH=$state_root/audit.jsonl
 Environment=AGENT_SKILLS_PATH=$current_root/skills
 Environment=AGENT_WEBUI_DIST_PATH=$current_root/agent/webui/dist

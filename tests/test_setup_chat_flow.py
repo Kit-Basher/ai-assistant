@@ -109,6 +109,13 @@ class TestSetupChatFlow(unittest.TestCase):
         self.assertIsNone(underspecified.get("query"))
         self.assertTrue(bool(underspecified.get("root_required")))
 
+        rooted_search = classify_runtime_chat_route(
+            "find files named closure-note in /tmp/end-user-closure"
+        )
+        self.assertEqual("filesystem_search_filenames", rooted_search.get("kind"))
+        self.assertEqual("closure-note", rooted_search.get("query"))
+        self.assertEqual("/tmp/end-user-closure", rooted_search.get("path_hint"))
+
     def test_agent_health_stays_runtime_status_while_machine_stats_stay_operational(self) -> None:
         agent_health = classify_runtime_chat_route("agent health")
         machine_stats = classify_runtime_chat_route("what are my pc specs?")

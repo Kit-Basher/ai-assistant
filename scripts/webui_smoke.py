@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -54,6 +55,23 @@ def _failure_warnings(root_html: str, ready_payload: dict[str, Any]) -> list[str
         warnings.append("empty readiness summary")
     if any(token in summary.lower() for token in ("need more context", "i can't", "i cannot", "failed")):
         warnings.append("dead-end readiness wording")
+    return warnings
+
+
+def _chat_first_asset_path(root_html: str) -> str | None:
+    match = re.search(r'<script[^>]+src=["\'](?P<src>/assets/index-[^"\']+\.js)["\']', root_html, re.IGNORECASE)
+    return str(match.group("src")) if match is not None else None
+
+
+def _chat_first_warnings(asset_body: str) -> list[str]:
+    required = (
+        "chat-product-shell",
+        "Ask for help naturally.",
+        "What can I help you with?",
+    )
+    warnings = [f"missing chat-first marker: {marker}" for marker in required if marker not in asset_body]
+    if "onOpenAdmin" not in asset_body and "Advanced" not in asset_body:
+        warnings.append("advanced controls are not represented as a secondary entry")
     return warnings
 
 
@@ -114,6 +132,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         root_status, root_html = _fetch(str(args.base_url), "/")
+        asset_path = _chat_first_asset_path(root_html)
+        asset_status, asset_body = _fetch(str(args.base_url), asset_path) if asset_path else (0, "")
         ready_status, ready_payload, ready_body = _fetch_json(str(args.base_url), "/ready")
         state_status, state_payload, state_body = _fetch_json(str(args.base_url), "/state")
         packs_state_status, packs_state_payload, packs_state_body = _fetch_json(str(args.base_url), "/packs/state")
@@ -127,6 +147,8 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"route: / status={root_status}")
     print(f"first_line: {root_first_line}")
+    print(f"route: {asset_path or 'built chat asset missing'} status={asset_status}")
+    print("first_line: chat-first markers present" if not _chat_first_warnings(asset_body) else "first_line: chat-first markers missing")
     print(f"route: /ready status={ready_status}")
     print(f"first_line: {ready_summary}")
     print(f"route: /state status={state_status}")
@@ -135,7 +157,12 @@ def main(argv: list[str] | None = None) -> int:
     print(f"route: /packs/state status={packs_state_status}")
     print(f"first_line: {packs_summary}")
 
-    warnings = _failure_warnings(root_html, ready_payload) + _state_warnings(state_payload) + _packs_state_warnings(packs_state_payload)
+    warnings = (
+        _failure_warnings(root_html, ready_payload)
+        + (["missing built chat asset"] if not asset_path or asset_status != 200 else _chat_first_warnings(asset_body))
+        + _state_warnings(state_payload)
+        + _packs_state_warnings(packs_state_payload)
+    )
     print(f"dead_end_warnings: {', '.join(warnings) if warnings else 'none'}")
     return 1 if warnings else 0
 

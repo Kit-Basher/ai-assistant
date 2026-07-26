@@ -24,8 +24,9 @@ Runtime identity matrix:
 | Developer checkout | `personal-agent-api-dev.service` | `http://127.0.0.1:18765/` | `~/personal-agent` |
 
 Do not enable both merely as fallback copies. Run the dev service only during
-checkout work. Telegram is a separate optional transport and remains disabled
-unless explicitly enabled.
+checkout work. Telegram is an optional embedded poller inside the active API
+service and remains disabled unless explicitly enabled; do not create a second
+Telegram service.
 
 SAFE MODE is the clean-install baseline. Verify `control_mode.mode` is `safe`
 on `/ready`; a systemd drop-in is allowed as defense in depth but must not be
@@ -75,6 +76,9 @@ Confirm:
   runtime latency warnings; the first command writes fresh evidence and the
   second verifies accepted-warning records and revisit thresholds
 - run `python scripts/release_smoke.py` if you suspect a regression in the core path
+- run `python scripts/end_user_closure_smoke.py` when you need a single live,
+  rerunnable proof of the chat-first UI, runtime/model truth, bounded filesystem
+  list/search/read/privacy behavior, pack discovery, and pack mutation policy
 - run `python scripts/prove_ready.py` for the compact pre-VM readiness gate; it
   distinguishes release-blocking failures from optional-runtime warnings such
   as isolated search being disabled
