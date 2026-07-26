@@ -1893,24 +1893,29 @@ class RuntimeTruthService:
             "source": "runtime_truth.filesystem",
         }
 
-    def filesystem_recent_downloaded_videos(self, *, max_results: int = 12) -> dict[str, Any]:
-        """Search the user's Downloads directory through the bounded filesystem skill."""
-        downloads = Path.home() / "Downloads"
+    def filesystem_recent_videos_in_directory(
+        self,
+        directory: str | Path,
+        *,
+        max_results: int = 12,
+    ) -> dict[str, Any]:
+        """Search one explicit directory for recent videos through the bounded filesystem skill."""
+        target = Path(directory).expanduser()
         skill = self._filesystem_skill()
-        scope_check = skill.list_directory(str(downloads), max_entries=1)
+        scope_check = skill.list_directory(str(target), max_entries=1)
         if not bool(scope_check.get("ok", False)):
             error_kind = str(scope_check.get("error_kind") or "filesystem_error")
             return {
                 **dict(scope_check),
-                "type": "filesystem_recent_downloaded_videos",
-                "downloads_path": str(downloads),
+                "type": "filesystem_recent_videos",
+                "directory_path": str(target),
                 "source": "runtime_truth.filesystem",
                 "scope_configured": error_kind != "outside_allowed_roots",
             }
         rows: dict[str, dict[str, Any]] = {}
         for suffix in (".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v"):
             payload = skill.search_filenames(
-                str(downloads),
+                str(target),
                 suffix,
                 max_results=max_results,
                 max_depth=2,
@@ -1925,12 +1930,22 @@ class RuntimeTruthService:
         )[: max(1, min(int(max_results), 25))]
         return {
             "ok": bool(results),
-            "type": "filesystem_recent_downloaded_videos",
-            "downloads_path": str(downloads),
+            "type": "filesystem_recent_videos",
+            "directory_path": str(target),
             "scope_configured": True,
             "results": results,
             "error_kind": None if results else "no_matches",
             "source": "runtime_truth.filesystem",
+        }
+
+    def filesystem_recent_downloaded_videos(self, *, max_results: int = 12) -> dict[str, Any]:
+        """Search the user's Downloads directory through the bounded filesystem skill."""
+        downloads = Path.home() / "Downloads"
+        payload = self.filesystem_recent_videos_in_directory(downloads, max_results=max_results)
+        return {
+            **dict(payload),
+            "type": "filesystem_recent_downloaded_videos",
+            "downloads_path": str(downloads),
         }
 
     def filesystem_search_text(

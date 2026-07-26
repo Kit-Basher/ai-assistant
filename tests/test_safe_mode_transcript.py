@@ -1652,11 +1652,13 @@ class TestSafeModeTranscript(unittest.TestCase):
         self.assertEqual("action_tool", scout_plain_tg.get("selected_route"))
         self.assertFalse(bool(scout_plain_meta.get("used_llm", False)))
         self.assertFalse(bool(scout_plain_tg.get("used_llm", False)))
-        self.assertEqual(["shell"], list(scout_plain_meta.get("used_tools") or []))
-        self.assertIn("i can't run that command here", scout_plain_text.lower())
-        self.assertIn("ask for one supported shell action", scout_plain_text.lower())
-        self.assertIn("i can't run that command here", scout_plain_tg_text.lower())
-        self.assertIn("ask for one supported shell action", scout_plain_tg_text.lower())
+        self.assertEqual(["model_scout"], list(scout_plain_meta.get("used_tools") or []))
+        self.assertIn("current model:", scout_plain_text.lower())
+        self.assertIn("best chat option:", scout_plain_text.lower())
+        self.assertNotIn("i can't run that command here", scout_plain_text.lower())
+        self.assertIn("current model:", scout_plain_tg_text.lower())
+        self.assertIn("best chat option:", scout_plain_tg_text.lower())
+        self.assertNotIn("i can't run that command here", scout_plain_tg_text.lower())
 
         for meta, text in ((scout_retry_meta, scout_retry_text),):
             self.assertEqual("action_tool", meta.get("route"))
@@ -1669,8 +1671,7 @@ class TestSafeModeTranscript(unittest.TestCase):
         self.assertIn("qwen2.5:7b-instruct", text.lower())
         self.assertIn("No change has been made. You can test it, switch to it temporarily, or make it the default if you want.", text)
         self.assertNotIn("disabled", text.lower())
-        self.assertIn("i can't run that command here", scout_plain_tg_text.lower())
-        self.assertIn("ask for one supported shell action", scout_plain_tg_text.lower())
+        self.assertNotIn("i can't run that command here", scout_plain_tg_text.lower())
 
         self.assertEqual("action_tool", scout_followup_meta.get("route"))
         self.assertFalse(bool(scout_followup_meta.get("used_llm", False)))

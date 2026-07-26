@@ -2472,6 +2472,17 @@ def _classify_runtime_chat_route_raw(
     if model_policy_route is not None:
         return model_policy_route
 
+    if re.fullmatch(r"(?:please )?run the model scout(?: now)?", normalized) or (
+        normalized.startswith("run the model scout")
+        and any(phrase in normalized for phrase in ("better new models", "new models", "upgrade to"))
+    ):
+        return {
+            "route": "action_tool",
+            "kind": "model_scout_strategy",
+            "generic_allowed": False,
+            "fallback_reason": "action_tool",
+        }
+
     if normalized in {
         "what model scout sees",
         "what does model scout see",

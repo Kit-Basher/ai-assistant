@@ -5652,7 +5652,15 @@ class Orchestrator:
         if route not in {"operational_status", "runtime_status", "provider_status", "model_status"} and not remember_setup_flow and not (
             route == "action_tool"
             and payload_type
-            in {"model_scout", "model_controller", "external_pack_knowledge", "pack_capability_recommendation", "capability_gap_plan"}
+            in {
+                "model_scout",
+                "model_controller",
+                "external_pack_knowledge",
+                "pack_capability_recommendation",
+                "capability_gap_plan",
+                "filesystem_recent_downloaded_videos",
+                "filesystem_recent_videos",
+            }
         ):
             return
         used_tools = [str(item).strip() for item in (response_data.get("used_tools") if isinstance(response_data.get("used_tools"), list) else []) if str(item).strip()]
@@ -8155,6 +8163,58 @@ class Orchestrator:
             premium_coding_candidate=premium_coding_candidate,
             premium_research_candidate=premium_research_candidate,
         )
+        upgrade_discovery: dict[str, Any] | None = None
+        upgrade_lines: list[str] = []
+        strategy_used_tools = ["model_scout"]
+        normalized_request = normalize_setup_text(text).replace("/", " ")
+        upgrade_scan_requested = bool(
+            "new model" in normalized_request
+            or "new models" in normalized_request
+            or "upgrade to" in normalized_request
+        )
+        if upgrade_scan_requested:
+            discovery_fn = getattr(truth, "model_discovery_query", None)
+            if callable(discovery_fn):
+                try:
+                    discovered = discovery_fn(query=text, filters={})
+                    upgrade_discovery = dict(discovered) if isinstance(discovered, dict) else {}
+                except Exception as exc:
+                    upgrade_discovery = {
+                        "ok": False,
+                        "error_kind": "model_discovery_unavailable",
+                        "error": type(exc).__name__,
+                    }
+                strategy_used_tools.append("model_discovery_manager")
+            else:
+                upgrade_discovery = {"ok": False, "error_kind": "model_discovery_unavailable"}
+            discovered_models = [
+                dict(row)
+                for row in (upgrade_discovery.get("models") if isinstance(upgrade_discovery.get("models"), list) else [])
+                if isinstance(row, dict) and not bool(row.get("local", False))
+            ]
+            sources = [
+                dict(row)
+                for row in (upgrade_discovery.get("sources") if isinstance(upgrade_discovery.get("sources"), list) else [])
+                if isinstance(row, dict)
+            ]
+            queried_sources = [str(row.get("source") or "remote catalog").strip() for row in sources if bool(row.get("queried", False))]
+            if discovered_models:
+                upgrade_lines.append(
+                    f"Remote discovery: found {len(discovered_models)} untrusted metadata candidate(s)"
+                    + (f" from {', '.join(queried_sources)}" if queried_sources else "")
+                    + f". In {mode_label}, they are advisory only and are not installed or chat-ready."
+                )
+            elif bool(upgrade_discovery.get("ok", False)) and queried_sources:
+                upgrade_lines.append(
+                    f"Remote discovery: checked {', '.join(queried_sources)}, but no usable new candidate was returned."
+                )
+            else:
+                reason = str(upgrade_discovery.get("error_kind") or "unavailable by current policy or configuration").strip()
+                upgrade_lines.append(f"Remote discovery: unavailable ({reason}).")
+            upgrade_lines.append(
+                "No model was downloaded and no model was switched. Discovery does not authorize a change; "
+                "any permitted change needs a separate preview and approval, and SAFE MODE may still block acquisition."
+            )
         if isinstance(primary_candidate, dict):
             target_model = str(primary_candidate.get("model_id") or "").strip() or "that model"
             reason = str(primary_candidate.get("recommendation_explanation") or "").strip() or "it looks like the strongest practical option right now"
@@ -8174,6 +8234,9 @@ class Orchestrator:
                 f"{primary_heading}: {target_model}.",
                 f"Why: {reason}.",
             ]
+            if upgrade_scan_requested:
+                lines.append(f"Installed local recommendation: {target_model}.")
+                lines.extend(upgrade_lines)
             if comparison_text:
                 lines.append(f"Compared with current: {comparison_text}.")
             lines.extend(secondary_lines)
@@ -8186,7 +8249,7 @@ class Orchestrator:
                 text=prompt,
                 route="action_tool",
                 used_runtime_state=True,
-                used_tools=["model_scout"],
+                used_tools=strategy_used_tools,
                 payload={
                     "type": "model_scout",
                     "mode": "strategy",
@@ -8202,6 +8265,7 @@ class Orchestrator:
                     "recommendation_roles": recommendation_roles,
                     "policy": dict(policy),
                     "advisory_only": advisory_only,
+                    "upgrade_discovery": upgrade_discovery,
                     "source": "runtime_truth.model_scout_v2",
                 },
             )
@@ -15609,6 +15673,86 @@ class Orchestrator:
             payload={**payload, "title": "Recent downloaded video search", "summary": message},
         )
 
+    def _filesystem_recent_video_directory_response(
+        self,
+        directory: Path,
+        *,
+        label: str,
+    ) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        search_fn = getattr(truth, "filesystem_recent_videos_in_directory", None) if truth is not None else None
+        if not callable(search_fn):
+            return self._runtime_state_unavailable_response(
+                route="action_tool",
+                reason="filesystem_recent_video_search_unavailable",
+            )
+        payload = search_fn(directory)
+        payload = dict(payload) if isinstance(payload, dict) else {}
+        requested = str(payload.get("directory_path") or directory).strip() or str(directory)
+        resolved = str(payload.get("resolved_path") or "").strip()
+        error_kind = str(payload.get("error_kind") or "").strip()
+        if error_kind == "outside_allowed_roots" or not bool(payload.get("scope_configured", False)):
+            boundary = (
+                f"{requested} resolves to {resolved}, which is outside the configured allowed roots"
+                if resolved and resolved != requested
+                else f"{requested} is outside the configured allowed roots"
+            )
+            message = (
+                f"I treated {label} as a new likely search location. {boundary}, so I did not inspect it. "
+                "To add it safely, review the exact resolved path in the personal-agent-api.service "
+                "PERCEPTION_ROOTS configuration, apply that explicit configuration change, and restart the service."
+            )
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_tools=["filesystem"],
+                ok=False,
+                error_kind="outside_allowed_roots",
+                payload={**payload, "title": f"Recent video search in {label}", "summary": message},
+            )
+        if error_kind == "not_found":
+            message = f"{requested} is inside the allowed scope, but that folder does not exist, so I could not search it."
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_tools=["filesystem"],
+                ok=False,
+                error_kind=error_kind,
+                payload={**payload, "title": f"Recent video search in {label}", "summary": message},
+            )
+        results = [dict(row) for row in payload.get("results", []) if isinstance(row, dict)]
+        if not results:
+            message = f"I searched the allowed folder at {requested}, but found no recent video files."
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_tools=["filesystem"],
+                ok=False,
+                error_kind=error_kind or "no_matches",
+                payload={**payload, "title": f"Recent video search in {label}", "summary": message},
+            )
+        preview = ", ".join(str(row.get("path") or "") for row in results[:5])
+        message = f"I searched the allowed folder at {requested}. Most recent video matches: {preview}."
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_tools=["filesystem"],
+            payload={**payload, "title": f"Recent video search in {label}", "summary": message},
+        )
+
+    def _filesystem_video_location_followup_response(self, user_id: str, text: str) -> OrchestratorResponse | None:
+        normalized = normalize_setup_text(text).replace("/", " ")
+        if not re.fullmatch(r"(?:it is|it s|its) in (?:the |my )?videos? folder", normalized):
+            return None
+        context = self._current_interpretable_result(user_id)
+        payload = context.get("payload") if isinstance(context.get("payload"), dict) else {}
+        if str(payload.get("type") or "").strip().lower() not in {
+            "filesystem_recent_downloaded_videos",
+            "filesystem_recent_videos",
+        }:
+            return None
+        return self._filesystem_recent_video_directory_response(Path.home() / "Videos", label="the Videos folder")
+
     def _filesystem_search_text_response(
         self,
         *,
@@ -19258,6 +19402,9 @@ class Orchestrator:
 
     def _handle_runtime_truth_chat(self, user_id: str, text: str) -> OrchestratorResponse | None:
         state = self._current_runtime_setup_state(user_id)
+        filesystem_followup = self._filesystem_video_location_followup_response(user_id, text)
+        if filesystem_followup is not None:
+            return filesystem_followup
         repair_choice = self._repair_option_choice_response(user_id, text)
         if repair_choice is not None:
             return repair_choice

@@ -234,6 +234,149 @@ def test_model_scout_and_manager_questions_are_grounded_through_chat() -> None:
         policy.assert_called_once()
 
 
+def test_plain_and_upgrade_model_scout_requests_beat_shell_fallback_through_chat() -> None:
+    prompts = (
+        "run the model scout and see if there are any better new models we should upgrade to instead",
+        "run the model scout",
+    )
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        runtime = AgentRuntime(_config(str(root / "registry.json"), str(root / "agent.db")))
+        truth = runtime.runtime_truth_service()
+        local_candidate = {
+            "model_id": "ollama:Gemma:latest",
+            "provider_id": "ollama",
+            "local": True,
+            "usable_now": True,
+            "recommendation_explanation": "it is the strongest installed model ready for interactive chat",
+        }
+        scout_payload = {
+            "active_model": "ollama:Gemma:latest",
+            "active_provider": "ollama",
+            "current_candidate": dict(local_candidate),
+            "recommended_candidate": dict(local_candidate),
+            "task_recommendation": dict(local_candidate),
+            "candidate_rows": [dict(local_candidate)],
+            "better_candidates": [],
+            "not_ready_models": [],
+            "role_candidates": {"comfortable_local_default": dict(local_candidate)},
+            "recommendation_roles": {},
+            "policy": {
+                "mode": "safe",
+                "mode_label": "SAFE MODE",
+                "safe_mode": True,
+                "allow_remote_recommendation": False,
+                "allow_install_pull": False,
+            },
+            "task_request": {"task_type": "chat", "requirements": ["chat"], "preferred_local": True},
+            "advisory_only": True,
+        }
+        discovery_payload = {
+            "ok": True,
+            "models": [
+                {
+                    "id": "huggingface:example/new-chat-model",
+                    "provider": "huggingface",
+                    "source": "huggingface",
+                    "local": False,
+                    "installable": True,
+                }
+            ],
+            "sources": [{"source": "huggingface", "queried": True, "ok": True, "count": 1}],
+            "debug": {"source_errors": {}},
+        }
+        with patch.object(truth, "model_scout_v2_status", return_value=scout_payload) as scout, patch.object(
+            truth, "model_discovery_query", return_value=discovery_payload
+        ) as discovery, patch(
+            "agent.orchestrator.route_inference",
+            side_effect=AssertionError("model scout request reached generic LLM inference"),
+        ), patch(
+            "agent.orchestrator.Orchestrator._shell_blocked_request_response",
+            side_effect=AssertionError("model scout request reached shell-command fallback"),
+        ):
+            responses = [
+                _post_chat(runtime, prompt, user_id="model-scout-shell", thread_id="model-scout-shell:thread")
+                for prompt in prompts
+            ]
+
+        for prompt, response in zip(prompts, responses, strict=True):
+            meta = response.get("meta") if isinstance(response.get("meta"), dict) else {}
+            message = str(response.get("message") or "").lower()
+            assert meta.get("route") == "action_tool", (prompt, response)
+            assert meta.get("used_llm") is False, (prompt, response)
+            expected_tools = ["model_scout", "model_discovery_manager"] if "better new models" in prompt else ["model_scout"]
+            assert meta.get("used_tools") == expected_tools, (prompt, response)
+            assert "ollama:gemma:latest" in message, (prompt, response)
+            assert "can't run that command" not in message, (prompt, response)
+
+        upgrade_message = str(responses[0].get("message") or "").lower()
+        assert "installed local" in upgrade_message
+        assert "remote discovery" in upgrade_message
+        assert "safe mode" in upgrade_message
+        assert "no model was downloaded" in upgrade_message
+        assert "no model was switched" in upgrade_message
+        assert scout.call_count == 2
+        discovery.assert_called_once()
+
+
+def test_recent_video_location_followup_checks_videos_scope_through_chat() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        runtime = AgentRuntime(_config(str(root / "registry.json"), str(root / "agent.db")))
+        truth = runtime.runtime_truth_service()
+        downloads_result = {
+            "ok": False,
+            "type": "filesystem_recent_downloaded_videos",
+            "downloads_path": "/home/test/Downloads",
+            "resolved_path": "/data/test/Downloads",
+            "scope_configured": False,
+            "error_kind": "outside_allowed_roots",
+        }
+        videos_result = {
+            "ok": False,
+            "type": "filesystem_recent_videos",
+            "directory_path": "/home/test/Videos",
+            "resolved_path": "/data/test/Videos",
+            "scope_configured": False,
+            "error_kind": "outside_allowed_roots",
+        }
+        with patch.object(truth, "filesystem_recent_downloaded_videos", return_value=downloads_result), patch.object(
+            truth, "filesystem_recent_videos_in_directory", return_value=videos_result
+        ) as videos_search, patch(
+            "agent.orchestrator.route_inference",
+            side_effect=AssertionError("video location follow-up reached generic LLM inference"),
+        ), patch(
+            "agent.orchestrator.Orchestrator._shell_blocked_request_response",
+            side_effect=AssertionError("video location follow-up reached shell-command fallback"),
+        ):
+            first = _post_chat(
+                runtime,
+                "can you locate the video i just downloaded?",
+                user_id="video-followup",
+                thread_id="video-followup:thread",
+            )
+            followup_status, followup = _post_chat_raw(
+                runtime,
+                "its in the videos folder",
+                user_id="video-followup",
+                thread_id="video-followup:thread",
+            )
+
+        first_meta = first.get("meta") if isinstance(first.get("meta"), dict) else {}
+        followup_meta = followup.get("meta") if isinstance(followup.get("meta"), dict) else {}
+        followup_message = str(followup.get("message") or "").lower()
+        assert first_meta.get("used_llm") is False
+        assert followup_status in {200, 400}
+        assert followup_meta.get("route") == "action_tool"
+        assert followup_meta.get("used_llm") is False
+        assert followup_meta.get("used_tools") == ["filesystem"]
+        assert "/home/test/videos" in followup_message
+        assert "/data/test/videos" in followup_message
+        assert "outside" in followup_message and "allowed" in followup_message
+        videos_search.assert_called_once()
+        assert str(videos_search.call_args.args[0]).endswith("Videos")
+
+
 def test_local_text_pack_ingest_is_previewed_confirmed_and_reported_through_chat() -> None:
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
