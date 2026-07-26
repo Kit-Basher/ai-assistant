@@ -57,6 +57,8 @@ def test_advertised_basic_capabilities_have_direct_deterministic_routes() -> Non
         "is the runtime ready?": "runtime_status",
         "search the web for today's weather in Saskatoon": "action_tool",
         "find files named release_gate.py": "action_tool",
+        "can you search through my files?": "action_tool",
+        "can you locate the video i just downloaded?": "action_tool",
         "read /tmp/example.txt": "action_tool",
         "what packs do you have?": "assistant_capabilities",
         "what external packs or skills are available?": "assistant_capabilities",
@@ -64,6 +66,11 @@ def test_advertised_basic_capabilities_have_direct_deterministic_routes() -> Non
         "what model are you using": "model_status",
         "whats wrong with ollama:qwen2.5:3b-instruct can you fix it?": "model_status",
         "switch to ollama:qwen3.6:35b-a3b": "model_status",
+        "what model scout sees": "action_tool",
+        "what model should you use for chat?": "action_tool",
+        "why are you using Gemma?": "model_policy_status",
+        "run model scout now": "action_tool",
+        "recommend the best model for coding/research/chat": "action_tool",
         "is Telegram working?": "runtime_status",
     }
     for phrase, expected_route in cases.items():
@@ -100,6 +107,131 @@ def test_filesystem_list_search_read_and_sensitive_denial_work_through_chat() ->
             (response.get("meta") if isinstance(response.get("meta"), dict) else {}).get("used_llm") is False
             for response in (listed, searched, read, denied)
         )
+
+
+def test_standalone_filesystem_questions_never_fall_through_to_generic_chat() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        allowed = root / "allowed"
+        allowed.mkdir()
+        runtime = AgentRuntime(
+            _config(
+                str(root / "registry.json"),
+                str(root / "agent.db"),
+                perception_roots=(str(allowed),),
+            )
+        )
+        with patch(
+            "agent.orchestrator.route_inference",
+            side_effect=AssertionError("standalone filesystem request reached generic LLM inference"),
+        ):
+            tools = _post_chat(
+                runtime,
+                "what tools do you have access to",
+                user_id="standalone-fs",
+                thread_id="standalone-fs:thread",
+            )
+            capability = _post_chat(
+                runtime,
+                "can you search through my files?",
+                user_id="standalone-fs",
+                thread_id="standalone-fs:thread",
+            )
+            recent_video = _post_chat(
+                runtime,
+                "can you locate the video i just downloaded?",
+                user_id="standalone-fs",
+                thread_id="standalone-fs:thread",
+            )
+
+        for response in (capability, recent_video):
+            meta = response.get("meta") if isinstance(response.get("meta"), dict) else {}
+            message = str(response.get("message") or "").lower()
+            assert meta.get("route") == "action_tool", response
+            assert meta.get("used_llm") is False, response
+            assert "sandboxed environment" not in message
+            assert "unable to access your device" not in message
+            assert "cannot directly access" not in message
+            assert "unable to access or locate files" not in message
+
+        capability_message = str(capability.get("message") or "")
+        assert str(allowed) in capability_message
+        assert "what" in capability_message.lower() and "search" in capability_message.lower()
+        assert "file" in str(tools.get("message") or "").lower()
+
+        recent_message = str(recent_video.get("message") or "").lower()
+        assert "downloads" in recent_message
+        assert "outside" in recent_message and "allowed" in recent_message
+        assert "review" in recent_message
+
+
+def test_model_scout_and_manager_questions_are_grounded_through_chat() -> None:
+    prompts = (
+        "what model scout sees",
+        "what model should you use for chat?",
+        "why are you using Gemma?",
+        "run model scout now",
+        "recommend the best model for coding/research/chat",
+    )
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        runtime = AgentRuntime(_config(str(root / "registry.json"), str(root / "agent.db")))
+        truth = runtime.runtime_truth_service()
+        candidate = {
+            "model_id": "ollama:Gemma:latest",
+            "provider_id": "ollama",
+            "local": True,
+            "usable_now": True,
+            "recommendation_explanation": "it is installed, healthy, and ready for chat",
+        }
+        scout_payload = {
+            "active_model": "ollama:Gemma:latest",
+            "active_provider": "ollama",
+            "current_candidate": dict(candidate),
+            "recommended_candidate": dict(candidate),
+            "task_recommendation": dict(candidate),
+            "candidate_rows": [dict(candidate)],
+            "better_candidates": [],
+            "not_ready_models": [],
+            "role_candidates": {"comfortable_local_default": dict(candidate)},
+            "recommendation_roles": {},
+            "policy": {
+                "mode": "safe",
+                "mode_label": "SAFE MODE",
+                "safe_mode": True,
+                "allow_remote_recommendation": False,
+                "allow_install_pull": False,
+            },
+            "task_request": {"task_type": "chat", "requirements": ["chat"], "preferred_local": True},
+            "advisory_only": True,
+        }
+        policy_payload = {
+            "current_candidate": dict(candidate),
+            "selected_candidate": dict(candidate),
+            "recommended_candidate": dict(candidate),
+            "switch_recommended": False,
+            "decision_detail": "the current default already matches the best ready local candidate",
+            "tier_candidates": {},
+        }
+        with patch.object(truth, "model_scout_v2_status", return_value=scout_payload) as scout, patch.object(
+            truth, "model_policy_status", return_value=policy_payload
+        ) as policy, patch(
+            "agent.orchestrator.route_inference",
+            side_effect=AssertionError("model scout request reached generic LLM inference"),
+        ):
+            responses = [
+                _post_chat(runtime, prompt, user_id="model-scout", thread_id="model-scout:thread")
+                for prompt in prompts
+            ]
+
+        for prompt, response in zip(prompts, responses, strict=True):
+            meta = response.get("meta") if isinstance(response.get("meta"), dict) else {}
+            message = str(response.get("message") or "").lower()
+            assert meta.get("route") in {"action_tool", "model_policy_status"}, (prompt, response)
+            assert meta.get("used_llm") is False, (prompt, response)
+            assert "ollama:gemma:latest" in message, (prompt, response)
+        assert scout.call_count == 4
+        policy.assert_called_once()
 
 
 def test_local_text_pack_ingest_is_previewed_confirmed_and_reported_through_chat() -> None:

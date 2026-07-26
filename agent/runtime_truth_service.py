@@ -113,6 +113,28 @@ class RuntimeTruthService:
         self._filesystem_skill_cache = skill
         return skill
 
+    def filesystem_capability_status(self) -> dict[str, Any]:
+        roots: list[str] = []
+        for raw_root in self._filesystem_allowed_roots():
+            resolved = str(Path(str(raw_root)).expanduser().resolve(strict=False))
+            if resolved not in roots:
+                roots.append(resolved)
+        downloads_path = Path.home().joinpath("Downloads")
+        resolved_downloads_path = downloads_path.resolve(strict=False)
+        downloads_allowed = any(
+            resolved_downloads_path == Path(root) or resolved_downloads_path.is_relative_to(Path(root))
+            for root in roots
+        )
+        return {
+            "ok": bool(roots),
+            "type": "filesystem_capability_status",
+            "allowed_roots": roots,
+            "downloads_path": str(downloads_path),
+            "downloads_resolved_path": str(resolved_downloads_path),
+            "downloads_allowed": downloads_allowed,
+            "read_only": True,
+        }
+
     def _shell_skill(self) -> ShellSkill:
         cached = getattr(self, "_shell_skill_cache", None)
         if isinstance(cached, ShellSkill):

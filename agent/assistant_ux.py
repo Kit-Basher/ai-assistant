@@ -60,16 +60,26 @@ def looks_like_internal_architecture_question(text: str | None) -> bool:
     )
 
 
-def build_user_facing_capability_answer(*, search_available: bool | None = None, safe_mode: bool = False) -> str:
+def build_user_facing_capability_answer(
+    *,
+    search_available: bool | None = None,
+    filesystem_available: bool = False,
+    safe_mode: bool = False,
+) -> str:
     search_clause = (
         "I can also look things up with sources when local search is available."
         if search_available is not False
         else "Search is not working right now, but I can still help with local checks, writing, planning, and coding."
     )
     examples = "\n".join(f"- {line}" for line in CAPABILITY_EXAMPLE_LINES)
+    filesystem_clause = (
+        "bounded read-only files, "
+        if filesystem_available
+        else ""
+    )
     text = (
         "I can help with everyday questions, project planning, coding, writing, research, "
-        "and local checks on this machine. I can use connected tools for memory, files, "
+        f"and local checks on this machine. I can use connected tools for memory, {filesystem_clause}"
         "runtime status, safe web search, installed local text skills, and system inspection "
         "when they are available. I can discover untrusted skill-pack metadata, but I cannot "
         "download an arbitrary remote pack; installing a local text pack is a separate reviewed action.\n\n"

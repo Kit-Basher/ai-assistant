@@ -385,6 +385,8 @@ _MODEL_POLICY_CURRENT_REASON_PHRASES = (
     "why are you using this model",
     "why are we using this model",
     "why this model",
+    "why are you using gemma",
+    "why are we using gemma",
 )
 _MODEL_POLICY_SWITCH_CANDIDATE_PHRASES = (
     "what model would you switch to right now",
@@ -1468,6 +1470,7 @@ def _looks_like_model_scout_recommendation_query(normalized: str) -> bool:
         return True
     recommendation_hints = (
         "should i use",
+        "should you use",
         "should we use",
         "would you use",
         "would you choose",
@@ -1492,6 +1495,7 @@ def _looks_like_model_scout_recommendation_query(normalized: str) -> bool:
             any(phrase in working for phrase in cloud_role_hints)
             or any(token in working for token in ("coding", "code", "debug", "refactor", "review"))
             or any(token in working for token in ("research", "reasoning", "analysis", "analyze"))
+            or "chat" in working
         )
     )
 
@@ -1912,13 +1916,22 @@ def _classify_filesystem_route(text: str | None, normalized: str) -> dict[str, A
     normalized_space = str(normalized or "").replace("/", " ")
     if (
         re.search(r"\b(?:search|look|find|locate)\b", normalized_space)
-        and re.search(r"\b(?:my )?(?:file|files|filesystem|file system)\b", normalized_space)
         and re.search(r"\b(?:video|movie|recording)\b", normalized_space)
         and re.search(r"\b(?:download|downloads|downloaded|recent|just)\b", normalized_space)
     ):
         return {
             "route": "action_tool",
             "kind": "filesystem_recent_download",
+            "generic_allowed": False,
+            "fallback_reason": "action_tool",
+        }
+    if re.search(
+        r"\b(?:can|could|would) you (?:search|look) (?:through|in|across) (?:my|the) (?:file|files|filesystem|file system)\b",
+        normalized_space,
+    ):
+        return {
+            "route": "action_tool",
+            "kind": "filesystem_capability_status",
             "generic_allowed": False,
             "fallback_reason": "action_tool",
         }
@@ -2458,6 +2471,18 @@ def _classify_runtime_chat_route_raw(
     model_policy_route = _classify_model_policy_route(normalized)
     if model_policy_route is not None:
         return model_policy_route
+
+    if normalized in {
+        "what model scout sees",
+        "what does model scout see",
+        "run model scout now",
+    }:
+        return {
+            "route": "action_tool",
+            "kind": "model_scout_strategy",
+            "generic_allowed": False,
+            "fallback_reason": "action_tool",
+        }
 
     setup_intent = classify_setup_intent(
         text,

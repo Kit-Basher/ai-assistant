@@ -5209,6 +5209,26 @@ class Orchestrator:
                 "available": "metadata search is configured" in search_status.lower(),
             }
         )
+        filesystem_status: dict[str, Any] = {}
+        filesystem_status_fn = getattr(truth, "filesystem_capability_status", None) if truth is not None else None
+        if callable(filesystem_status_fn):
+            try:
+                filesystem_status = dict(filesystem_status_fn())
+            except Exception:
+                filesystem_status = {}
+        filesystem_available = bool(filesystem_status.get("allowed_roots"))
+        areas.append(
+            {
+                "key": "bounded_filesystem",
+                "title": "Bounded filesystem",
+                "summary": (
+                    "Read-only file list, search, and text preview are available inside configured roots."
+                    if filesystem_available
+                    else "File tooling exists, but no allowed roots are currently available."
+                ),
+                "available": filesystem_available,
+            }
+        )
         if truth is not None:
             target_truth = (
                 truth.chat_target_truth()
@@ -5289,7 +5309,8 @@ class Orchestrator:
             text = " ".join(brief_parts)
         else:
             text = build_user_facing_capability_answer(
-                search_available=bool(areas[-1].get("available")) if areas else None,
+                search_available="metadata search is configured" in search_status.lower(),
+                filesystem_available=filesystem_available,
                 safe_mode=safe_mode_enabled,
             )
         return self._runtime_truth_response(
@@ -15499,6 +15520,45 @@ class Orchestrator:
             },
         )
 
+    def _filesystem_capability_status_response(self) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        status_fn = getattr(truth, "filesystem_capability_status", None) if truth is not None else None
+        if not callable(status_fn):
+            return self._runtime_state_unavailable_response(
+                route="action_tool",
+                reason="filesystem_capability_status_unavailable",
+            )
+        payload = status_fn()
+        payload = dict(payload) if isinstance(payload, dict) else {}
+        roots = [str(root).strip() for root in payload.get("allowed_roots", []) if str(root).strip()]
+        if roots:
+            message = (
+                f"Yes. I can do bounded, read-only file searches in these configured allowed roots: {', '.join(roots)}. "
+                "What filename or text should I search for?"
+            )
+            downloads_path = str(payload.get("downloads_path") or "").strip()
+            resolved_downloads = str(payload.get("downloads_resolved_path") or "").strip()
+            if not bool(payload.get("downloads_allowed", False)) and downloads_path:
+                resolution = (
+                    f" It resolves to {resolved_downloads}, which is outside those roots."
+                    if resolved_downloads and resolved_downloads != downloads_path
+                    else " It is outside those roots."
+                )
+                message = f"{message} Note: {downloads_path} is not currently searchable.{resolution}"
+        else:
+            message = (
+                "File search is supported, but no useful allowed roots are configured right now. "
+                "Configure an exact read-only root before asking me to search it."
+            )
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_tools=["filesystem"],
+            ok=bool(roots),
+            error_kind=None if roots else "filesystem_roots_not_configured",
+            payload={**payload, "title": "Filesystem search scope", "summary": message},
+        )
+
     def _filesystem_recent_download_response(self) -> OrchestratorResponse:
         truth = self._runtime_truth()
         search_fn = getattr(truth, "filesystem_recent_downloaded_videos", None) if truth is not None else None
@@ -15511,9 +15571,17 @@ class Orchestrator:
         payload = dict(payload) if isinstance(payload, dict) else {}
         downloads = str(payload.get("downloads_path") or "Downloads").strip() or "Downloads"
         if not bool(payload.get("scope_configured", False)):
+            resolved_downloads = str(payload.get("resolved_path") or "").strip()
+            boundary = (
+                f"{downloads} resolves to {resolved_downloads}, which is outside that scope"
+                if resolved_downloads and resolved_downloads != downloads
+                else f"{downloads} is outside that scope"
+            )
             message = (
-                f"I can search only configured allowed file roots. {downloads} is outside that scope, "
-                "so I did not inspect it. Add Downloads to PERCEPTION_ROOTS, then ask me again."
+                f"I can search only configured allowed file roots. {boundary}, "
+                "so I did not inspect it. To add it safely, review the exact Downloads path in the "
+                "personal-agent-api.service PERCEPTION_ROOTS configuration, apply that explicit configuration change, "
+                "and restart the service; then ask me again."
             )
             return self._runtime_truth_response(
                 text=message,
@@ -19400,6 +19468,8 @@ class Orchestrator:
             return self._filesystem_stat_path_response(str(decision.get("path_hint") or "").strip() or None)
         if kind == "filesystem_read_text_file":
             return self._filesystem_read_text_file_response(str(decision.get("path_hint") or "").strip() or None)
+        if kind == "filesystem_capability_status":
+            return self._filesystem_capability_status_response()
         if kind == "filesystem_search_filenames":
             return self._filesystem_search_filenames_response(
                 root_hint=str(decision.get("path_hint") or "").strip() or None,
