@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 from pathlib import Path
 
 from agent.intent_router import route_message
+from agent.llm.model_latency import infer_parameter_size_b
 from agent.capability_policy import (
     POLICY_SCHEMA_VERSION,
     build_default_capability_registry,
@@ -5156,6 +5157,21 @@ class Orchestrator:
     def _assistant_capabilities_response(self, query_text: str | None = None) -> OrchestratorResponse:
         truth = self._runtime_truth()
         adapter = self._chat_runtime_adapter
+        pack_state: dict[str, Any] = {"installed_count": 0, "enabled_count": 0, "discovery_source_count": 0}
+        try:
+            canonical_state = dict(adapter.packs_state()) if callable(getattr(adapter, "packs_state", None)) else {}
+            installed_packs = [row for row in canonical_state.get("packs", []) if isinstance(row, dict)]
+            state_summary = canonical_state.get("summary") if isinstance(canonical_state.get("summary"), dict) else {}
+            discovery_sources = [row for row in self._pack_registry_discovery().list_sources() if isinstance(row, dict)]
+            pack_state = {
+                "installed_count": int(state_summary.get("installed") or len(installed_packs)),
+                "enabled_count": int(state_summary.get("enabled") or 0),
+                "discovery_source_count": len(discovery_sources),
+                "discovery_sources": [str(row.get("name") or row.get("id") or "").strip() for row in discovery_sources[:5]],
+                "installed_packs": [self._external_pack_display_name(str(row.get("name") or row.get("pack_id") or "pack")) for row in installed_packs[:8]],
+            }
+        except Exception:
+            pack_state["state_error"] = "pack_state_unavailable"
         safe_mode_enabled = bool(
             callable(getattr(adapter, "_safe_mode_enabled", None))
             and adapter._safe_mode_enabled()
@@ -5177,7 +5193,8 @@ class Orchestrator:
                 "key": "pack_suggestions",
                 "title": "Skill-pack discovery and local packs",
                 "summary": (
-                    "I can search approved catalogs as untrusted metadata and inspect reviewed local text packs. "
+                    f"I can search {int(pack_state.get('discovery_source_count') or 0)} configured catalogs as untrusted metadata; "
+                    f"{int(pack_state.get('installed_count') or 0)} external packs are recorded and {int(pack_state.get('enabled_count') or 0)} are enabled. "
                     "Arbitrary remote pack download is unavailable; discovery is not installation."
                 ),
                 "available": True,
@@ -5286,6 +5303,7 @@ class Orchestrator:
                 "brief_prompt": brief_prompt,
                 "guided_thinking_prompt": guided_thinking_prompt,
                 "agent_layer_prompt": agent_layer_prompt,
+                "pack_state": pack_state,
             },
         )
 
@@ -8673,6 +8691,7 @@ class Orchestrator:
         )
 
     def _model_controller_trial_switch_response(self, user_id: str, text: str, *, confirmed: bool = False) -> OrchestratorResponse:
+        truth = self._runtime_truth()
         resolution = self._resolve_controller_model_target(user_id, text)
         status = str(resolution.get("status") or "").strip().lower()
         if status == "ambiguous":
@@ -8700,6 +8719,38 @@ class Orchestrator:
         if not matched_model:
             return self._execute_model_controller_trial_switch(user_id, model_id=None, provider_id=None)
         if not confirmed:
+            requires_interactive_probe = bool((infer_parameter_size_b(matched_model) or 0.0) >= 30.0)
+            test_fn = getattr(truth, "test_chat_model_target", None) if truth is not None else None
+            if not requires_interactive_probe:
+                test_fn = None
+            if requires_interactive_probe and not callable(test_fn):
+                return self._runtime_state_unavailable_response(
+                    route="model_status",
+                    reason="interactive_model_test_unavailable",
+                )
+            test_ok, test_body = test_fn(matched_model, provider_id=provider_id) if callable(test_fn) else (True, {})
+            test_payload = dict(test_body) if isinstance(test_body, dict) else {}
+            if requires_interactive_probe and not bool(test_ok):
+                reason = str(test_payload.get("reason") or test_payload.get("message") or test_payload.get("error") or "interactive test failed").strip()
+                message = (
+                    f"I did not offer a switch to {matched_model}. Its tiny interactive test did not finish "
+                    f"within the chat latency budget or otherwise failed: {reason}. The current model is unchanged."
+                )
+                return self._runtime_truth_response(
+                    text=message,
+                    route="model_status",
+                    used_tools=["model_controller"],
+                    error_kind=str(test_payload.get("error") or "interactive_model_test_failed"),
+                    payload={
+                        "type": "model_controller",
+                        "action": "switch_preflight",
+                        "provider": provider_id,
+                        "model_id": matched_model,
+                        "interactive_test": test_payload,
+                        "summary": message,
+                        "mutated": False,
+                    },
+                )
             question = (
                 f"Temporary chat model switch preview: I will switch chat temporarily to {matched_model}. "
                 "This does not change your default model. Say yes to continue, or no to cancel."
@@ -12509,6 +12560,52 @@ class Orchestrator:
             },
         )
 
+    @staticmethod
+    def _local_pack_path_from_request(text: str | None) -> str | None:
+        raw = str(text or "").strip()
+        match = re.search(r"\bfrom\s+(?P<path>(?:~|/|\./)[^\s,;!?]+)", raw, re.IGNORECASE)
+        return str(match.group("path") or "").strip().rstrip(".") if match is not None else None
+
+    def _local_pack_install_preview_response(self, user_id: str, text: str) -> OrchestratorResponse | None:
+        path = self._local_pack_path_from_request(text)
+        if not path:
+            return None
+        return self._external_pack_plan_confirmation_response(
+            user_id,
+            action_type="external_pack.install",
+            operation_payload={"path": path},
+            title="Import local text pack for review",
+            intro_lines=[
+                f"I prepared a bounded review-only import for the local pack at {path}.",
+                "Import does not approve, enable, grant permissions, or execute the pack.",
+            ],
+            used_tools=["pack_acquisition"],
+            preview_payload={
+                "path": path,
+                "did_import": False,
+                "did_approve": False,
+                "did_enable": False,
+                "did_use_pack": False,
+            },
+        )
+
+    def _remote_pack_install_denial_response(self, user_id: str, text: str) -> OrchestratorResponse | None:
+        match = re.search(r"\bfrom\s+(?P<url>https?://[^\s,;!?]+)", str(text or ""), re.IGNORECASE)
+        if match is None:
+            return None
+        adapter = self._chat_runtime_adapter
+        planner = getattr(adapter, "plan_pack_lifecycle", None)
+        if not callable(planner):
+            return self._agent_pack_install_explanation_response(user_id, text)
+        body = dict(planner("external_pack.install", {"source": str(match.group("url") or "").rstrip(".")}))
+        message = str(body.get("message") or "Remote pack fetch/install is unavailable. No URL was opened and nothing was imported.")
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_tools=["pack_acquisition"],
+            error_kind=str(body.get("error") or "remote_pack_fetch_stage_unimplemented_denied"),
+            payload={**body, "type": "external_pack_install_denied", "mutated": False, "summary": message},
+        )
     def _email_capability_unavailable_response(self, user_id: str, text: str) -> OrchestratorResponse:
         _ = text
         message = (
@@ -15400,6 +15497,48 @@ class Orchestrator:
                 "title": "Filename search",
                 "summary": message,
             },
+        )
+
+    def _filesystem_recent_download_response(self) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        search_fn = getattr(truth, "filesystem_recent_downloaded_videos", None) if truth is not None else None
+        if not callable(search_fn):
+            return self._runtime_state_unavailable_response(
+                route="action_tool",
+                reason="filesystem_recent_download_search_unavailable",
+            )
+        payload = search_fn()
+        payload = dict(payload) if isinstance(payload, dict) else {}
+        downloads = str(payload.get("downloads_path") or "Downloads").strip() or "Downloads"
+        if not bool(payload.get("scope_configured", False)):
+            message = (
+                f"I can search only configured allowed file roots. {downloads} is outside that scope, "
+                "so I did not inspect it. Add Downloads to PERCEPTION_ROOTS, then ask me again."
+            )
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_tools=["filesystem"],
+                error_kind="outside_allowed_roots",
+                payload={**payload, "ok": False, "title": "Recent downloaded video search", "summary": message},
+            )
+        results = [dict(row) for row in payload.get("results", []) if isinstance(row, dict)]
+        if not results:
+            message = f"I searched the allowed Downloads directory at {downloads}, but found no recent video files."
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_tools=["filesystem"],
+                error_kind="no_matches",
+                payload={**payload, "ok": False, "title": "Recent downloaded video search", "summary": message},
+            )
+        preview = ", ".join(str(row.get("path") or "") for row in results[:5])
+        message = f"I searched the allowed Downloads directory. Most recent video matches: {preview}."
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_tools=["filesystem"],
+            payload={**payload, "title": "Recent downloaded video search", "summary": message},
         )
 
     def _filesystem_search_text_response(
@@ -18655,6 +18794,38 @@ class Orchestrator:
                         "summary": message,
                     },
                 )
+            requires_interactive_probe = bool((infer_parameter_size_b(matched_model) or 0.0) >= 30.0)
+            test_fn = getattr(truth, "test_chat_model_target", None)
+            if requires_interactive_probe and not callable(test_fn):
+                return self._runtime_state_unavailable_response(
+                    route="model_status",
+                    used_memory=bool(state),
+                    reason="interactive_model_test_unavailable",
+                )
+            test_ok, test_body = test_fn(matched_model, provider_id=provider_id) if callable(test_fn) and requires_interactive_probe else (True, {})
+            test_payload = dict(test_body) if isinstance(test_body, dict) else {}
+            if requires_interactive_probe and not bool(test_ok):
+                reason = str(test_payload.get("reason") or test_payload.get("message") or test_payload.get("error") or "interactive test failed").strip()
+                message = (
+                    f"I did not offer a switch to {matched_model}. Its tiny interactive test did not finish "
+                    f"within the chat latency budget or otherwise failed: {reason}. The current model is unchanged."
+                )
+                return self._runtime_truth_response(
+                    text=message,
+                    route="model_status",
+                    used_memory=bool(state),
+                    used_tools=["model_controller"],
+                    error_kind=str(test_payload.get("error") or "interactive_model_test_failed"),
+                    payload={
+                        "type": "model_controller",
+                        "action": "switch_preflight",
+                        "provider": provider_id,
+                        "model_id": matched_model,
+                        "interactive_test": test_payload,
+                        "summary": message,
+                        "mutated": False,
+                    },
+                )
             if promote_default:
                 question = (
                     f"I will make {matched_model} the default chat model. "
@@ -19033,6 +19204,10 @@ class Orchestrator:
             return self._managed_service_stop_preview_response(user_id)
         if self._looks_like_unbounded_install_request(text):
             return self._unbounded_install_block_response(user_id, text)
+        if self._looks_like_agent_pack_install_request(text):
+            local_pack_preview = self._local_pack_install_preview_response(user_id, text)
+            if local_pack_preview is not None:
+                return local_pack_preview
         if self._looks_like_agent_pack_install_request(text) and self._looks_like_email_access_request(text):
             return self._agent_pack_install_explanation_response(user_id, text)
         if self._looks_like_email_access_request(text):
@@ -19231,6 +19406,8 @@ class Orchestrator:
                 query=str(decision.get("query") or "").strip() or None,
                 root_required=bool(decision.get("root_required", False)),
             )
+        if kind == "filesystem_recent_download":
+            return self._filesystem_recent_download_response()
         if kind == "filesystem_search_text":
             return self._filesystem_search_text_response(
                 root_hint=str(decision.get("path_hint") or "").strip() or None,
@@ -19260,6 +19437,8 @@ class Orchestrator:
             )
         if kind == "model_lifecycle_status":
             return self._model_lifecycle_response(text)
+        if kind == "model_controller_test":
+            return self._model_controller_test_response(user_id, text)
         if kind == "model_scout_strategy":
             return self._model_scout_strategy_response(user_id, text)
         if kind == "model_scout_discovery":
@@ -22373,8 +22552,14 @@ class Orchestrator:
             self._looks_like_context_reset_request(normalized)
             or self._looks_like_fresh_intent_override(normalized)
             or normalized in {"switch back", "switch model back"}
-            or len(normalized.split()) > 3
         ):
+            replaced = self._clear_pending_confirmation(user_id, status=PENDING_STATUS_ABORTED)
+            self._cancel_pending_confirmation_plan(replaced)
+            self._record_runtime_event(
+                "approval.replaced",
+                action_type=action_type,
+                reason="clear_new_request",
+            )
             return None
         if int(pending.expires_at or 0) <= now_epoch:
             return self._expired_confirmation_response(user_id, pending=pending)
@@ -22606,6 +22791,13 @@ class Orchestrator:
                 )
                 if pending_guard_response is not None:
                     return pending_guard_response
+            if not cmd and self._looks_like_agent_pack_install_request(effective_user_text):
+                local_pack_preview = self._local_pack_install_preview_response(user_id, effective_user_text)
+                if local_pack_preview is not None:
+                    return local_pack_preview
+                remote_pack_denial = self._remote_pack_install_denial_response(user_id, effective_user_text)
+                if remote_pack_denial is not None:
+                    return remote_pack_denial
             if not cmd and self._looks_like_managed_service_start_restart_request(effective_user_text):
                 self._record_runtime_event(
                     "search.final_route",
@@ -22617,7 +22809,7 @@ class Orchestrator:
                 normalized_social_candidate = " ".join(str(effective_user_text or "").strip().lower().split())
                 social_reply = None
                 social_fast_path_allowed = (
-                    normalized_social_candidate in {"you there?", "you there", "you ther?", "you ther", "are you ther?", "are you ther", "ping", "test"}
+                    normalized_social_candidate in {"you there?", "you there", "you ther?", "you ther", "are you ther?", "are you ther", "are you here?", "are you here", "ping", "test"}
                     or "are you there" in normalized_social_candidate
                 )
                 if social_fast_path_allowed and not any(
@@ -22625,6 +22817,8 @@ class Orchestrator:
                     for token in ("ollama", "model", "provider", "runtime", "running", "working")
                 ):
                     social_reply = build_trivial_social_turn_message(effective_user_text)
+                    if social_reply is None and normalized_social_candidate in {"are you here?", "are you here"}:
+                        social_reply = "Yes, I’m here and the assistant front door is responding."
                 if social_reply is not None:
                     return self._runtime_truth_response(
                         text=social_reply,
@@ -22641,7 +22835,20 @@ class Orchestrator:
                 pending_action = self.confirmations.get(user_id)
                 if pending_action is None:
                     normalized_accept = " ".join(str(effective_user_text or "").strip().lower().split())
-                    if normalized_accept in {"confirm", "go ahead", "proceed"}:
+                    has_resumable_context = bool(
+                        self._current_runtime_setup_state(user_id)
+                        or self._current_onboarding_state(user_id)
+                        or self._get_pending_compare(user_id)
+                        or self._pending_managed_adapter_requests.get(user_id)
+                        or self._memory_runtime.list_pending_items(
+                            user_id,
+                            thread_id=self._active_thread_id_for_user(user_id),
+                            include_expired=True,
+                        )
+                    )
+                    if normalized_accept in {"confirm", "go ahead", "proceed"} or (
+                        normalized_accept in {"yes", "y"} and not has_resumable_context
+                    ):
                         message = "I don’t have a current action to continue. Tell me what you want me to do next, or ask me to check runtime status."
                         return self._runtime_truth_response(
                             text=message,

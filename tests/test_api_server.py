@@ -5647,6 +5647,10 @@ class TestAPIServerRuntime(unittest.TestCase):
             "current_chat_target_status",
             side_effect=_current_target,
         ), patch.object(
+            truth,
+            "test_chat_model_target",
+            return_value=(True, {"ok": True, "provider": "ollama", "model_id": "ollama:qwen2.5:7b-instruct", "duration_ms": 250}),
+        ), patch.object(
             runtime,
             "llm_models_switch_temporary",
             side_effect=_set_temporary,

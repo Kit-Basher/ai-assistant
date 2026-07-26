@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from copy import deepcopy
 from typing import Any
 import re
+from pathlib import Path
 
 from agent.error_response_ux import compose_actionable_message
 from agent.failure_ux import build_failure_recovery
@@ -1870,6 +1871,46 @@ class RuntimeTruthService:
             "source": "runtime_truth.filesystem",
         }
 
+    def filesystem_recent_downloaded_videos(self, *, max_results: int = 12) -> dict[str, Any]:
+        """Search the user's Downloads directory through the bounded filesystem skill."""
+        downloads = Path.home() / "Downloads"
+        skill = self._filesystem_skill()
+        scope_check = skill.list_directory(str(downloads), max_entries=1)
+        if not bool(scope_check.get("ok", False)):
+            error_kind = str(scope_check.get("error_kind") or "filesystem_error")
+            return {
+                **dict(scope_check),
+                "type": "filesystem_recent_downloaded_videos",
+                "downloads_path": str(downloads),
+                "source": "runtime_truth.filesystem",
+                "scope_configured": error_kind != "outside_allowed_roots",
+            }
+        rows: dict[str, dict[str, Any]] = {}
+        for suffix in (".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v"):
+            payload = skill.search_filenames(
+                str(downloads),
+                suffix,
+                max_results=max_results,
+                max_depth=2,
+            )
+            for row in payload.get("results") if isinstance(payload.get("results"), list) else []:
+                if isinstance(row, dict) and str(row.get("type") or "") == "file":
+                    rows[str(row.get("path") or "")] = dict(row)
+        results = sorted(
+            rows.values(),
+            key=lambda row: float(row.get("modified_time") or 0.0),
+            reverse=True,
+        )[: max(1, min(int(max_results), 25))]
+        return {
+            "ok": bool(results),
+            "type": "filesystem_recent_downloaded_videos",
+            "downloads_path": str(downloads),
+            "scope_configured": True,
+            "results": results,
+            "error_kind": None if results else "no_matches",
+            "source": "runtime_truth.filesystem",
+        }
+
     def filesystem_search_text(
         self,
         root: str | None,
@@ -2186,6 +2227,14 @@ class RuntimeTruthService:
                     and provider_selection_state == "configured_and_usable"
                     and provider_health_status == "ok"
                 )
+            params_b = infer_parameter_size_b(model_id, row.get("model_name"), row.get("size"))
+            interactive_probe = getattr(self, "_interactive_model_probe_results", {}).get(model_id)
+            if params_b is not None and params_b >= 30.0 and not bool(
+                isinstance(interactive_probe, dict) and interactive_probe.get("ok") is True
+            ):
+                usable_now = False
+                acquisition_state = "installed_not_ready" if lifecycle_state in {"ready", "installed"} else acquisition_state
+                acquisition_reason = "installed, but not verified within the interactive chat latency budget"
             if usable_now:
                 acquisition_state = "ready_now"
                 acquisition_reason = None
@@ -4599,11 +4648,43 @@ class RuntimeTruthService:
                 "error": "provider_required",
                 "message": "I couldn't tell which provider that model belongs to.",
             }
-        ok, body = tester(requested_provider, {"model": requested_model})
+        timeout_seconds = max(1.0, float(getattr(getattr(self.runtime, "config", None), "llm_timeout_seconds", 20.0) or 20.0))
+        ok, body = tester(
+            requested_provider,
+            {"model": requested_model, "timeout_seconds": timeout_seconds},
+        )
         response = dict(body) if isinstance(body, dict) else {"ok": bool(ok)}
         response.setdefault("provider", requested_provider)
         response.setdefault("model_id", requested_model)
-        return bool(ok), response
+        duration_ms = int(response.get("duration_ms") or 0)
+        within_budget = bool(ok) and duration_ms <= int(timeout_seconds * 1000)
+        if bool(ok) and not within_budget:
+            response.update(
+                {
+                    "ok": False,
+                    "error": "interactive_latency_budget_exceeded",
+                    "error_kind": "interactive_latency_budget_exceeded",
+                    "reason": "tiny chat probe exceeded the interactive chat timeout budget",
+                    "timeout_seconds": timeout_seconds,
+                }
+            )
+        elif not bool(ok) and str(response.get("error") or response.get("error_kind") or "").strip().lower() in {"timeout", "timeout_error", "provider_timeout"}:
+            response.setdefault("reason", "tiny chat probe exceeded the interactive chat timeout budget")
+            response["error"] = "interactive_latency_budget_exceeded"
+            response["error_kind"] = "interactive_latency_budget_exceeded"
+        probe_results = getattr(self, "_interactive_model_probe_results", None)
+        if not isinstance(probe_results, dict):
+            probe_results = {}
+            self._interactive_model_probe_results = probe_results
+        canonical_id = requested_model if ":" in requested_model else f"{requested_provider}:{requested_model}"
+        probe_results[canonical_id] = {
+            **response,
+            "ok": bool(within_budget),
+            "checked_at": int(time.time()),
+            "timeout_seconds": timeout_seconds,
+        }
+        self._invalidate_snapshot_cache()
+        return bool(within_budget), response
 
     def acquire_chat_model_target(
         self,

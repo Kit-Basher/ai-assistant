@@ -418,10 +418,15 @@ class FileSystemSkill:
                         entry_type = "symlink"
                 except OSError:
                     entry_type = "other"
+                try:
+                    modified_time = float(entry.stat(follow_symlinks=False).st_mtime)
+                except OSError:
+                    modified_time = None
                 results.append(
                     {
                         "path": str(resolved_entry),
                         "type": entry_type,
+                        "modified_time": modified_time,
                     }
                 )
             if truncated:

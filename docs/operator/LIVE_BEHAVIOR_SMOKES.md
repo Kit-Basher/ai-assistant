@@ -5,11 +5,18 @@ Run these smokes after promoting the current checkout into the stable runtime an
 Recommended sequence:
 
 ```bash
+python scripts/chat_frontdoor_smoke.py
 bash scripts/promote_local_stable.sh
 python scripts/live_user_barrage.py --base-url http://127.0.0.1:8765 --telegram-bridge --timeout 90
 python scripts/telegram_bridge_smoke.py --base-url http://127.0.0.1:8765 --timeout 90
 python scripts/live_model_switch_smoke.py --base-url http://127.0.0.1:8765 --timeout 90
 ```
+
+`scripts/chat_frontdoor_smoke.py` is the safe, isolated rerunnable proof. It
+drives the real POST `/chat` handler with the recovered ten-turn transcript and
+also proves bounded file list/search/read and denial, grounded pack state,
+review-only local text-pack ingestion, remote-pack denial, Telegram routing,
+and interactive model latency qualification. It does not touch live user state.
 
 `scripts/live_user_barrage.py` sends messy real-user prompts through the live `/chat` path using a stable `user_id` and `thread_id`. With `--telegram-bridge`, it also runs the same prompt set through `agent.telegram_bridge.handle_telegram_text()` using the local API chat proxy, without contacting Telegram servers.
 

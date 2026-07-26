@@ -98,7 +98,15 @@ class TestModelSwitchSemantics(unittest.TestCase):
         return str(assistant.get("content") or payload.get("message") or "").strip()
 
     def test_temporary_switch_is_thread_scoped_and_does_not_change_stored_default(self) -> None:
-        preview = self._chat("use ollama:qwen3.6:35b-a3b for this chat session only")
+        with patch.object(
+            self.runtime.runtime_truth_service(),
+            "test_chat_model_target",
+            return_value=(
+                True,
+                {"ok": True, "provider": "ollama", "model_id": "ollama:qwen3.6:35b-a3b", "duration_ms": 500},
+            ),
+        ):
+            preview = self._chat("use ollama:qwen3.6:35b-a3b for this chat session only")
         preview_text = self._text(preview)
         self.assertIn("This does not change your default model", preview_text)
         self.assertNotIn("Default model updated", preview_text)

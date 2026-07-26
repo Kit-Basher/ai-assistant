@@ -77,8 +77,9 @@ local activation marker; purge uninstall remains unsupported.
   own.
 - It will not execute foreign code or plugin packs.
 - It will not install dependencies from imported packs.
-- It will not claim full web browsing; current web search is metadata-only
-  SearXNG result metadata.
+- It will not claim full web browsing. Explicit/current-information requests use
+  configured SearXNG search results with source titles and URLs; the assistant
+  does not silently fetch arbitrary result pages.
 
 ## Core Concepts
 
@@ -419,6 +420,8 @@ surface.
 ## Release Smoke Suite
 Run this before calling a build releasable:
 - `python scripts/release_gate.py`
+- `python scripts/chat_frontdoor_smoke.py` for the isolated, exact end-user
+  `/chat` capability transcript and policy contract
 
 It is the canonical release gate. The fast pre-check inside it is
 `python scripts/release_smoke.py`. It runs a fixed deterministic set of checks
@@ -427,6 +430,8 @@ covering:
 - health/readiness/runtime restart truth
 - the shipped two-turn web UI/API conversation proof
 - chat/tool golden-path behavior
+- the exact multi-turn `/chat` front-door contract for search, files, tools,
+  model status/diagnosis/switch qualification, confirmation, and presence
 - the assistant-behavior release gate
 - basic memory inspect/degrade behavior
 - safe external pack discovery/preview/install blocked-path behavior

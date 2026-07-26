@@ -897,6 +897,12 @@ def _looks_like_assistant_capabilities_query(normalized: str) -> bool:
     if any(phrase in normalized_space for phrase in _ASSISTANT_CAPABILITY_PHRASES):
         return True
     if (
+        ("packs" in normalized_space or ("external" in normalized_space and "skills" in normalized_space))
+        and any(token in normalized_space for token in ("what", "which", "list", "show", "available", "state", "status", "discover"))
+        and not any(token in normalized_space for token in ("install", "ingest", "import", "enable", "remove", "delete"))
+    ):
+        return True
+    if (
         any(phrase in normalized_space for phrase in ("help me think this through", "help me think through", "thinking through"))
         and any(phrase in normalized_space for phrase in ("messy", "keep it simple", "without overcomplicating it"))
         and not any(token in normalized_space for token in ("about ", "whether ", "should i ", "should we ", "for ", "between "))
@@ -1763,6 +1769,7 @@ def _looks_like_safe_web_search_status_request(normalized: str) -> bool:
         "why cant you search the internet",
         "why can t you search the internet",
         "can you search online",
+        "can you use search",
         "can you use search now",
         "can you use web search now",
         "what is your search status",
@@ -1903,6 +1910,18 @@ def _extract_filesystem_search_query(text: str | None, normalized: str) -> tuple
 
 def _classify_filesystem_route(text: str | None, normalized: str) -> dict[str, Any] | None:
     normalized_space = str(normalized or "").replace("/", " ")
+    if (
+        re.search(r"\b(?:search|look|find|locate)\b", normalized_space)
+        and re.search(r"\b(?:my )?(?:file|files|filesystem|file system)\b", normalized_space)
+        and re.search(r"\b(?:video|movie|recording)\b", normalized_space)
+        and re.search(r"\b(?:download|downloads|downloaded|recent|just)\b", normalized_space)
+    ):
+        return {
+            "route": "action_tool",
+            "kind": "filesystem_recent_download",
+            "generic_allowed": False,
+            "fallback_reason": "action_tool",
+        }
     path_hint = _extract_filesystem_path_hint(text, normalized)
     search_kind, search_query = _extract_filesystem_search_query(text, normalized)
     if search_kind and search_query:
@@ -2280,6 +2299,11 @@ def classify_setup_intent(
         for provider_id in _KNOWN_PROVIDER_IDS:
             if provider_id in normalized:
                 return {"kind": "provider_status", "provider_id": provider_id}
+    if (
+        _EXPLICIT_MODEL_TARGET_RE.search(normalized) is not None
+        and any(phrase in normalized.replace("/", " ") for phrase in ("what s wrong", "whats wrong", "fix it", "fix this", "diagnose", "repair"))
+    ):
+        return {"kind": "model_controller_test"}
     if _looks_like_setup_explanation_query(normalized):
         return {"kind": "setup_explanation"}
     if _looks_like_direct_model_switch_request(normalized):
@@ -2490,6 +2514,7 @@ def _classify_runtime_chat_route_raw(
         "find_ollama_models",
         "switch_better_local_model",
         "set_default_model",
+        "model_controller_test",
     }:
         return {
             **setup_intent,

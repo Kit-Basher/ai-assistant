@@ -13,6 +13,9 @@ from scripts.release_smoke import EXTENDED_TEST_NODES, MAIN_TEST_NODES
 
 PY_COMPILE_TARGETS: tuple[str, ...] = (
     "agent/api_server.py",
+    "agent/orchestrator.py",
+    "agent/setup_chat_flow.py",
+    "agent/filesystem_skill.py",
     "agent/executor_registry.py",
     "agent/runtime_truth_service.py",
     "agent/packs/store.py",
@@ -41,6 +44,7 @@ PY_COMPILE_TARGETS: tuple[str, ...] = (
     "scripts/first_run_smoke.py",
     "scripts/vm_proof_smoke.py",
     "scripts/daily_driver_maturity_audit.py",
+    "scripts/chat_frontdoor_smoke.py",
 )
 
 def _pytest_command(test_nodes: tuple[str, ...]) -> tuple[str, ...]:
