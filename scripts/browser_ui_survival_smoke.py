@@ -207,8 +207,14 @@ class BrowserHarness:
         return self.page.locator(".chat-message-user .chat-bubble").all_inner_texts()
 
     def send(self, text: str, *, timeout: float = 45.0) -> str:
+        textarea = self.page.locator("textarea")
+        ready_deadline = time.monotonic() + min(timeout, 20.0)
+        while time.monotonic() < ready_deadline and not textarea.is_enabled(timeout=1000):
+            time.sleep(0.1)
+        if not textarea.is_enabled(timeout=1000):
+            raise SmokeFailure("chat composer did not become ready after conversation restoration")
         before = self.page.locator(".chat-message-assistant .chat-bubble").count()
-        self.page.locator("textarea").fill(text)
+        textarea.fill(text)
         self.page.get_by_role("button", name="Send").click(timeout=5000)
         deadline = time.monotonic() + timeout
         last = ""
