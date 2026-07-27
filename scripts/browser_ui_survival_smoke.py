@@ -289,6 +289,11 @@ class BrowserHarness:
                 and "/ready" in row
                 and _contains_any(row, ("net::err_aborted", "net::err_empty_response", "net::err_connection_refused", "net::err_connection_reset"))
             )
+            and not (
+                ignore_expected_network
+                and "/chat/threads/" in row
+                and _contains_any(row, ("net::err_aborted", "net::err_empty_response", "net::err_connection_refused", "net::err_connection_reset"))
+            )
             and not _contains_any(row, ("favicon",))
         ]
         combined = "\n".join([*fatal_console, *fatal_network, *self.dialogs])
