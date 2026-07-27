@@ -3,6 +3,7 @@ import AdminPanel from "./components/AdminPanel";
 import BasicsTab from "./components/BasicsTab";
 import ChatExperience from "./components/ChatExperience";
 import DebugTab from "./components/DebugTab";
+import FilesTab from "./components/FilesTab";
 import ModelScoutTab from "./components/ModelScoutTab";
 import PacksTab from "./components/PacksTab";
 import OperationsTab from "./components/OperationsTab";
@@ -1989,6 +1990,12 @@ export default function App() {
       label: "Runtime state",
       group: "Runtime details",
       content: <StateTab stateSnapshot={uiState} />
+    },
+    {
+      id: "files",
+      label: "Files / Local Search",
+      group: "Local tools",
+      content: <FilesTab request={request} />
     },
     {
       id: "packs",

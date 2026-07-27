@@ -24221,6 +24221,21 @@ class APIServerHandler(BaseHTTPRequestHandler):
             return True
         return bool(self.runtime._host_is_loopback(host))
 
+    @staticmethod
+    def _filesystem_http_status(payload: dict[str, Any]) -> int:
+        if bool(payload.get("ok", False)) or str(payload.get("error_kind") or "") == "no_matches":
+            return 200
+        error_kind = str(payload.get("error_kind") or "").strip().lower()
+        if error_kind in {
+            "outside_allowed_roots",
+            "sensitive_path_blocked",
+            "symlink_path_blocked",
+        }:
+            return 403
+        if error_kind == "not_found":
+            return 404
+        return 400
+
     def _reject_non_loopback_operator_surface(self, *, path: str) -> bool:
         if self._request_is_loopback():
             return False
@@ -24278,6 +24293,42 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 ok, body = self.runtime.chat_thread(urllib.parse.unquote(parts[2]), payload)
                 self._send_json(200 if ok else 404, body)
                 return
+            if path.startswith("/filesystem/"):
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                truth = self.runtime.runtime_truth_service()
+                if path == "/filesystem/roots":
+                    self._send_json(200, truth.filesystem_capability_status())
+                    return
+                if path == "/filesystem/list":
+                    body = truth.filesystem_list_directory(
+                        query.get("path", [None])[0],
+                        max_entries=query.get("max_entries", [200])[0],
+                    )
+                    self._send_json(self._filesystem_http_status(body), body)
+                    return
+                if path == "/filesystem/stat":
+                    body = truth.filesystem_stat_path(query.get("path", [None])[0])
+                    self._send_json(self._filesystem_http_status(body), body)
+                    return
+                if path == "/filesystem/read":
+                    body = truth.filesystem_read_text_file(
+                        query.get("path", [None])[0],
+                        max_bytes=query.get("max_bytes", [8192])[0],
+                        offset=query.get("offset", [0])[0],
+                    )
+                    self._send_json(self._filesystem_http_status(body), body)
+                    return
+                if path == "/filesystem/search":
+                    body = truth.filesystem_search_filenames(
+                        query.get("root", [None])[0],
+                        query.get("q", [None])[0],
+                        max_results=query.get("max_results", [25])[0],
+                        max_depth=query.get("max_depth", [4])[0],
+                    )
+                    self._send_json(self._filesystem_http_status(body), body)
+                    return
             if path == "/ready":
                 self._send_json(200, self.runtime.ready_status())
                 return
@@ -24613,6 +24664,19 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if json_error is not None:
                 status_code, response = self._json_request_error_response(path=path, payload=payload, json_error=json_error)
                 self._send_json(status_code, response)
+                return
+            if path == "/filesystem/search_content":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                truth = self.runtime.runtime_truth_service()
+                body = truth.filesystem_search_text(
+                    payload.get("root"),
+                    payload.get("q"),
+                    max_results=payload.get("max_results", 25),
+                    max_files=payload.get("max_files", 200),
+                    max_bytes_per_file=payload.get("max_bytes_per_file", 8192),
+                )
+                self._send_json(self._filesystem_http_status(body), body)
                 return
             internal_claim = reject_public_internal_authority_claim(payload)
             if internal_claim:

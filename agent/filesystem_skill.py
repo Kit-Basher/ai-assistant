@@ -17,6 +17,21 @@ _HARD_SEARCH_RESULTS = 100
 _HARD_SEARCH_DEPTH = 8
 _HARD_SEARCH_MAX_FILES = 1000
 
+_SENSITIVE_FILENAMES = {
+    ".env",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    "credentials",
+    "credentials.json",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+    "id_rsa",
+    "secrets.json",
+}
+_SENSITIVE_SUFFIXES = (".key", ".pem", ".p12", ".pfx")
+
 
 def _is_relative_to(path: Path, root: Path) -> bool:
     try:
@@ -116,6 +131,14 @@ class FileSystemSkill:
                 error_kind="outside_allowed_roots",
                 message="That path is outside the allowed local file roots.",
             )
+        if self._has_sensitive_name(candidate) or self._has_sensitive_name(resolved):
+            return None, self._error_result(
+                "path_resolution",
+                raw_path,
+                resolved_path=str(resolved),
+                error_kind="sensitive_path_blocked",
+                message="That path is blocked by the local privacy policy.",
+            )
         if any(_is_relative_to(resolved, root) for root in self.sensitive_roots):
             return None, self._error_result(
                 "path_resolution",
@@ -124,7 +147,24 @@ class FileSystemSkill:
                 error_kind="sensitive_path_blocked",
                 message="That path is blocked by the local privacy policy.",
             )
+        lexical = Path(os.path.abspath(candidate))
+        if lexical != resolved:
+            return None, self._error_result(
+                "path_resolution",
+                raw_path,
+                resolved_path=str(resolved),
+                error_kind="symlink_path_blocked",
+                message="Symlink paths are blocked by the local filesystem safety policy.",
+            )
         return resolved, None
+
+    @staticmethod
+    def _has_sensitive_name(path: Path) -> bool:
+        for part in path.parts:
+            lowered = part.strip().lower()
+            if lowered in _SENSITIVE_FILENAMES or lowered.endswith(_SENSITIVE_SUFFIXES):
+                return True
+        return False
 
     @staticmethod
     def _bounded_int(value: int | None, *, default: int, minimum: int, maximum: int) -> int:
@@ -190,6 +230,8 @@ class FileSystemSkill:
         entries: list[dict[str, Any]] = []
         truncated = False
         for entry in sorted(scan_rows, key=lambda item: item.name.lower()):
+            if self._has_sensitive_name(Path(entry.name)):
+                continue
             if len(entries) >= max(1, int(max_entries or _DEFAULT_LIST_LIMIT)):
                 truncated = True
                 break

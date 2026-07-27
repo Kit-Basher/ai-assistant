@@ -15,6 +15,13 @@ MAIN_TEST_NODES: tuple[str, ...] = (
     "tests/test_install_local_flow.py",
     "tests/test_end_user_closure_contract.py",
     "tests/test_chat_frontdoor_contract.py",
+    # Explicit product-proof gates. Keep these named even when broader suites overlap.
+    "tests/test_filesystem_api_contract.py",
+    "tests/test_webui_files_contract.py",
+    "tests/test_api_packs_endpoints.py::TestAPIPacksEndpoints::test_external_pack_is_usable_through_chat_and_removed_cleanly",
+    "tests/test_monitor_and_model_scout_pack_policy.py::TestMonitorAndModelScoutPackPolicy::test_model_scout_endpoints_smoke_no_network",
+    "tests/test_agent_cli.py::TestAgentCLI::test_llm_inventory_subcommand_json",
+    "tests/test_model_switch_semantics.py",
     "tests/test_pack_search_authorization.py::test_remote_combined_fetch_install_is_explicitly_denied_but_local_install_is_planned",
     "tests/test_pack_search_authorization.py::test_local_catalog_outside_owned_storage_is_a_precise_bad_request_not_internal_error",
     "tests/test_debian_package.py",

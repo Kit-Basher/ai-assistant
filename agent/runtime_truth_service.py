@@ -1855,7 +1855,7 @@ class RuntimeTruthService:
         payload = self._filesystem_skill().stat_path(path)
         return {
             **dict(payload),
-            "type": "filesystem_stat_path",
+            "contract_type": "filesystem_stat_path",
             "source": "runtime_truth.filesystem",
         }
 

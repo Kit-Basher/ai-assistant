@@ -21,6 +21,7 @@ export default defineConfig({
       "/chat": apiTarget,
       "/config": apiTarget,
       "/defaults": apiTarget,
+      "/filesystem": apiTarget,
       "/llm": apiTarget,
       "/providers": apiTarget,
       "/telegram": apiTarget,
