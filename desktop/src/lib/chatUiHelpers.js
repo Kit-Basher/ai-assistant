@@ -1,5 +1,6 @@
 const CONFIRM_TO_PROCEED_RE = /reply\s+["']?(\/?confirm)["']?\s+to proceed/i;
 const CONFIRM_TOKEN_RE = /\b(\/?confirm)\b/i;
+const YES_NO_APPROVAL_RE = /\b(?:say|reply)\s+["']?(yes)["']?\s+to\s+(?:continue|approve|proceed)[\s\S]{0,80}\b(?:or|and)\s+["']?no["']?\s+to\s+cancel\b/i;
 const INTERNAL_TEXT_MARKERS = [
   "trace_id:",
   "component:",
@@ -175,9 +176,10 @@ function extractConfirmationUi(text, payload) {
 
   const explicitMatch = sourceText.match(CONFIRM_TO_PROCEED_RE);
   const genericMatch = sourceText.match(CONFIRM_TOKEN_RE);
+  const yesNoMatch = sourceText.match(YES_NO_APPROVAL_RE);
   const looksLikeApproval =
-    /approve|confirmation|confirm|to proceed|continue/i.test(sourceText)
-    && Boolean(explicitMatch || genericMatch);
+    /approve|approval|confirmation|confirm|mutating|destructive|before doing anything|proposed action/i.test(sourceText)
+    && Boolean(explicitMatch || genericMatch || yesNoMatch);
 
   if (!looksLikeApproval) {
     return null;
@@ -191,7 +193,7 @@ function extractConfirmationUi(text, payload) {
   const rollback = plan.rollback_supported === true
     ? "A separately approved rollback may be available within the stated scope."
     : "There is no automatic rollback; review the preview carefully.";
-  const approveCommand = explicitMatch?.[1] || genericMatch?.[1] || "confirm";
+  const approveCommand = explicitMatch?.[1] || genericMatch?.[1] || yesNoMatch?.[1] || "confirm";
   return {
     title: deleted > 0 ? "Review this destructive change" : "Review this change",
     description: text || "The agent needs your approval before it continues.",
@@ -201,7 +203,7 @@ function extractConfirmationUi(text, payload) {
     approveLabel: deleted > 0 ? "Approve destructive change" : "Approve change",
     approveCommand,
     cancelLabel: "Cancel",
-    cancelCommand: "cancel"
+    cancelCommand: yesNoMatch ? "no" : "cancel"
   };
 }
 

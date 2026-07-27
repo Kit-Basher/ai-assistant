@@ -16,9 +16,10 @@ test("ChatExperience pins the actual transcript container without scrollIntoView
 
 test("ChatExperience force-scrolls after user send and preserves passive reading", () => {
   assert.match(chatExperience, /forceNextScrollRef\.current = true/);
-  assert.match(chatExperience, /userTurnInProgressRef\.current = true/);
+  assert.doesNotMatch(chatExperience, /userTurnInProgressRef/);
   assert.match(chatExperience, /maybeScrollToBottom\(\{ force: true \}\)/);
   assert.match(chatExperience, /if \(!force && !shouldStickToBottomRef\.current\) return/);
+  assert.match(chatExperience, /Jump to latest/);
   assert.match(chatExperience, /requestAnimationFrame/);
 });
 

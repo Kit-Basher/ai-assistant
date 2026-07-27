@@ -90,6 +90,19 @@ test("buildAssistantMessage presents canonical Plan approval in plain language",
   assert.match(message.ui.confirmation?.riskSummary || "", /no automatic rollback/i);
 });
 
+test("buildAssistantMessage renders yes/no mutation previews as approval controls", () => {
+  const message = buildAssistantMessage({
+    ok: true,
+    assistant: {
+      content: "This is a mutating operator action, so I need explicit confirmation before doing anything. Say yes to continue, or no to cancel."
+    }
+  });
+
+  assert.equal(message.ui.operationState, "waiting_for_confirmation");
+  assert.equal(message.ui.confirmation?.approveCommand, "yes");
+  assert.equal(message.ui.confirmation?.cancelCommand, "no");
+});
+
 test("capability rescue states that catalog discovery cannot remotely install", () => {
   const message = buildAssistantMessage({
     ok: true,

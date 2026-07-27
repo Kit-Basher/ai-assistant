@@ -56,6 +56,14 @@ def _pytest_command(test_nodes: tuple[str, ...]) -> tuple[str, ...]:
 RELEASE_GATE_COMMANDS: tuple[tuple[str, ...], ...] = (
     (sys.executable, "-m", "py_compile", *PY_COMPILE_TARGETS),
     ("bash", "scripts/build_webui.sh"),
+    (
+        "node",
+        "--test",
+        "desktop/tests/chatExperienceRobustness.test.js",
+        "desktop/tests/chatUiHelpers.test.js",
+        "desktop/tests/packStateUiHelpers.test.js",
+        "desktop/tests/stateUiHelpers.test.js",
+    ),
     _pytest_command(MAIN_TEST_NODES),
     _pytest_command(EXTENDED_TEST_NODES),
     ("git", "diff", "--check"),
