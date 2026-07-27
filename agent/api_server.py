@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections import Counter, deque
 import copy
-from dataclasses import replace
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import argparse
@@ -14,7 +13,6 @@ import mimetypes
 import os
 from pathlib import Path
 import re
-import shutil
 import sqlite3
 import subprocess
 import sys
@@ -29,9 +27,7 @@ import urllib.parse
 import urllib.request
 
 from agent.config import Config, default_registry_root_path, load_config, packaged_asset_root_path, runtime_instance
-from agent.capability_policy import TrustedInvocationContext, stable_fingerprint
 from agent.chat_response_serializer import serialize_orchestrator_chat_response
-from agent.commands import parse_command
 from agent.error_kind import classify_error_kind
 from agent.error_response_ux import (
     bad_request_next_question,
@@ -54,8 +50,6 @@ from agent.intent.llm_rerank import rerank_intents_with_llm
 from agent.intent.low_confidence import detect_low_confidence
 from agent.intent.thread_integrity import detect_thread_drift, normalize_text as normalize_thread_text
 from agent.logging_utils import log_event
-from agent.internal_writer_authority import reject_public_internal_authority_claim
-from agent.security.redaction import redact_text
 from agent.memory_authority import MEMORY_AUTHORITY_LABELS, build_memory_injection_diagnostics
 from agent.model_watch import (
     CatalogDelta,
@@ -89,18 +83,14 @@ from agent.skill_governance import (
     evaluate_skill_execution_request,
 )
 from agent.skill_governance_store import SkillGovernanceStore
-from agent.version import read_build_info, read_git_commit, read_packaged_build_info, read_version
+from agent.version import read_build_info, read_git_commit, read_version
 from agent.runtime_truth_service import RuntimeTruthService
-from agent.provider_model_authorization import ProviderModelAuthorizationService
-from agent.organization_memory_authorization import MUTATING_ASSISTANT_COMMANDS, OrganizationMemoryAuthorizationService
-from agent.pack_search_authorization import PackSearchAuthorizationService
 from agent.runtime_lifecycle import RuntimeLifecyclePhase, derive_runtime_lifecycle_phase
 from agent.runtime_events import RuntimeEventRecorder
 from agent.runtime_contract import (
     normalize_user_facing_status,
 )
 from agent.persona import normalize_persona_text
-from agent.policy import build_mutator_plan, classify_operation, mutator_confirmation_required_payload, validate_mutator_apply
 from agent.public_chat import (
     build_no_llm_public_message,
     build_trivial_social_turn_message,
@@ -109,18 +99,10 @@ from agent.public_chat import (
 )
 from agent.setup_chat_flow import classify_runtime_chat_route
 from agent.safe_mode_ux import build_safe_mode_paused_message
-from agent.search.safe_web_search import SafeWebSearchClient, SafeWebSearchConfig
-from agent.services.managed_local_services import ManagedLocalServiceDetector, ManagedLocalServiceExecutor
 from agent.model_scout import build_model_scout
 from agent.telegram_runner import TelegramRunner
-from agent.telegram_runtime_state import (
-    classify_telegram_health_level,
-    get_telegram_runtime_state,
-    telegram_control_env,
-)
+from agent.telegram_runtime_state import get_telegram_runtime_state, telegram_control_env
 from agent.audit_log import AuditLog, redact as redact_audit_value
-from agent.actions.managed_action_recovery import ManagedActionJournal
-from agent.actions.persistent_journal import PersistentManagedActionJournalStore
 from agent.bootstrap.snapshot import collect_bootstrap_snapshot
 from agent.logging_bootstrap import configure_logging_if_needed
 from agent.llm.action_ledger import ActionLedgerStore
@@ -246,16 +228,9 @@ from agent.memory_runtime import MemoryRuntime
 from agent.semantic_memory import build_semantic_memory_service
 from agent.packs.external_ingestion import ExternalPackIngestor
 from agent.packs.manifest import compute_permissions_hash, normalize_permissions
-from agent.packs.managed_adapters import (
-    build_permission_request,
-    create_metadata_only_grant,
-    list_adapter_grants,
-    record_adapter_grant,
-    validate_local_file_path_metadata,
-)
 from agent.packs.policy import is_iface_allowed
 from agent.packs.state_truth import build_pack_state_snapshot, normalize_available_pack_truth, normalize_installed_pack_truth
-from agent.packs.registry_discovery import CatalogSchemaError, PackRegistryDiscoveryService, RegistrySourcePolicyError
+from agent.packs.registry_discovery import PackRegistryDiscoveryService, RegistrySourcePolicyError
 from agent.packs.remote_fetch import RemotePackFetcher
 from agent.packs.store import PackStore
 from agent.failure_ux import build_failure_recovery
@@ -621,24 +596,10 @@ class AgentRuntime:
         self.pid = os.getpid()
         self.runtime_id = f"runtime-{self.pid}-{int(self.started_at.timestamp())}"
         build_info = read_build_info(repo_root=self._repo_root)
-        self.build_metadata = read_packaged_build_info(repo_root=self._repo_root)
         self.version = build_info.version
         self.version_source = build_info.version_source
         self.git_commit = build_info.git_commit
         self._runtime_events = RuntimeEventRecorder(runtime_id=self.runtime_id, max_events=100)
-        self._safe_web_search_client: SafeWebSearchClient | None = None
-        self._managed_local_services: ManagedLocalServiceDetector | None = None
-        self._managed_services_status_cache: dict[str, Any] | None = None
-        self._managed_services_status_cache_at = 0.0
-        self._managed_services_status_cache_ttl_seconds = 10.0
-        self._telegram_status_cache: dict[str, Any] | None = None
-        self._telegram_status_cache_at = 0.0
-        self._telegram_status_cache_ttl_seconds = 5.0
-        self._managed_local_service_executor: ManagedLocalServiceExecutor | None = None
-        self._prerequisite_command_finder: Callable[[str], str | None] = shutil.which
-        self._prerequisite_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run
-        self._search_runtime_config_error: str | None = None
-        self._apply_persisted_search_config_if_allowed()
 
         registry_path = config.llm_registry_path
         if not registry_path:
@@ -647,9 +608,7 @@ class AgentRuntime:
         _mark("runtime.init.registry_store", registry_path=self.registry_store.path)
         self.permission_store = PermissionStore(path=os.getenv("AGENT_PERMISSIONS_PATH", "").strip() or None)
         self.permission_policy = PermissionPolicy()
-        managed_action_journal_path = self._runtime_state_path(config, None, "managed_actions.db")
-        self._managed_action_journal_store = PersistentManagedActionJournalStore(managed_action_journal_path)
-        self.pack_store = PackStore(self.config.db_path, journal_store=self._managed_action_journal_store)
+        self.pack_store = PackStore(self.config.db_path)
         self._skill_governance_store = SkillGovernanceStore(self.config.db_path)
         self.audit_log = AuditLog(path=os.getenv("AGENT_AUDIT_LOG_PATH", "").strip() or None)
         self.webui_dist_path = packaged_asset_root_path().resolve()
@@ -783,13 +742,8 @@ class AgentRuntime:
             path=autopilot_state_path,
             max_recent_apply_ids=max(1, int(self.config.llm_autopilot_churn_recent_limit)),
         )
-        notification_store_path = self._runtime_state_path(
-            self.config,
-            self.config.autopilot_notify_store_path,
-            "llm_notifications.json",
-        )
         self._notification_store = NotificationStore(
-            path=notification_store_path,
+            path=self.config.autopilot_notify_store_path,
             max_recent=max(50, int(self.config.llm_notifications_max_items)),
             max_items=max(1, int(self.config.llm_notifications_max_items)),
             max_age_days=max(0, int(self.config.llm_notifications_max_age_days)),
@@ -802,18 +756,6 @@ class AgentRuntime:
         )
         self._llm_fixit_store = LLMFixitWizardStore(path=llm_fixit_state_path)
         self._runtime_truth_service = RuntimeTruthService(self)
-        self._provider_model_authorization = ProviderModelAuthorizationService(
-            self,
-            state_root=Path(self.config.db_path).expanduser().resolve().parent,
-        )
-        self._organization_memory_authorization = OrganizationMemoryAuthorizationService(
-            self,
-            state_root=Path(self.config.db_path).expanduser().resolve().parent,
-        )
-        self._pack_search_authorization = PackSearchAuthorizationService(
-            self,
-            state_root=Path(self.config.db_path).expanduser().resolve().parent,
-        )
         self._orchestrator_lock = threading.RLock()
         self._orchestrator_db: MemoryDB | None = None
         self._orchestrator: Orchestrator | None = None
@@ -833,7 +775,6 @@ class AgentRuntime:
         )
         self._safe_mode_explicit_chat_target_override: dict[str, str] | None = None
         self._temporary_chat_target_override: dict[str, str] | None = None
-        self._active_chat_scope: dict[str, str] | None = None
         latest_notification_rows = self._notification_store.recent(limit=1)
         latest_notification = latest_notification_rows[0] if latest_notification_rows else {}
         self._last_notify_status: dict[str, Any] = {
@@ -1042,7 +983,7 @@ class AgentRuntime:
         except Exception:
             telegram = {}
         effective_state = str(telegram.get("effective_state") or telegram.get("state") or "unknown").strip().lower() or "unknown"
-        enabled = bool(telegram.get("enabled", False))
+        enabled = bool(telegram.get("enabled", False) or telegram.get("configured", False))
         startup_policy = "enabled" if enabled else "disabled"
         last_error = None if effective_state in {"enabled_running", "running"} else (str(telegram.get("next_action") or "").strip() or None)
         self._skill_governance_store.register_managed_adapter(
@@ -1289,7 +1230,7 @@ class AgentRuntime:
             return build_failure_recovery(
                 "pack_not_installed",
                 reason=why or message,
-                next_step=next_action or "Inspect a local text-pack directory if you have one; remote acquisition is unavailable and catalog metadata cannot download it.",
+                next_step=next_action or "Open the preview, then install it if you want to use it.",
             )
         if error_key in {"invalid_manifest", "invalid_metadata"} or kind_key in {"bad_request"}:
             return build_failure_recovery(
@@ -1325,13 +1266,7 @@ class AgentRuntime:
             return build_failure_recovery(
                 "confirm_downstream_failed",
                 reason=why or message,
-                next_step=next_action or "Check the operation status first. Retry only if it says retry is safe.",
-            )
-        if error_key in {"indeterminate", "execution_indeterminate", "delivery_indeterminate"} or kind_key == "indeterminate":
-            return build_failure_recovery(
-                "execution_indeterminate",
-                reason=why or message,
-                next_step=next_action or "Do not repeat it blindly. Check current state and reconcile the operation.",
+                next_step=next_action or "Fix the downstream blocker, then retry the plan.",
             )
         if error_key in {"confirm_plan_missing", "missing_pending_plan"} or kind_key in {"needs_clarification"}:
             return build_failure_recovery(
@@ -1414,7 +1349,6 @@ class AgentRuntime:
             pack_store=self.pack_store,
             storage_root=self.pack_store.external_storage_root(),
             lock=self._registry_lock,
-            journal_store=self._managed_action_journal_store,
         )
 
     def list_pack_sources(self) -> dict[str, Any]:
@@ -1665,37 +1599,6 @@ class AgentRuntime:
                 message=f"pack source not found: {source_id}",
                 next_question="Use a source id returned by GET /pack_sources/catalog.",
             )
-        if result.get("metadata_update_ok") is False:
-            duration_ms = int((time.monotonic() - start) * 1000)
-            rollback_ok = bool(result.get("rollback_ok", False))
-            message = compose_actionable_message(
-                what_happened=f"Pack source cleanup did not finish for {source_id}.",
-                why=(
-                    "Previous source catalog/policy metadata was restored."
-                    if rollback_ok
-                    else "Rollback could not fully restore the previous source catalog/policy metadata."
-                ),
-                next_action="Use GET /pack_sources/catalog and GET /pack_sources/policy to inspect the remaining source state.",
-            )
-            self.audit_log.append(
-                actor=actor,
-                action="packs.discovery_catalog.delete",
-                params={"source_id": source_id},
-                decision="allow",
-                reason="catalog_delete_verification_failed",
-                dry_run=False,
-                outcome="failed",
-                error_kind=str(result.get("error_kind") or "pack_source_delete_verification_failed"),
-                duration_ms=duration_ms,
-            )
-            return False, {
-                "ok": False,
-                "error": str(result.get("error_kind") or "pack_source_delete_verification_failed"),
-                "error_kind": str(result.get("error_kind") or "pack_source_delete_verification_failed"),
-                "message": message,
-                "next_action": "Use GET /pack_sources/catalog and GET /pack_sources/policy to inspect the remaining source state.",
-                **result,
-            }
         last_change = self._pack_source_catalog_last_change(result)
         duration_ms = int((time.monotonic() - start) * 1000)
         self.audit_log.append(
@@ -1871,14 +1774,6 @@ class AgentRuntime:
                 next_question="Use GET /pack_sources to inspect allowed sources and their policy state.",
                 extra={"policy": exc.policy.to_dict()},
             )
-        except (CatalogSchemaError, ValueError) as exc:
-            reason = str(exc or "pack_source_catalog_invalid").strip() or "pack_source_catalog_invalid"
-            return self._pack_error(
-                error=reason,
-                error_kind="bad_request",
-                message=f"pack source {source_id} could not be read because its local catalog failed policy validation: {reason}",
-                next_question="Use a local catalog inside assistant-owned pack storage and retry with a confirmed source update.",
-            )
         return True, {
             "ok": True,
             **payload,
@@ -1907,14 +1802,6 @@ class AgentRuntime:
                 next_action="Use GET /pack_sources to inspect allowed sources, or update discovery source policy first.",
                 next_question="Use GET /pack_sources to inspect allowed sources and their policy state.",
                 extra={"policy": exc.policy.to_dict()},
-            )
-        except (CatalogSchemaError, ValueError) as exc:
-            reason = str(exc or "pack_source_catalog_invalid").strip() or "pack_source_catalog_invalid"
-            return self._pack_error(
-                error=reason,
-                error_kind="bad_request",
-                message=f"pack source {source_id} could not be searched because its local catalog failed policy validation: {reason}",
-                next_question="Use a local catalog inside assistant-owned pack storage and retry with a confirmed source update.",
             )
         return True, {
             "ok": True,
@@ -1952,14 +1839,6 @@ class AgentRuntime:
                 error_kind="bad_request",
                 message=f"pack listing not found: {remote_id}",
                 next_question="Use a remote_id returned by the source listing or search endpoint.",
-            )
-        except (CatalogSchemaError, ValueError) as exc:
-            reason = str(exc or "pack_source_catalog_invalid").strip() or "pack_source_catalog_invalid"
-            return self._pack_error(
-                error=reason,
-                error_kind="bad_request",
-                message=f"pack source {source_id} could not be previewed because its local catalog failed policy validation: {reason}",
-                next_question="Use a local catalog inside assistant-owned pack storage and retry with a confirmed source update.",
             )
         return True, {
             "ok": True,
@@ -2012,25 +1891,6 @@ class AgentRuntime:
                 message=f"external pack not found: {canonical_id}",
                 next_question="Use a canonical external pack id returned by /packs or /packs/install.",
             )
-        if removed.get("metadata_update_ok") is False:
-            rollback_ok = bool(removed.get("rollback_ok", False))
-            message = compose_actionable_message(
-                what_happened=f"External pack cleanup did not finish for {canonical_id}.",
-                why=(
-                    "Previous pack metadata was restored."
-                    if rollback_ok
-                    else "Rollback could not fully restore the previous pack metadata."
-                ),
-                next_action="Use /packs to inspect whether the pack is still present before trying again.",
-            )
-            return False, {
-                "ok": False,
-                "error": str(removed.get("error_kind") or "external_pack_removal_verification_failed"),
-                "error_kind": str(removed.get("error_kind") or "external_pack_removal_verification_failed"),
-                "message": message,
-                "next_action": "Use /packs to inspect whether the pack is still present before trying again.",
-                **removed,
-            }
         pack = removed.get("pack") if isinstance(removed.get("pack"), dict) else {}
         removal = removed.get("removal") if isinstance(removed.get("removal"), dict) else {}
         already_removed = bool(removed.get("already_removed", False))
@@ -2063,7 +1923,6 @@ class AgentRuntime:
             "removal": removal,
             "next_action": "Use /packs to confirm it is gone, or reinstall it later if needed.",
             "already_removed": already_removed,
-            "managed_action_journal": removed.get("managed_action_journal") if isinstance(removed.get("managed_action_journal"), dict) else {},
         }
 
     def compare_packs(self, from_pack_id: str, to_pack_id: str) -> tuple[bool, dict[str, Any]]:
@@ -2087,194 +1946,10 @@ class AgentRuntime:
             "compare": diff_payload,
         }
 
-    @staticmethod
-    def _pack_plan_payload_hash(payload: dict[str, Any]) -> str:
-        safe = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"), default=str)
-        return hashlib.sha256(safe.encode("utf-8")).hexdigest()
-
-    @staticmethod
-    def _pack_plan_public_payload(payload: dict[str, Any]) -> dict[str, Any]:
-        public: dict[str, Any] = {}
-        for key in ("pack_id", "enabled", "approve", "source_id", "source_kind", "ref", "adapter_kind"):
-            if key in payload:
-                public[key] = payload.get(key)
-        source = payload.get("source")
-        path_value = payload.get("path") or payload.get("pack_path")
-        if isinstance(source, dict):
-            public["source"] = {
-                key: source.get(key)
-                for key in ("source_id", "kind", "ref")
-                if source.get(key) is not None
-            }
-            url = str(source.get("url") or "").strip()
-            if url:
-                public["source"]["url_host"] = urllib.parse.urlparse(url).netloc
-        elif isinstance(source, str) and "://" in source:
-            public["source_url_host"] = urllib.parse.urlparse(source).netloc
-        elif isinstance(source, str) and source:
-            public["source_basename"] = Path(source).name
-        elif path_value:
-            public["source_basename"] = Path(str(path_value)).name
-        if "url" in payload:
-            public["url_host"] = urllib.parse.urlparse(str(payload.get("url") or "")).netloc
-        if "requested_path" in payload:
-            public["requested_path_basename"] = Path(str(payload.get("requested_path") or "")).name
-        return public
-
-    def _pack_mutator_resources(self, action_type: str, payload: dict[str, Any]) -> dict[str, list[str]]:
-        pack_id = str(payload.get("pack_id") or "").strip()
-        if action_type == "external_pack.install":
-            return {
-                "created": ["external_pack_review_record", "quarantine_artifact", "normalized_pack_artifact"],
-                "changed": ["external_pack_store"],
-                "deleted": [],
-            }
-        if action_type == "external_pack.approve":
-            return {"created": [], "changed": [f"pack:{pack_id}:approval"], "deleted": []}
-        if action_type == "external_pack.enable":
-            return {"created": [], "changed": [f"pack:{pack_id}:enabled"], "deleted": []}
-        if action_type == "external_pack.grant":
-            return {
-                "created": [f"pack:{pack_id}:managed_adapter_grant"],
-                "changed": ["managed_adapter_grants"],
-                "deleted": [],
-            }
-        if action_type == "external_pack.remove":
-            return {
-                "created": [f"pack:{pack_id}:tombstone"],
-                "changed": ["external_pack_store"],
-                "deleted": [f"pack:{pack_id}:installed_artifacts"],
-            }
-        return {"created": [], "changed": ["external_pack_lifecycle"], "deleted": []}
-
-    @staticmethod
-    def _pack_rollback_scope(action_type: str) -> str:
-        scopes = {
-            "external_pack.install": "remove only the owned failed import record and owned quarantine/normalized artifacts when verification fails",
-            "external_pack.approve": "restore previous pack approval metadata",
-            "external_pack.enable": "restore previous pack enabled metadata",
-            "external_pack.grant": "restore previous managed adapter grant metadata",
-            "external_pack.remove": "restore previous pack metadata if removal verification fails; preserve audit tombstones where required",
-        }
-        return scopes.get(action_type, "restore only scoped external pack lifecycle metadata")
-
-    @staticmethod
-    def _pack_rollback_supported(action_type: str) -> bool:
-        return action_type in {
-            "external_pack.install",
-            "external_pack.approve",
-            "external_pack.enable",
-            "external_pack.grant",
-            "external_pack.remove",
-        }
-
-    def plan_pack_lifecycle(self, action_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        _ok, body = self.route_pack_search_mutation(action_type, dict(payload or {}))
-        return body
-
-    def apply_pack_lifecycle(self, action_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        _ok, body = self.route_pack_search_mutation(action_type, dict(payload or {}))
-        return body
-
-    def packs_grant(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
-        pack_id = str(payload.get("pack_id") or "").strip()
-        if not pack_id:
-            return self._pack_error(
-                error="bad_request",
-                error_kind="bad_request",
-                message="pack_id is required",
-                next_question="Which pack_id should receive managed-adapter grant metadata?",
-            )
-        current = self.pack_store.get_external_pack(pack_id) or self.pack_store.get_pack(pack_id)
-        if current is None:
-            return self._pack_error(
-                error="pack_not_found",
-                error_kind="bad_request",
-                message=f"pack not found: {pack_id}",
-                next_question="Install, review, approve, and enable the pack before recording grant metadata.",
-            )
-        canonical = current.get("canonical_pack") if isinstance(current.get("canonical_pack"), dict) else current
-        pack_name = str(canonical.get("name") or current.get("name") or pack_id).strip()
-        adapter_payload = payload.get("adapter") if isinstance(payload.get("adapter"), dict) else {}
-        if not adapter_payload:
-            permissions = canonical.get("permissions") if isinstance(canonical.get("permissions"), dict) else {}
-            adapters = permissions.get("managed_adapters") if isinstance(permissions.get("managed_adapters"), list) else []
-            adapter_payload = dict(adapters[0]) if adapters and isinstance(adapters[0], dict) else {}
-        if not adapter_payload:
-            return self._pack_error(
-                error="managed_adapter_missing",
-                error_kind="bad_request",
-                message="managed adapter declaration is required for grant metadata",
-                next_question="Preview the pack permission requirement first, then submit its managed adapter declaration.",
-            )
-        requested_path = str(payload.get("requested_path") or "").strip() or None
-        request = build_permission_request(
-            pack_id=pack_id,
-            pack_name=pack_name,
-            adapter=adapter_payload,
-            requested_path=requested_path,
-        )
-        ok_path = True
-        path_errors: list[str] = []
-        path_metadata: dict[str, Any] = {}
-        if requested_path:
-            ok_path, path_errors, path_metadata = validate_local_file_path_metadata(requested_path, request.adapter)
-        if not ok_path:
-            return self._pack_error(
-                error="managed_adapter_grant_path_invalid",
-                error_kind="bad_request",
-                message="selected file did not match the managed adapter grant policy",
-                why=", ".join(path_errors),
-                next_question="Choose one existing user-selected file with an allowed extension.",
-            )
-        grant = create_metadata_only_grant(request=request, path_metadata=path_metadata)
-        grant_payload = record_adapter_grant(self.pack_store.external_storage_root(), grant)
-        if grant_payload.get("metadata_update_ok") is False:
-            return False, {
-                "ok": False,
-                "error": str(grant_payload.get("error_kind") or "managed_adapter_grant_verification_failed"),
-                "error_kind": str(grant_payload.get("error_kind") or "managed_adapter_grant_verification_failed"),
-                "grant": grant_payload,
-                "managed_action_journal": grant_payload.get("managed_action_journal") if isinstance(grant_payload.get("managed_action_journal"), dict) else {},
-                "next_action": "Inspect managed adapter grant metadata before retrying.",
-            }
-        grants = list_adapter_grants(self.pack_store.external_storage_root())
-        return True, {
-            "ok": True,
-            "grant": grant_payload,
-            "grants": grants,
-            "message": f"Recorded managed-adapter grant metadata for pack {pack_id}.",
-            "did_invoke_adapter": False,
-            "did_use_pack": False,
-            "reads_file": False,
-            "executes_code": False,
-            "managed_action_journal": grant_payload.get("managed_action_journal") if isinstance(grant_payload.get("managed_action_journal"), dict) else {},
-        }
-
     def packs_install(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         source_value = payload.get("source")
         source_text = str(source_value or "").strip() if not isinstance(source_value, dict) else ""
         pack_dir = str(payload.get("path") or "").strip()
-        remote_keys = ("url", "source_url", "download_url", "archive_url", "base_url")
-        remote_requested = bool(
-            any(str(payload.get(key) or "").strip() for key in remote_keys)
-            or "://" in source_text
-            or (
-                isinstance(source_value, dict)
-                and (
-                    any(str(source_value.get(key) or "").strip() for key in remote_keys)
-                    or str(source_value.get("kind") or "").strip().lower()
-                    in {"github_repo", "github_archive", "generic_archive_url"}
-                )
-            )
-        )
-        if remote_requested:
-            return self._pack_error(
-                error="remote_pack_fetch_stage_unimplemented_denied",
-                error_kind="authorization_denied",
-                message="Remote pack acquisition is unavailable. No URL was opened and no content was fetched or imported.",
-                next_question="Provide a local text-pack directory, or wait for a separately authorized digest-bound quarantine-fetch stage.",
-            )
         source_id = str(
             (source_value.get("source_id") if isinstance(source_value, dict) else payload.get("source_id"))
             or ""
@@ -2303,7 +1978,11 @@ class AgentRuntime:
                 elif source_text in {"path", "local"}:
                     pack_dir = str(payload.get("pack_path") or "").strip()
         if remote_source is not None:
-            trusted_remote_source = False
+            remote_kind = str(remote_source.kind or "").strip().lower()
+            remote_host = urllib.parse.urlparse(str(remote_source.url or "")).netloc.lower()
+            trusted_remote_source = remote_kind in {"github_repo", "github_archive"}
+            if not trusted_remote_source and remote_host in {"github.com", "www.github.com", "codeload.github.com"}:
+                trusted_remote_source = True
             if not trusted_remote_source and source_id:
                 try:
                     source_policy_payload = self._pack_registry_discovery().get_source_policy(source_id)
@@ -2320,7 +1999,7 @@ class AgentRuntime:
                         error_kind="bad_request",
                         message="I couldn't verify the pack source trust policy.",
                         why=str(exc),
-                        next_question="Use a trusted source_id from /pack_sources, or approve this source before fetch/import.",
+                        next_question="Use a GitHub archive/repo source or a trusted pack source id from /pack_sources.",
                     )
                 effective_policy = (
                     source_policy_payload.get("effective_policy")
@@ -2332,25 +2011,22 @@ class AgentRuntime:
                         error="pack_source_not_allowed",
                         error_kind="bad_request",
                         message=f"pack source {source_id} is not allowed by policy",
-                        next_question="Use a source id from /pack_sources that is explicitly allowed by policy, or approve this source before fetch/import.",
+                        next_question="Use a source id from /pack_sources that is allowed by policy, or install from a GitHub archive/repo.",
                     )
                 trusted_remote_source = True
             if not trusted_remote_source:
                 return self._pack_error(
                     error="source_trust_required",
                     error_kind="bad_request",
-                    message=(
-                        "I found a remote pack source, but it is not trusted yet. "
-                        "Preview/source approval is required before fetch or import."
-                    ),
-                    next_question="Use a trusted source_id from /pack_sources, or approve this source before fetch/import.",
+                    message="Generic remote pack installs require a trusted source id or a GitHub archive/repo URL.",
+                    next_question="Use a GitHub archive/repo source or pass a trusted source_id from /pack_sources.",
                 )
         if remote_source is None and not pack_dir:
             return self._pack_error(
                 error="bad_request",
                 error_kind="bad_request",
-                message="A local text-pack directory is required. Remote pack acquisition is unavailable.",
-                next_question="Provide a local text-pack directory to inspect, or continue with catalog metadata only.",
+                message="pack source path or remote url is required",
+                next_question="Provide a local downloaded pack path or a supported remote https archive source.",
             )
         try:
             ingestor = ExternalPackIngestor(self.pack_store.external_storage_root())
@@ -2451,8 +2127,7 @@ class AgentRuntime:
                 next_question="Which pack_id should be approved?",
             )
         current = self.pack_store.get_pack(pack_id)
-        external_current = self.pack_store.get_external_pack(pack_id)
-        if current is None and external_current is None:
+        if current is None:
             return self._pack_error(
                 error="pack_not_found",
                 error_kind="bad_request",
@@ -2464,33 +2139,6 @@ class AgentRuntime:
                 intent="packs.approve",
                 message=f"Approve pack {pack_id} for its declared permissions?",
             )
-        if isinstance(external_current, dict):
-            approved = self.pack_store.set_external_pack_review_status(
-                pack_id,
-                local_review_status="approved",
-                approve_current_hash=True,
-            )
-            if approved is None:
-                return self._pack_error(
-                    error="pack_not_found",
-                    error_kind="bad_request",
-                    message=f"pack not found: {pack_id}",
-                    next_question="Install the pack first, then approve it.",
-                )
-            log_event(
-                self.config.log_path,
-                "external_pack_approved",
-                {"pack_id": pack_id},
-            )
-            return True, {
-                "ok": True,
-                "pack": approved,
-                "message": f"Approved external pack {pack_id} for the next lifecycle step.",
-                "did_enable": False,
-                "did_grant_permissions": False,
-                "did_use_pack": False,
-                "managed_action_journal": approved.get("managed_action_journal") if isinstance(approved.get("managed_action_journal"), dict) else {},
-            }
         approved = self.pack_store.set_approval_hash(pack_id, str(current.get("permissions_hash") or ""))
         if approved is None:
             return self._pack_error(
@@ -2539,11 +2187,7 @@ class AgentRuntime:
                 message="enabled must be a boolean",
                 next_question='Include {"enabled": true} or {"enabled": false}.',
             )
-        external_current = self.pack_store.get_external_pack(pack_id)
-        if isinstance(external_current, dict):
-            updated = self.pack_store.set_external_pack_enabled(pack_id, enabled=bool(enabled_value))
-        else:
-            updated = self.pack_store.set_enabled(pack_id, bool(enabled_value))
+        updated = self.pack_store.set_enabled(pack_id, bool(enabled_value))
         if updated is None:
             return self._pack_error(
                 error="pack_not_found",
@@ -2551,21 +2195,18 @@ class AgentRuntime:
                 message=f"pack not found: {pack_id}",
                 next_question="Install the pack first, then enable it.",
             )
-        response_pack = dict(updated)
-        if isinstance(external_current, dict):
-            response_pack["enabled"] = bool(enabled_value)
         log_event(
             self.config.log_path,
             "pack_enabled_updated",
             {
                 "pack_id": pack_id,
-                "enabled": bool(response_pack.get("enabled")),
+                "enabled": bool(updated.get("enabled")),
             },
         )
         return True, {
             "ok": True,
-            "pack": response_pack,
-            "message": f"Pack {pack_id} {'enabled' if bool(response_pack.get('enabled')) else 'disabled'}.",
+            "pack": updated,
+            "message": f"Pack {pack_id} {'enabled' if bool(updated.get('enabled')) else 'disabled'}.",
         }
 
     def _reload_router(self) -> None:
@@ -3810,17 +3451,7 @@ class AgentRuntime:
     def _persist_registry_document_transactional(
         self,
         plan_apply_fn: Any,
-        *,
-        action_type: str = "llm.registry.metadata_update",
-        target: str = "registry",
-        modified_ids: list[str] | None = None,
     ) -> tuple[bool, dict[str, Any]]:
-        changed_ids = [str(item).strip() for item in (modified_ids or []) if str(item).strip()]
-        journal = ManagedActionJournal(action_type=action_type, target=target)
-        journal.plan_step("snapshot_registry", resource="llm_registry")
-        journal.plan_step("apply_registry_update", resource="llm_registry", changed_ids=changed_ids)
-        journal.plan_step("verify_registry_update", resource="llm_registry")
-
         def _wrapped_plan_apply(current: dict[str, Any]) -> dict[str, Any]:
             updated = plan_apply_fn(current)
             document = updated if isinstance(updated, dict) else {}
@@ -3846,64 +3477,17 @@ class AgentRuntime:
                     snapshot_id_after = None
         if not bool(result.get("ok")):
             error_kind = str(result.get("error_kind") or "registry_write_failed")
-            snapshot_id = str(result.get("snapshot_id") or "").strip() or None
-            if snapshot_id:
-                journal.record_created_resource("registry_snapshot", snapshot_id, rollback_supported=False)
-                journal.record_step("snapshot_registry", ok=True, resource=snapshot_id)
-            journal.record_step("apply_registry_update", ok=False, resource="llm_registry", error_kind=error_kind)
-            journal.mark_verification(
-                ok=False,
-                error_kind=error_kind,
-                verify_error=str(result.get("verify_error") or "").strip() or None,
-            )
-            rollback_attempted = "rollback_ok" in result
-            rollback_ok = bool(result.get("rollback_ok")) if rollback_attempted else False
-            if rollback_attempted:
-                journal.record_rollback_step(
-                    "restore_registry_snapshot",
-                    ok=rollback_ok,
-                    resource=snapshot_id,
-                    error_kind=str(result.get("rollback_error_kind") or "").strip() or None,
-                )
-                journal.mark_rollback(
-                    ok=rollback_ok,
-                    attempted=True,
-                    summary=(
-                        "restored the previous registry snapshot"
-                        if rollback_ok
-                        else "could not restore the previous registry snapshot automatically"
-                    ),
-                )
-            else:
-                journal.mark_rollback(ok=True, attempted=False, summary="No registry mutation was verified.")
             return False, {
                 "ok": False,
                 "error": error_kind,
-                "snapshot_id": snapshot_id,
+                "snapshot_id": result.get("snapshot_id"),
                 "verify_error": result.get("verify_error"),
-                "rollback_ok": rollback_ok if rollback_attempted else None,
-                "rollback_attempted": rollback_attempted,
-                "managed_action_journal": journal.to_dict(),
             }
-        snapshot_id = str(result.get("snapshot_id") or "").strip() or None
-        if snapshot_id:
-            journal.record_created_resource("registry_snapshot", snapshot_id, rollback_supported=False)
-            journal.record_step("snapshot_registry", ok=True, resource=snapshot_id)
-        journal.record_step("apply_registry_update", ok=True, resource="llm_registry", changed_ids=changed_ids)
-        for changed_id in changed_ids:
-            journal.record_changed_resource("registry_record", changed_id, rollback_supported=True)
-        journal.mark_verification(
-            ok=True,
-            resulting_registry_hash=str(result.get("resulting_registry_hash") or "").strip() or None,
-            snapshot_id_after=snapshot_id_after,
-        )
-        journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
         return True, {
             "ok": True,
             "snapshot_id": result.get("snapshot_id"),
             "snapshot_id_after": snapshot_id_after,
             "resulting_registry_hash": result.get("resulting_registry_hash"),
-            "managed_action_journal": journal.to_dict(),
         }
 
     def _record_action_ledger(
@@ -3921,7 +3505,7 @@ class AgentRuntime:
         changed_ids: list[str] | None = None,
     ) -> None:
         try:
-            row, verified = self._action_ledger.append_verified(
+            self._action_ledger.append(
                 ts=int(time.time()),
                 action=action,
                 actor=actor,
@@ -3940,14 +3524,6 @@ class AgentRuntime:
                     }
                 ),
             )
-            if not verified:
-                log_event(
-                    logger,
-                    "warning",
-                    "autopilot_action_ledger_append_unverified",
-                    action=action,
-                    ledger_id=str(row.get("id") or ""),
-                )
         except Exception:
             return
 
@@ -5248,49 +4824,16 @@ class AgentRuntime:
             str(override_body.get("provider") or override_provider).strip().lower() or override_provider
         )
         temporary_model = str(override_body.get("model_id") or override_model).strip() or override_model
+        effective["default_provider"] = temporary_provider
+        effective["resolved_default_model"] = temporary_model
         effective["temporary_override_active"] = True
         effective["temporary_effective_provider"] = temporary_provider
         effective["temporary_effective_model"] = temporary_model
         effective["temporary_chat_target"] = {
             "provider": temporary_provider,
             "model_id": temporary_model,
-            "user_id": str(override.get("user_id") or "").strip() or None,
-            "thread_id": str(override.get("thread_id") or "").strip() or None,
         }
-        active_scope = dict(self._active_chat_scope) if isinstance(self._active_chat_scope, dict) else {}
-        override_user_id = str(override.get("user_id") or "").strip()
-        override_thread_id = str(override.get("thread_id") or "").strip()
-        active_user_id = str(active_scope.get("user_id") or "").strip()
-        active_thread_id = str(active_scope.get("thread_id") or "").strip()
-        scope_matches = (
-            bool(active_user_id == override_user_id and active_thread_id == override_thread_id)
-            if override_user_id and override_thread_id
-            else True
-        )
-        if scope_matches:
-            effective["default_provider"] = temporary_provider
-            effective["resolved_default_model"] = temporary_model
         return effective
-
-    def _set_active_chat_scope(self, *, user_id: str | None, thread_id: str | None) -> dict[str, str] | None:
-        previous = dict(self._active_chat_scope) if isinstance(self._active_chat_scope, dict) else None
-        normalized_user_id = str(user_id or "").strip()
-        normalized_thread_id = str(thread_id or "").strip()
-        self._active_chat_scope = (
-            {"user_id": normalized_user_id, "thread_id": normalized_thread_id}
-            if normalized_user_id and normalized_thread_id
-            else None
-        )
-        invalidate_truth_cache = getattr(self._runtime_truth_service, "_invalidate_snapshot_cache", None)
-        if callable(invalidate_truth_cache):
-            invalidate_truth_cache()
-        return previous
-
-    def _restore_active_chat_scope(self, previous: dict[str, str] | None) -> None:
-        self._active_chat_scope = dict(previous) if isinstance(previous, dict) else None
-        invalidate_truth_cache = getattr(self._runtime_truth_service, "_invalidate_snapshot_cache", None)
-        if callable(invalidate_truth_cache):
-            invalidate_truth_cache()
 
     @staticmethod
     def _best_local_embedding_model(models: dict[str, Any]) -> str | None:
@@ -5430,8 +4973,6 @@ class AgentRuntime:
             "version": self.version,
             "version_source": self.version_source,
             "git_commit": self.git_commit,
-            "build_time": str(self.build_metadata.get("build_time") or "").strip() or None,
-            "bundle_name": str(self.build_metadata.get("bundle_name") or "").strip() or None,
             "started_at": self.started_at_iso,
             "pid": self.pid,
             "listening": self.listening_url,
@@ -5520,133 +5061,30 @@ class AgentRuntime:
                 "service_enabled": False,
                 "token_configured": False,
                 "token_source": "unknown",
-                "secret_store_state": "unknown",
-                "secret_store_valid": False,
-                "secret_store_error_kind": None,
                 "lock_present": False,
                 "lock_live": False,
                 "lock_stale": False,
                 "lock_path": None,
                 "lock_pid": None,
-                "poller_inspection_available": False,
-                "poller_count": None,
-                "duplicate_pollers": False,
-                "poller_evidence": [],
-                "poller_inspection_error": None,
                 "effective_state": "unknown",
                 "ready_state": "unknown",
                 "next_action": "Run: python -m agent telegram_status",
             }
 
-    def telegram_status(self, *, force_refresh: bool = False) -> dict[str, Any]:
-        now = time.monotonic()
-        if (
-            not force_refresh
-            and self._telegram_status_cache is not None
-            and now - self._telegram_status_cache_at <= self._telegram_status_cache_ttl_seconds
-        ):
-            return copy.deepcopy(self._telegram_status_cache)
+    def telegram_status(self) -> dict[str, Any]:
         runtime_state = self._telegram_runtime_state()
         runner_status = (
             self._telegram_runner.status()
             if self._telegram_runner is not None and hasattr(self._telegram_runner, "status")
             else {}
         )
-        transport_health = (
-            runner_status.get("transport_health")
-            if isinstance(runner_status.get("transport_health"), dict)
-            else {}
-        )
-        runtime_enabled = bool(getattr(self.config, "telegram_enabled", False))
-        polling_active = bool(runner_status.get("embedded_running", False)) or bool(runtime_state.get("embedded_running", False))
-        embedded_running = bool(runner_status.get("embedded_running", False))
-        inbound_seen = bool(transport_health.get("last_update_received_at"))
-        dispatch_seen = bool(transport_health.get("last_dispatch_started_at") or transport_health.get("last_update_processed_at"))
-        outbound_seen = bool(transport_health.get("last_reply_success_at"))
-        duplicate_consumer_suspected = bool(runtime_state.get("duplicate_pollers", False)) or str(
-            runner_status.get("last_error") or ""
-        ).lower().find("conflict") >= 0
-        handler_registered = bool(transport_health.get("handler_registered", False) or runtime_state.get("embedded_running", False))
-        recent_error = bool(
-            transport_health.get("last_error_code")
-            or transport_health.get("last_reply_error_class")
-            or runner_status.get("last_error")
-        )
-        telegram_health_level = classify_telegram_health_level(
-            enabled=runtime_enabled,
-            token_configured=bool(runtime_state.get("token_configured", False)),
-            polling_active=polling_active,
-            handler_registered=handler_registered,
-            inbound_seen=inbound_seen,
-            dispatch_seen=dispatch_seen,
-            outbound_seen=outbound_seen,
-            duplicate_consumer_suspected=duplicate_consumer_suspected,
-            recent_error=recent_error,
-        )
-        telegram_transport_healthy = bool(
-            runtime_state.get("token_configured", False)
-            and polling_active
-            and handler_registered
-            and outbound_seen
-            and not duplicate_consumer_suspected
-            and not recent_error
-        )
-        effective_state = str(runtime_state.get("effective_state") or "unknown")
-        ready_state = str(runtime_state.get("ready_state") or "unknown")
-        next_action = str(runtime_state.get("next_action") or "No action needed.")
-        if not runtime_enabled:
-            effective_state = "disabled_optional"
-            ready_state = "disabled_optional"
-            next_action = "No action needed."
-        elif embedded_running and not duplicate_consumer_suspected:
-            effective_state = "enabled_running"
-            ready_state = "running"
-            next_action = "No action needed."
-        payload = {
+        return {
             "ok": True,
-            "enabled": runtime_enabled,
+            "enabled": bool(runtime_state.get("enabled", False)),
             "configured": bool(runtime_state.get("token_configured", False)),
-            "token_present": bool(runtime_state.get("token_configured", False)),
-            "token_validated": bool(runtime_state.get("token_configured", False)),
             "token_source": str(runtime_state.get("token_source") or "none"),
-            "secret_store_state": str(runtime_state.get("secret_store_state") or "unknown"),
-            "secret_store_valid": bool(runtime_state.get("secret_store_valid", False)),
-            "secret_store_error_kind": runtime_state.get("secret_store_error_kind"),
-            "state": ready_state,
-            "effective_state": effective_state,
-            "transport_mode": "polling",
-            "polling_active": polling_active,
-            "webhook_active": False,
-            "handler_registered": bool(transport_health.get("handler_registered", False) or runtime_state.get("embedded_running", False)),
-            "last_update_received_at": transport_health.get("last_update_received_at"),
-            "last_update_kind": transport_health.get("last_update_kind"),
-            "last_update_scope_hash": transport_health.get("last_update_scope_hash"),
-            "last_update_accepted_at": transport_health.get("last_update_accepted_at"),
-            "last_update_rejected_at": transport_health.get("last_update_rejected_at"),
-            "last_rejection_reason": transport_health.get("last_rejection_reason"),
-            "last_dispatch_started_at": transport_health.get("last_dispatch_started_at"),
-            "last_dispatch_finished_at": transport_health.get("last_dispatch_finished_at"),
-            "last_update_processed_at": transport_health.get("last_update_processed_at"),
-            "last_reply_attempt_at": transport_health.get("last_reply_attempt_at"),
-            "last_reply_success_at": transport_health.get("last_reply_success_at"),
-            "last_reply_failed_at": transport_health.get("last_reply_failed_at"),
-            "last_reply_error_class": transport_health.get("last_reply_error_class"),
-            "last_reply_error_summary": transport_health.get("last_reply_error_summary"),
-            "last_roundtrip_ms": transport_health.get("last_roundtrip_ms"),
-            "last_cold_start_ms": transport_health.get("last_cold_start_ms"),
-            "polling_started_at": transport_health.get("polling_started_at"),
-            "polling_heartbeat_at": transport_health.get("polling_heartbeat_at"),
-            "last_error_code": transport_health.get("last_error_code") or (
-                "poll_conflict" if duplicate_consumer_suspected else None
-            ),
-            "last_error_summary": transport_health.get("last_error_summary") or runner_status.get("last_error"),
-            "duplicate_consumer_suspected": duplicate_consumer_suspected,
-            "runtime_reachable": True,
-            "inbound_health": "seen" if inbound_seen else "no_updates_seen",
-            "outbound_health": "seen" if outbound_seen else "no_replies_seen",
-            "telegram_health_level": telegram_health_level,
-            "live_reply_verified": outbound_seen,
-            "telegram_transport_healthy": telegram_transport_healthy,
+            "state": str(runtime_state.get("ready_state") or "unknown"),
+            "effective_state": str(runtime_state.get("effective_state") or "unknown"),
             "config_source": str(runtime_state.get("config_source") or "unknown"),
             "config_source_path": runtime_state.get("config_source_path"),
             "service_installed": bool(runtime_state.get("service_installed", False)),
@@ -5657,13 +5095,8 @@ class AgentRuntime:
             "lock_stale": bool(runtime_state.get("lock_stale", False)),
             "lock_path": runtime_state.get("lock_path"),
             "lock_pid": runtime_state.get("lock_pid"),
-            "poller_inspection_available": bool(runtime_state.get("poller_inspection_available", False)),
-            "poller_count": runtime_state.get("poller_count"),
-            "duplicate_pollers": bool(runtime_state.get("duplicate_pollers", False)),
-            "poller_evidence": list(runtime_state.get("poller_evidence") or [])[:4],
-            "poller_inspection_error": runtime_state.get("poller_inspection_error"),
-            "next_action": next_action,
-            "embedded_running": embedded_running,
+            "next_action": str(runtime_state.get("next_action") or "No action needed."),
+            "embedded_running": bool(runner_status.get("embedded_running", False)),
             "embedded_state": str(runner_status.get("state") or "") or None,
             "last_event": str(runner_status.get("last_event") or ""),
             "last_error": str(runner_status.get("last_error") or "") or None,
@@ -5671,9 +5104,6 @@ class AgentRuntime:
             "last_ts_iso": str(runner_status.get("last_ts_iso") or "") or None,
             "consecutive_failures": int(runner_status.get("consecutive_failures") or 0),
         }
-        self._telegram_status_cache = copy.deepcopy(payload)
-        self._telegram_status_cache_at = now
-        return copy.deepcopy(payload)
 
     @staticmethod
     def _ready_telegram_failure_code(telegram: Mapping[str, Any]) -> str | None:
@@ -5686,9 +5116,6 @@ class AgentRuntime:
         if state in {"stopped", "crash_loop"}:
             return "service_down"
         return None
-
-    def _telegram_required_for_ready(self) -> bool:
-        return bool(getattr(self.config, "telegram_required", False))
 
     def _current_runtime_lifecycle_phase(
         self,
@@ -5789,7 +5216,6 @@ class AgentRuntime:
         telegram = self.telegram_status()
         telegram_state = str(telegram.get("state") or "stopped")
         telegram_enabled = bool(telegram.get("enabled", False))
-        telegram_required = self._telegram_required_for_ready()
         llm_context = self._canonical_llm_ready_context()
         llm_status = llm_context["status_payload"] if isinstance(llm_context.get("status_payload"), dict) else {}
         canonical_llm_runtime_status = (
@@ -5821,7 +5247,7 @@ class AgentRuntime:
             )
             ready = False
         else:
-            telegram_failure_code = self._ready_telegram_failure_code(telegram) if telegram_required else None
+            telegram_failure_code = self._ready_telegram_failure_code(telegram)
             if telegram_failure_code:
                 normalized_status = normalize_user_facing_status(
                     ready=False,
@@ -5856,7 +5282,6 @@ class AgentRuntime:
             "telegram": telegram,
             "telegram_state": telegram_state,
             "telegram_enabled": telegram_enabled,
-            "telegram_required": telegram_required,
             "llm_context": llm_context,
             "llm_status": llm_status,
             "canonical_llm_runtime_status": canonical_llm_runtime_status,
@@ -6019,8 +5444,6 @@ class AgentRuntime:
                 "enabled": bool(observability.get("telegram_enabled", False)),
                 "state": str(observability.get("telegram_state") or "unknown"),
                 "effective_state": str(telegram.get("effective_state") or "unknown"),
-                "telegram_health_level": str(telegram.get("telegram_health_level") or "UNVERIFIED"),
-                "next_action": str(telegram.get("next_action") or "No action needed."),
                 "embedded_state": str(telegram.get("embedded_state") or "").strip() or None,
                 "last_error": str(telegram.get("last_error") or "").strip() or None,
             },
@@ -6451,153 +5874,10 @@ class AgentRuntime:
 
     def set_telegram_secret(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         token = str(payload.get("bot_token") or "").strip()
-        secret_key = _TELEGRAM_BOT_TOKEN_SECRET_KEY
-        journal = ManagedActionJournal(action_type="telegram_token_config", target=secret_key)
-        journal.plan_step("preflight_telegram_secret", resource=secret_key)
-        journal.plan_step("capture_previous_telegram_secret", resource=secret_key)
-        journal.plan_step("write_telegram_secret", resource=secret_key)
-        journal.plan_step("verify_telegram_secret_write", resource=secret_key)
-
         if not token:
-            journal.record_step("preflight_telegram_secret", ok=False, resource=secret_key, reason="missing_token")
-            journal.mark_verification(ok=False, secret_write_verified=False)
-            self._persist_managed_action_journal(
-                journal,
-                status="failed",
-                recovery_hint="Paste a Telegram bot token, then retry Telegram setup.",
-            )
-            return False, {
-                "ok": False,
-                "error": "bot_token is required",
-                "managed_action_journal": journal.to_dict(),
-            }
-
-        if secret_key != "telegram:bot_token":
-            journal.record_step("preflight_telegram_secret", ok=False, resource=secret_key, reason="unexpected_secret_key")
-            journal.mark_verification(ok=False, secret_write_verified=False)
-            self._persist_managed_action_journal(
-                journal,
-                status="failed",
-                recovery_hint="Retry Telegram setup only against the known Telegram token secret key.",
-            )
-            return False, {
-                "ok": False,
-                "error": "telegram_secret_target_invalid",
-                "error_kind": "telegram_secret_target_invalid",
-                "message": "Telegram setup did not work: the secret target was not the known Telegram token key.",
-                "managed_action_journal": journal.to_dict(),
-            }
-        journal.record_step("preflight_telegram_secret", ok=True, resource=secret_key)
-        self._persist_managed_action_journal(journal, status="planned")
-
-        previous_token = self.secret_store.get_secret(secret_key)
-        journal.record_step(
-            "capture_previous_telegram_secret",
-            ok=True,
-            resource=secret_key,
-            previous_secret=self._secret_metadata(previous_token),
-        )
-        self._persist_managed_action_journal(journal, status="running")
-
-        try:
-            self.secret_store.set_secret(secret_key, token)
-        except Exception as exc:
-            journal.record_step("write_telegram_secret", ok=False, resource=secret_key, error=exc.__class__.__name__)
-            journal.mark_verification(ok=False, secret_write_verified=False)
-            self._persist_managed_action_journal(
-                journal,
-                status="failed",
-                recovery_hint="Check secret-store access, then retry Telegram token setup.",
-            )
-            return False, {
-                "ok": False,
-                "error": "telegram_secret_write_failed",
-                "error_kind": "telegram_secret_write_failed",
-                "message": "Telegram setup did not work: I could not save the token. Check the token and paste it again.",
-                "managed_action_journal": journal.to_dict(),
-            }
-
-        journal.record_step("write_telegram_secret", ok=True, resource=secret_key, new_secret=self._secret_metadata(token))
-        journal.record_changed_resource(
-            "telegram_secret",
-            secret_key,
-            rollback_supported=True,
-            previous_secret=self._secret_metadata(previous_token),
-            new_secret=self._secret_metadata(token),
-        )
-        self._persist_managed_action_journal(journal, status="running")
-
-        stored_token = self.secret_store.get_secret(secret_key)
-        secret_verified = str(stored_token or "").strip() == token
-        journal.record_step(
-            "verify_telegram_secret_write",
-            ok=secret_verified,
-            resource=secret_key,
-            stored_secret=self._secret_metadata(stored_token),
-        )
-        if not secret_verified:
-            cleanup_ok, cleanup_summary = self._restore_telegram_secret_state(
-                secret_key=secret_key,
-                previous_token=previous_token,
-                journal=journal,
-            )
-            journal.mark_verification(ok=False, secret_write_verified=False)
-            self._persist_managed_action_journal(
-                journal,
-                status="rolled_back" if cleanup_ok else "recovery_needed",
-                recovery_hint="Confirm the Telegram token state before retrying setup.",
-            )
-            return False, {
-                "ok": False,
-                "error": "telegram_secret_write_verification_failed",
-                "error_kind": "telegram_secret_write_verification_failed",
-                "message": (
-                    "Telegram setup did not work: I could not verify the saved token. "
-                    f"{cleanup_summary}. Check the token and paste it again."
-                ),
-                "rollback_ok": cleanup_ok,
-                "rollback_summary": cleanup_summary,
-                "managed_action_journal": journal.to_dict(),
-            }
-
-        journal.mark_verification(ok=True, secret_write_verified=True, telegram_status="not_checked")
-        journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
-        self._persist_managed_action_journal(journal, status="verified")
-        return True, {
-            "ok": True,
-            "secret": self._secret_metadata(token),
-            "telegram_status": {"ok": None, "status": "not_checked"},
-            "managed_action_journal": journal.to_dict(),
-        }
-
-    def _restore_telegram_secret_state(
-        self,
-        *,
-        secret_key: str,
-        previous_token: str | None,
-        journal: ManagedActionJournal,
-    ) -> tuple[bool, str]:
-        try:
-            self.secret_store.set_secret(secret_key, previous_token or "")
-            journal.record_rollback_step(
-                "restore_telegram_secret",
-                ok=True,
-                resource=secret_key,
-                previous_secret=self._secret_metadata(previous_token),
-            )
-            summary = "restored previous Telegram token" if previous_token else "removed failed new Telegram token"
-            journal.mark_rollback(ok=True, attempted=True, summary=summary)
-            return True, summary
-        except Exception as exc:
-            journal.record_rollback_step(
-                "restore_telegram_secret",
-                ok=False,
-                resource=secret_key,
-                error=exc.__class__.__name__,
-            )
-            summary = "could not restore the previous Telegram token automatically"
-            journal.mark_rollback(ok=False, attempted=True, summary=summary)
-            return False, summary
+            return False, {"ok": False, "error": "bot_token is required"}
+        self.secret_store.set_secret(_TELEGRAM_BOT_TOKEN_SECRET_KEY, token)
+        return True, {"ok": True}
 
     def test_telegram(self) -> tuple[bool, dict[str, Any]]:
         token = (self.secret_store.get_secret(_TELEGRAM_BOT_TOKEN_SECRET_KEY) or "").strip()
@@ -6622,7 +5902,7 @@ class AgentRuntime:
                 pass
             return False, {"ok": False, "error": "telegram_api_error", "message": error_message}
         except (OSError, TimeoutError, ValueError, UnicodeError, json.JSONDecodeError, urllib.error.URLError) as exc:
-            return False, {"ok": False, "error": "telegram_request_failed", "message": redact_text(str(exc)) or "request_failed"}
+            return False, {"ok": False, "error": "telegram_request_failed", "message": str(exc) or "request_failed"}
 
         if not isinstance(parsed, dict):
             return False, {"ok": False, "error": "telegram_invalid_response"}
@@ -6777,36 +6057,12 @@ class AgentRuntime:
 
     def update_provider(self, provider_id: str, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         provider_key = provider_id.strip().lower()
-        journal = ManagedActionJournal(action_type="provider_config_update", target=provider_key)
-        journal.plan_step("preflight_provider", resource=provider_key)
-        journal.plan_step("write_provider_config", resource=provider_key)
-        journal.plan_step("verify_provider_config_persisted", resource=provider_key)
         document = self.registry_document
         providers = document.get("providers") if isinstance(document.get("providers"), dict) else {}
         if provider_key not in providers:
-            journal.record_step("preflight_provider", ok=False, resource=provider_key, reason="provider_not_found")
-            self._persist_managed_action_journal(
-                journal,
-                status="failed",
-                recovery_hint="Provider config update was rejected before mutation because the provider was not found.",
-            )
-            return False, {
-                "ok": False,
-                "error": "provider not found",
-                "managed_action_journal": journal.to_dict(),
-            }
+            return False, {"ok": False, "error": "provider not found"}
 
         current = dict(providers[provider_key])
-        previous = copy.deepcopy(current)
-        journal.record_step(
-            "preflight_provider",
-            ok=True,
-            resource=provider_key,
-            previous_source=self._provider_api_source_metadata(previous.get("api_key_source")),
-            fields_requested=sorted(str(key) for key in payload.keys()),
-        )
-        self._persist_managed_action_journal(journal, status="planned")
-        self._persist_managed_action_journal(journal, status="running")
         if "base_url" in payload:
             current["base_url"] = str(payload.get("base_url") or "").strip() or current.get("base_url")
         if "chat_path" in payload:
@@ -6834,160 +6090,12 @@ class AgentRuntime:
         saved, error = self._persist_registry_document(document)
         if not saved:
             assert error is not None
-            journal.record_step("write_provider_config", ok=False, resource=provider_key, reason=str(error.get("error") or "persist_failed"))
-            response = dict(error)
-            response["managed_action_journal"] = journal.to_dict()
-            self._persist_managed_action_journal(
-                journal,
-                status="failed",
-                recovery_hint="Provider config update failed before registry verification.",
-            )
-            return False, response
-        journal.record_step(
-            "write_provider_config",
-            ok=True,
-            resource=provider_key,
-            previous_source=self._provider_api_source_metadata(previous.get("api_key_source")),
-            new_source=self._provider_api_source_metadata(current.get("api_key_source")),
-            fields_changed=sorted(str(key) for key in payload.keys()),
-        )
-        journal.record_changed_resource("provider_config", provider_key, rollback_supported=True)
-        self._persist_managed_action_journal(journal, status="running")
-        persisted = (
-            self.registry_document.get("providers", {}).get(provider_key)
-            if isinstance(self.registry_document.get("providers"), dict)
-            else None
-        )
-        persisted_ok = isinstance(persisted, dict) and dict(persisted) == current
-        journal.record_step("verify_provider_config_persisted", ok=persisted_ok, resource=provider_key)
-        journal.mark_verification(ok=persisted_ok, provider=provider_key, config_persisted=persisted_ok)
-        journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
-        self._persist_managed_action_journal(journal, status="verified" if persisted_ok else "recovery_needed")
+            return False, error
         self._schedule_autoconfig_soon()
         return True, {
             "ok": True,
             "provider": self._provider_public_payload(provider_key, current),
-            "managed_action_journal": journal.to_dict(),
         }
-
-    @staticmethod
-    def _secret_metadata(value: str | None) -> dict[str, Any]:
-        cleaned = str(value or "").strip()
-        if not cleaned:
-            return {"present": False}
-        # Length and unkeyed hashes leak information and can make low-entropy
-        # credentials guessable. Authorization Plans use a namespaced keyed
-        # opaque version; legacy reliability journals retain presence only.
-        return {"present": True, "version": "opaque"}
-
-    @staticmethod
-    def _provider_api_source_metadata(source: Any) -> dict[str, Any] | None:
-        if not isinstance(source, dict):
-            return None
-        return {
-            "type": str(source.get("type") or "").strip() or None,
-            "name": str(source.get("name") or "").strip() or None,
-        }
-
-    @staticmethod
-    def _provider_test_metadata(payload: Any) -> dict[str, Any]:
-        body = payload if isinstance(payload, dict) else {}
-        metadata: dict[str, Any] = {
-            "ok": bool(body.get("ok", False)),
-        }
-        for key in ("provider", "model", "error", "error_kind", "status", "status_code"):
-            value = body.get(key)
-            if value is not None and str(value).strip():
-                metadata[key] = str(value).strip()
-        return metadata
-
-    def _restore_provider_secret_state(
-        self,
-        *,
-        provider_key: str,
-        secret_key: str,
-        previous_secret: str | None,
-        previous_source: Any,
-        restore_source: bool,
-        journal: ManagedActionJournal,
-    ) -> tuple[bool, str]:
-        ok = True
-        details: list[str] = []
-        try:
-            self.secret_store.set_secret(secret_key, previous_secret or "")
-            self._router.set_provider_api_key(provider_key, previous_secret or "")
-            journal.record_rollback_step(
-                "restore_provider_secret",
-                ok=True,
-                resource=secret_key,
-                previous_secret=self._secret_metadata(previous_secret),
-            )
-            details.append("restored previous provider secret" if previous_secret else "removed failed new provider secret")
-        except Exception as exc:
-            ok = False
-            journal.record_rollback_step("restore_provider_secret", ok=False, resource=secret_key, error=exc.__class__.__name__)
-            details.append("could not restore provider secret")
-
-        if restore_source:
-            try:
-                document = copy.deepcopy(self.registry_document)
-                providers = document.get("providers") if isinstance(document.get("providers"), dict) else {}
-                provider_payload = providers.get(provider_key) if isinstance(providers.get(provider_key), dict) else None
-                if isinstance(provider_payload, dict):
-                    provider_payload["api_key_source"] = copy.deepcopy(previous_source)
-                    providers[provider_key] = provider_payload
-                    document["providers"] = providers
-                    saved, error = self._persist_registry_document(document)
-                    if not saved:
-                        raise RuntimeError(str((error or {}).get("error") or "registry_restore_failed"))
-                    journal.record_rollback_step(
-                        "restore_provider_api_key_source",
-                        ok=True,
-                        resource=provider_key,
-                        previous_source=self._provider_api_source_metadata(previous_source),
-                    )
-                    details.append("restored previous provider key source")
-            except Exception as exc:
-                ok = False
-                journal.record_rollback_step(
-                    "restore_provider_api_key_source",
-                    ok=False,
-                    resource=provider_key,
-                    error=exc.__class__.__name__,
-                )
-                details.append("could not restore previous provider key source")
-
-        summary = "; ".join(details) if details else "No rollback changes were needed."
-        journal.mark_rollback(ok=ok, attempted=True, summary=summary)
-        return ok, summary
-
-    def _persist_managed_action_journal(
-        self,
-        journal: ManagedActionJournal,
-        *,
-        status: str,
-        recovery_hint: str | None = None,
-    ) -> None:
-        try:
-            self._managed_action_journal_store.upsert(journal, status=status, recovery_hint=recovery_hint)
-        except Exception:
-            pass
-
-    def _failed_default_model_preflight_journal(self, requested_model: str, error_kind: str) -> ManagedActionJournal:
-        journal = ManagedActionJournal(action_type="default_model_config", target=requested_model or "default_model")
-        journal.plan_step("preflight_defaults_request", resource="defaults")
-        self._persist_managed_action_journal(journal, status="planned")
-        journal.record_step(
-            "preflight_defaults_request",
-            ok=False,
-            resource="defaults",
-            requested_model_id=requested_model,
-            reason=error_kind,
-        )
-        journal.mark_verification(ok=False, error_kind=error_kind)
-        journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
-        self._persist_managed_action_journal(journal, status="failed")
-        return journal
 
     def add_provider_model(self, provider_id: str, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         provider_key = provider_id.strip().lower()
@@ -7061,44 +6169,16 @@ class AgentRuntime:
         api_key = str(payload.get("api_key") or "").strip()
         if not api_key:
             return False, {"ok": False, "error": "api_key is required"}
-        journal = ManagedActionJournal(action_type="provider_api_key_config", target=provider_key)
-        journal.plan_step("preflight_provider", resource=provider_key)
-        journal.plan_step("write_provider_key_source", resource=provider_key)
-        journal.plan_step("write_provider_secret", resource=f"provider:{provider_key}:api_key")
-        journal.plan_step("verify_secret_write", resource=f"provider:{provider_key}:api_key")
 
         document = self.registry_document
         providers = document.get("providers") if isinstance(document.get("providers"), dict) else {}
         provider_payload = providers.get(provider_key)
         if not isinstance(provider_payload, dict):
-            journal.record_step("preflight_provider", ok=False, resource=provider_key, reason="provider_not_found")
-            self._persist_managed_action_journal(
-                journal,
-                status="failed",
-                recovery_hint="Provider API key config was rejected before mutation because the provider was not found.",
-            )
-            return False, {
-                "ok": False,
-                "error": "provider not found",
-                "managed_action_journal": journal.to_dict(),
-            }
-        journal.record_step("preflight_provider", ok=True, resource=provider_key)
+            return False, {"ok": False, "error": "provider not found"}
 
         secret_key = f"provider:{provider_key}:api_key"
         desired_source = {"type": "secret", "name": secret_key}
         source = provider_payload.get("api_key_source") if isinstance(provider_payload.get("api_key_source"), dict) else None
-        previous_source = copy.deepcopy(source)
-        previous_secret = self.secret_store.get_secret(secret_key)
-        source_changed = source != desired_source
-        journal.record_step(
-            "capture_previous_secret_metadata",
-            ok=True,
-            resource=secret_key,
-            previous_secret=self._secret_metadata(previous_secret),
-            previous_source=self._provider_api_source_metadata(previous_source),
-        )
-        self._persist_managed_action_journal(journal, status="planned")
-        self._persist_managed_action_journal(journal, status="running")
         if source != desired_source:
             provider_payload["api_key_source"] = desired_source
             providers[provider_key] = provider_payload
@@ -7106,143 +6186,12 @@ class AgentRuntime:
             saved, error = self._persist_registry_document(document)
             if not saved:
                 assert error is not None
-                journal.record_step("write_provider_key_source", ok=False, resource=provider_key, reason=str(error.get("error") or "persist_failed"))
-                response = dict(error)
-                response["managed_action_journal"] = journal.to_dict()
-                self._persist_managed_action_journal(
-                    journal,
-                    status="failed",
-                    recovery_hint="Provider API key source update failed before the provider secret was written.",
-                )
-                return False, response
-            journal.record_step(
-                "write_provider_key_source",
-                ok=True,
-                resource=provider_key,
-                previous_source=self._provider_api_source_metadata(previous_source),
-                new_source=self._provider_api_source_metadata(desired_source),
-            )
-            journal.record_changed_resource("provider_api_key_source", provider_key, rollback_supported=True)
-        else:
-            journal.record_step("write_provider_key_source", ok=True, resource=provider_key, changed=False)
-        self._persist_managed_action_journal(journal, status="running")
+                return False, error
 
         self.secret_store.set_secret(secret_key, api_key)
         self._router.set_provider_api_key(provider_key, api_key)
-        journal.record_step("write_provider_secret", ok=True, resource=secret_key, new_secret=self._secret_metadata(api_key))
-        journal.record_changed_resource(
-            "provider_secret",
-            secret_key,
-            rollback_supported=True,
-            previous_secret=self._secret_metadata(previous_secret),
-            new_secret=self._secret_metadata(api_key),
-        )
-        self._persist_managed_action_journal(journal, status="running")
-        stored_secret = self.secret_store.get_secret(secret_key)
-        secret_verified = str(stored_secret or "").strip() == api_key
-        journal.record_step("verify_secret_write", ok=secret_verified, resource=secret_key, stored_secret=self._secret_metadata(stored_secret))
-        if not secret_verified:
-            cleanup_ok, cleanup_summary = self._restore_provider_secret_state(
-                provider_key=provider_key,
-                secret_key=secret_key,
-                previous_secret=previous_secret,
-                previous_source=previous_source,
-                restore_source=source_changed,
-                journal=journal,
-            )
-            journal.mark_verification(ok=False, provider=provider_key, secret_write_verified=False)
-            self._persist_managed_action_journal(
-                journal,
-                status="rolled_back" if cleanup_ok else "recovery_needed",
-                recovery_hint=str(
-                    "Provider API key save failed verification and rollback completed."
-                    if cleanup_ok
-                    else "Provider API key save failed verification and rollback needs attention."
-                ),
-            )
-            return False, {
-                "ok": False,
-                "provider": provider_key,
-                "error": "secret_write_verification_failed",
-                "error_kind": "secret_write_verification_failed",
-                "message": (
-                    "Provider setup did not work: I could not verify the saved key. "
-                    f"{cleanup_summary}. Check the key and paste it again."
-                ),
-                "rollback_ok": cleanup_ok,
-                "rollback_summary": cleanup_summary,
-                "managed_action_journal": journal.to_dict(),
-            }
-        verify_provider = bool(payload.get("verify_provider", False))
-        provider_test: dict[str, Any] | None = None
-        if verify_provider:
-            journal.plan_step("verify_provider_connection", resource=provider_key)
-            test_payload: dict[str, Any] = {"api_key": api_key}
-            model = str(payload.get("model") or "").strip()
-            if model:
-                test_payload["model"] = model
-            test_ok, test_body = self.test_provider(provider_key, test_payload)
-            provider_test = test_body if isinstance(test_body, dict) else {"ok": bool(test_ok)}
-            journal.record_step(
-                "verify_provider_connection",
-                ok=bool(test_ok),
-                resource=provider_key,
-                error_kind=str(provider_test.get("error_kind") or provider_test.get("error") or "") or None,
-            )
-            journal.mark_verification(
-                ok=bool(test_ok),
-                provider=provider_key,
-                secret_write_verified=True,
-                provider_test=self._provider_test_metadata(provider_test),
-            )
-            if not test_ok:
-                cleanup_ok, cleanup_summary = self._restore_provider_secret_state(
-                    provider_key=provider_key,
-                    secret_key=secret_key,
-                    previous_secret=previous_secret,
-                    previous_source=previous_source,
-                    restore_source=source_changed,
-                    journal=journal,
-                )
-                response = {
-                    "ok": False,
-                    "provider": provider_key,
-                    "error": str(provider_test.get("error") or "provider_test_failed"),
-                    "error_kind": str(provider_test.get("error_kind") or provider_test.get("error") or "provider_test_failed"),
-                    "message": (
-                        "Provider setup did not work during the connection test. "
-                        f"{cleanup_summary}. Check the key and paste it again."
-                    ),
-                    "provider_test": provider_test,
-                    "rollback_ok": cleanup_ok,
-                    "rollback_summary": cleanup_summary,
-                    "managed_action_journal": journal.to_dict(),
-                }
-                self._persist_managed_action_journal(
-                    journal,
-                    status="rolled_back" if cleanup_ok else "recovery_needed",
-                    recovery_hint=str(
-                        "Provider connection test failed and previous key/source was restored."
-                        if cleanup_ok
-                        else "Provider connection test failed and key/source rollback needs attention."
-                    ),
-                )
-                return False, response
-            self._router.set_provider_api_key(provider_key, api_key)
-            journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
-        else:
-            journal.mark_verification(ok=True, provider=provider_key, secret_write_verified=True, provider_test="not_requested")
-            journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
-        self._persist_managed_action_journal(journal, status="verified")
         self._schedule_autoconfig_soon()
-        response = {
-            "ok": True,
-            "provider": provider_key,
-            "secret": self._secret_metadata(api_key),
-            "provider_test": provider_test or {"ok": None, "status": "not_requested"},
-            "managed_action_journal": journal.to_dict(),
-        }
-        return True, response
+        return True, {"ok": True, "provider": provider_key}
 
     def _provider_default_model(self, provider_id: str) -> str | None:
         models = self.registry_document.get("models") if isinstance(self.registry_document.get("models"), dict) else {}
@@ -7807,7 +6756,6 @@ class AgentRuntime:
             inventory_builder=build_model_inventory,
             hf_snapshot_download_fn=hf_snapshot_download,
             subprocess_run_fn=subprocess.run,
-            managed_action_journal_store=self._managed_action_journal_store,
         )
 
     def pull_ollama_model(self, payload: dict[str, Any] | None = None) -> tuple[bool, dict[str, Any]]:
@@ -7862,8 +6810,6 @@ class AgentRuntime:
                 "why": str(install_result.get("why") or "").strip() or None,
                 "next_action": str(install_result.get("next_action") or "").strip() or None,
             }
-            if isinstance(install_result.get("managed_action_journal"), dict):
-                response["managed_action_journal"] = install_result["managed_action_journal"]
             self._log_request("/providers/ollama/pull", False, response)
             return False, response
 
@@ -7891,8 +6837,6 @@ class AgentRuntime:
             "verification": install_result.get("verification") if isinstance(install_result.get("verification"), dict) else {},
             "message": message,
         }
-        if isinstance(install_result.get("managed_action_journal"), dict):
-            response["managed_action_journal"] = install_result["managed_action_journal"]
         self._log_request("/providers/ollama/pull", True, response)
         return True, response
 
@@ -7947,13 +6891,6 @@ class AgentRuntime:
         )
 
     def update_defaults(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
-        requested_payload = payload if isinstance(payload, dict) else {}
-        journal = ManagedActionJournal(action_type="default_model_config", target="defaults")
-        journal.plan_step("capture_previous_defaults", resource="defaults")
-        journal.plan_step("preflight_defaults_request", resource="defaults")
-        journal.plan_step("persist_defaults", resource="defaults")
-        journal.plan_step("verify_defaults", resource="defaults")
-
         valid_modes = {
             "auto",
             "prefer_cheap",
@@ -7961,73 +6898,30 @@ class AgentRuntime:
             "prefer_local_lowest_cost_capable",
         }
 
-        document = copy.deepcopy(self.registry_document) if isinstance(self.registry_document, dict) else {}
+        document = self.registry_document
         defaults = self._ensure_defaults(document)
-        previous_defaults = copy.deepcopy(defaults)
         previous_default_provider = str(defaults.get("default_provider") or "").strip().lower() or None
         previous_chat_model = str(defaults.get("chat_model") or defaults.get("default_model") or "").strip() or None
         models = document.get("models") if isinstance(document.get("models"), dict) else {}
         providers = document.get("providers") if isinstance(document.get("providers"), dict) else {}
         provider_ids = {str(provider_id).strip().lower() for provider_id in providers.keys()}
-        provider_override = str(requested_payload.get("default_provider") or "").strip().lower() if "default_provider" in requested_payload else None
+        provider_override = str(payload.get("default_provider") or "").strip().lower() if "default_provider" in payload else None
 
-        journal.record_step(
-            "capture_previous_defaults",
-            ok=True,
-            resource="defaults",
-            previous_defaults=self._defaults_metadata(previous_defaults),
-        )
-        self._persist_managed_action_journal(journal, status="planned")
-
-        if "routing_mode" in requested_payload:
-            mode = str(requested_payload.get("routing_mode") or "").strip().lower()
+        if "routing_mode" in payload:
+            mode = str(payload.get("routing_mode") or "").strip().lower()
             if mode not in valid_modes:
-                journal.record_step("preflight_defaults_request", ok=False, resource="defaults", reason="invalid_routing_mode")
-                journal.mark_verification(ok=False, error_kind="invalid_routing_mode")
-                journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
-                self._persist_managed_action_journal(journal, status="failed")
-                return False, {
-                    "ok": False,
-                    "error": "invalid routing_mode",
-                    "error_kind": "invalid_routing_mode",
-                    "managed_action_journal": journal.to_dict(),
-                }
+                return False, {"ok": False, "error": "invalid routing_mode"}
             defaults["routing_mode"] = mode
 
-        if "default_provider" in requested_payload:
+        if "default_provider" in payload:
             provider = provider_override or None
-            if provider and provider not in provider_ids:
-                journal.record_step("preflight_defaults_request", ok=False, resource=str(provider or ""), reason="default_provider_not_found")
-                journal.mark_verification(ok=False, error_kind="default_provider_not_found")
-                journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
-                self._persist_managed_action_journal(journal, status="failed")
-                return False, {
-                    "ok": False,
-                    "error": "default_provider not found",
-                    "error_kind": "default_provider_not_found",
-                    "managed_action_journal": journal.to_dict(),
-                }
-            provider_preflight = self._default_provider_preflight(provider, providers)
-            if provider_preflight is not None:
-                journal.record_step(
-                    "preflight_defaults_request",
-                    ok=False,
-                    resource=str(provider or ""),
-                    reason=str(provider_preflight.get("error_kind") or provider_preflight.get("error") or "provider_not_usable"),
-                )
-                journal.mark_verification(
-                    ok=False,
-                    error_kind=str(provider_preflight.get("error_kind") or provider_preflight.get("error") or "provider_not_usable"),
-                )
-                journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
-                self._persist_managed_action_journal(journal, status="failed")
-                provider_preflight["managed_action_journal"] = journal.to_dict()
-                return False, provider_preflight
+            if provider and provider not in self._sorted_provider_ids():
+                return False, {"ok": False, "error": "default_provider not found"}
             defaults["default_provider"] = provider
 
-        chat_model_key = "chat_model" if "chat_model" in requested_payload else ("default_model" if "default_model" in requested_payload else None)
+        chat_model_key = "chat_model" if "chat_model" in payload else ("default_model" if "default_model" in payload else None)
         if chat_model_key is not None:
-            model = str(requested_payload.get(chat_model_key) or "").strip() or None
+            model = str(payload.get(chat_model_key) or "").strip() or None
             if model is None:
                 defaults["chat_model"] = None
                 defaults["default_model"] = None
@@ -8041,16 +6935,7 @@ class AgentRuntime:
                     provider_ids=provider_ids,
                 )
                 if canonical_model is None:
-                    journal.record_step("preflight_defaults_request", ok=False, resource=model, reason="default_model_not_found")
-                    journal.mark_verification(ok=False, error_kind="default_model_not_found")
-                    journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
-                    self._persist_managed_action_journal(journal, status="failed")
-                    return False, {
-                        "ok": False,
-                        "error": "default_model not found",
-                        "error_kind": "default_model_not_found",
-                        "managed_action_journal": journal.to_dict(),
-                    }
+                    return False, {"ok": False, "error": "default_model not found"}
                 valid_default, validated_model, validation_error = validate_default_model(
                     canonical_model,
                     models,
@@ -8069,45 +6954,11 @@ class AgentRuntime:
                     )
                     if details is not None:
                         legacy_error["details"] = details
-                    journal.record_step(
-                        "preflight_defaults_request",
-                        ok=False,
-                        resource=canonical_model,
-                        reason=str(legacy_error.get("error_kind") or legacy_error.get("error") or "chat_model_not_chat_capable"),
-                    )
-                    journal.mark_verification(
-                        ok=False,
-                        error_kind=str(legacy_error.get("error_kind") or legacy_error.get("error") or "chat_model_not_chat_capable"),
-                    )
-                    journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
-                    self._persist_managed_action_journal(journal, status="failed")
-                    legacy_error["managed_action_journal"] = journal.to_dict()
                     return False, legacy_error
-                model_preflight = self._default_chat_model_preflight(
-                    validated_model,
-                    models=models,
-                    providers=providers,
-                    selected_provider=str(defaults.get("default_provider") or "").strip().lower() or None,
-                )
-                if model_preflight is not None:
-                    journal.record_step(
-                        "preflight_defaults_request",
-                        ok=False,
-                        resource=validated_model,
-                        reason=str(model_preflight.get("error_kind") or model_preflight.get("error") or "chat_model_not_usable"),
-                    )
-                    journal.mark_verification(
-                        ok=False,
-                        error_kind=str(model_preflight.get("error_kind") or model_preflight.get("error") or "chat_model_not_usable"),
-                    )
-                    journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
-                    self._persist_managed_action_journal(journal, status="failed")
-                    model_preflight["managed_action_journal"] = journal.to_dict()
-                    return False, model_preflight
                 defaults["chat_model"] = validated_model
                 defaults["default_model"] = validated_model
-        if "embed_model" in requested_payload:
-            model = str(requested_payload.get("embed_model") or "").strip() or None
+        if "embed_model" in payload:
+            model = str(payload.get("embed_model") or "").strip() or None
             if model is None:
                 defaults["embed_model"] = None
             else:
@@ -8120,16 +6971,7 @@ class AgentRuntime:
                     provider_ids=provider_ids,
                 )
                 if canonical_model is None:
-                    journal.record_step("preflight_defaults_request", ok=False, resource=model, reason="embed_model_not_found")
-                    journal.mark_verification(ok=False, error_kind="embed_model_not_found")
-                    journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
-                    self._persist_managed_action_journal(journal, status="failed")
-                    return False, {
-                        "ok": False,
-                        "error": "embed_model not found",
-                        "error_kind": "embed_model_not_found",
-                        "managed_action_journal": journal.to_dict(),
-                    }
+                    return False, {"ok": False, "error": "embed_model not found"}
                 valid_default, validated_model, validation_error = validate_default_model(
                     canonical_model,
                     models,
@@ -8148,20 +6990,10 @@ class AgentRuntime:
                     )
                     if details is not None:
                         error_payload["details"] = details
-                    journal.record_step(
-                        "preflight_defaults_request",
-                        ok=False,
-                        resource=canonical_model,
-                        reason=str(error_payload.get("error_kind") or "embed_model_not_embedding_capable"),
-                    )
-                    journal.mark_verification(ok=False, error_kind=str(error_payload.get("error_kind") or "embed_model_not_embedding_capable"))
-                    journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
-                    self._persist_managed_action_journal(journal, status="failed")
-                    error_payload["managed_action_journal"] = journal.to_dict()
                     return False, error_payload
                 defaults["embed_model"] = validated_model
         elif (
-            "default_provider" in requested_payload
+            "default_provider" in payload
             and defaults.get("chat_model")
             and str(defaults.get("default_provider") or "").strip()
         ):
@@ -8173,8 +7005,8 @@ class AgentRuntime:
                     defaults["chat_model"] = None
                     defaults["default_model"] = None
 
-        if "allow_remote_fallback" in requested_payload:
-            defaults["allow_remote_fallback"] = bool(requested_payload.get("allow_remote_fallback"))
+        if "allow_remote_fallback" in payload:
+            defaults["allow_remote_fallback"] = bool(payload.get("allow_remote_fallback"))
 
         defaults["default_model"] = str(defaults.get("chat_model") or defaults.get("default_model") or "").strip() or None
         current_chat_model = str(defaults.get("chat_model") or defaults.get("default_model") or "").strip() or None
@@ -8185,67 +7017,10 @@ class AgentRuntime:
         if defaults.get("embed_model") in {"", "none"}:
             defaults["embed_model"] = None
         document["defaults"] = defaults
-        journal.record_step(
-            "preflight_defaults_request",
-            ok=True,
-            resource="defaults",
-            requested_defaults=self._defaults_metadata(defaults),
-        )
-        self._persist_managed_action_journal(journal, status="running")
         saved, error = self._persist_registry_document(document)
         if not saved:
             assert error is not None
-            journal.record_step("persist_defaults", ok=False, resource="defaults", reason=str(error.get("error") or "persist_failed"))
-            journal.mark_verification(ok=False, error_kind=str(error.get("error") or "persist_failed"))
-            journal.mark_rollback(ok=True, attempted=False, summary="Registry write did not complete.")
-            self._persist_managed_action_journal(journal, status="failed")
-            response = dict(error)
-            response.setdefault("error_kind", str(response.get("error") or "persist_failed"))
-            response["managed_action_journal"] = journal.to_dict()
-            return False, response
-        journal.record_step(
-            "persist_defaults",
-            ok=True,
-            resource="defaults",
-            changed_defaults=self._defaults_metadata(defaults),
-        )
-        journal.record_changed_resource(
-            "registry_defaults",
-            "defaults",
-            rollback_supported=True,
-            previous_defaults=self._defaults_metadata(previous_defaults),
-            new_defaults=self._defaults_metadata(defaults),
-        )
-        verification = self._verify_defaults_update(expected_defaults=defaults, requested_payload=requested_payload)
-        journal.record_step(
-            "verify_defaults",
-            ok=bool(verification.get("ok")),
-            resource="defaults",
-            verification=verification,
-        )
-        if not bool(verification.get("ok")):
-            rollback_ok, rollback_summary = self._restore_defaults_state(previous_defaults, journal=journal)
-            journal.mark_verification(ok=False, verification=verification)
-            self._persist_managed_action_journal(
-                journal,
-                status="rolled_back" if rollback_ok else "recovery_needed",
-                recovery_hint=None if rollback_ok else "Inspect default model settings before retrying the switch.",
-            )
-            return False, {
-                "ok": False,
-                "error": str(verification.get("error_kind") or "default_model_verification_failed"),
-                "error_kind": str(verification.get("error_kind") or "default_model_verification_failed"),
-                "message": (
-                    "The model switch did not finish: I could not verify the new default model. "
-                    f"{rollback_summary}. Check model status and try again."
-                ),
-                "rollback_ok": rollback_ok,
-                "rollback_summary": rollback_summary,
-                "managed_action_journal": journal.to_dict(),
-            }
-        journal.mark_verification(ok=True, verification=verification)
-        journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
-        self._persist_managed_action_journal(journal, status="verified")
+            return False, error
         current_defaults = self.get_defaults()
         current_default_provider = str(current_defaults.get("default_provider") or "").strip().lower() or None
         current_chat_model = (
@@ -8263,156 +7038,7 @@ class AgentRuntime:
                 current_chat_model,
                 provider=current_default_provider,
             )
-        return True, {"ok": True, **current_defaults, "managed_action_journal": journal.to_dict()}
-
-    @staticmethod
-    def _defaults_metadata(defaults: Mapping[str, Any] | None) -> dict[str, Any]:
-        source = defaults if isinstance(defaults, Mapping) else {}
-        return {
-            "default_provider": str(source.get("default_provider") or "").strip().lower() or None,
-            "chat_model": str(source.get("chat_model") or source.get("default_model") or "").strip() or None,
-            "default_model": str(source.get("default_model") or source.get("chat_model") or "").strip() or None,
-            "embed_model": str(source.get("embed_model") or "").strip() or None,
-            "routing_mode": str(source.get("routing_mode") or "").strip() or None,
-            "allow_remote_fallback": bool(source.get("allow_remote_fallback", True)),
-            "last_chat_model": str(source.get("last_chat_model") or "").strip() or None,
-        }
-
-    @staticmethod
-    def _default_provider_preflight(provider_id: str | None, providers: Mapping[str, Any]) -> dict[str, Any] | None:
-        if not provider_id:
-            return None
-        provider = providers.get(provider_id) if isinstance(providers, Mapping) else None
-        if not isinstance(provider, dict):
-            return {"ok": False, "error": "default_provider not found", "error_kind": "default_provider_not_found"}
-        if provider.get("enabled") is False:
-            return {
-                "ok": False,
-                "error": "default_provider_disabled",
-                "error_kind": "default_provider_disabled",
-                "message": "The model switch did not start because that provider is disabled.",
-            }
-        return None
-
-    @staticmethod
-    def _default_chat_model_preflight(
-        model_id: str,
-        *,
-        models: Mapping[str, Any],
-        providers: Mapping[str, Any],
-        selected_provider: str | None,
-    ) -> dict[str, Any] | None:
-        model = models.get(model_id) if isinstance(models, Mapping) else None
-        if not isinstance(model, dict):
-            return {"ok": False, "error": "default_model not found", "error_kind": "default_model_not_found"}
-        model_provider = str(model.get("provider") or "").strip().lower()
-        if selected_provider and model_provider and model_provider != selected_provider:
-            return {
-                "ok": False,
-                "error": "default_model_provider_mismatch",
-                "error_kind": "default_model_provider_mismatch",
-                "message": "The model switch did not start because the model belongs to a different provider.",
-            }
-        provider = providers.get(model_provider) if isinstance(providers, Mapping) else None
-        if isinstance(provider, dict) and provider.get("enabled") is False:
-            return {
-                "ok": False,
-                "error": "default_provider_disabled",
-                "error_kind": "default_provider_disabled",
-                "message": "The model switch did not start because that provider is disabled.",
-            }
-        if model.get("enabled") is False:
-            return {
-                "ok": False,
-                "error": "chat_model_disabled",
-                "error_kind": "chat_model_disabled",
-                "message": "The model switch did not start because that model is disabled.",
-            }
-        if model.get("available") is False:
-            return {
-                "ok": False,
-                "error": "chat_model_unavailable",
-                "error_kind": "chat_model_unavailable",
-                "message": "The model switch did not start because that model is not available.",
-            }
-        if model.get("routable") is False:
-            return {
-                "ok": False,
-                "error": "chat_model_not_routable",
-                "error_kind": "chat_model_not_routable",
-                "message": "The model switch did not start because that model is not routable.",
-            }
-        return None
-
-    def _verify_defaults_update(
-        self,
-        *,
-        expected_defaults: Mapping[str, Any],
-        requested_payload: Mapping[str, Any],
-    ) -> dict[str, Any]:
-        current_doc = self.registry_document if isinstance(self.registry_document, dict) else {}
-        current_defaults = current_doc.get("defaults") if isinstance(current_doc.get("defaults"), dict) else {}
-        expected = self._defaults_metadata(expected_defaults)
-        current = self._defaults_metadata(current_defaults)
-        keys = {"default_provider", "chat_model", "default_model", "embed_model", "routing_mode", "allow_remote_fallback"}
-        for key in sorted(keys):
-            if key in {"chat_model", "default_model"} and not ({"chat_model", "default_model"} & set(requested_payload.keys())):
-                continue
-            if key == "embed_model" and "embed_model" not in requested_payload:
-                continue
-            if key == "routing_mode" and "routing_mode" not in requested_payload:
-                continue
-            if key == "allow_remote_fallback" and "allow_remote_fallback" not in requested_payload:
-                continue
-            if key == "default_provider" and "default_provider" not in requested_payload:
-                continue
-            if current.get(key) != expected.get(key):
-                return {
-                    "ok": False,
-                    "error_kind": "default_model_verification_failed",
-                    "mismatch": key,
-                    "expected": expected.get(key),
-                    "actual": current.get(key),
-                }
-        chat_model = str(current.get("chat_model") or "").strip()
-        if chat_model:
-            models = current_doc.get("models") if isinstance(current_doc.get("models"), dict) else {}
-            providers = current_doc.get("providers") if isinstance(current_doc.get("providers"), dict) else {}
-            preflight = self._default_chat_model_preflight(
-                chat_model,
-                models=models,
-                providers=providers,
-                selected_provider=str(current.get("default_provider") or "").strip().lower() or None,
-            )
-            if preflight is not None:
-                return {
-                    "ok": False,
-                    "error_kind": str(preflight.get("error_kind") or "default_model_verification_failed"),
-                    "details": str(preflight.get("message") or preflight.get("error") or ""),
-                }
-        return {"ok": True, "current_defaults": current}
-
-    def _restore_defaults_state(self, previous_defaults: Mapping[str, Any], *, journal: ManagedActionJournal) -> tuple[bool, str]:
-        try:
-            document = copy.deepcopy(self.registry_document) if isinstance(self.registry_document, dict) else {}
-            document["defaults"] = copy.deepcopy(dict(previous_defaults))
-            saved, error = self._persist_registry_document(document)
-            if not saved:
-                raise RuntimeError(str((error or {}).get("error") or "persist_failed"))
-            journal.record_rollback_step(
-                "restore_registry_defaults",
-                ok=True,
-                resource="defaults",
-                restored_defaults=self._defaults_metadata(previous_defaults),
-            )
-            summary = "restored the previous default model settings"
-            journal.mark_rollback(ok=True, attempted=True, summary=summary)
-            return True, summary
-        except Exception as exc:
-            journal.record_rollback_step("restore_registry_defaults", ok=False, resource="defaults", error=exc.__class__.__name__)
-            summary = "could not restore the previous default model settings automatically"
-            journal.mark_rollback(ok=False, attempted=True, summary=summary)
-            return False, summary
+        return True, {"ok": True, **current_defaults}
 
     def rollback_defaults(self) -> tuple[bool, dict[str, Any]]:
         # Operator-only rollback for persisted defaults. Assistant switch-back uses
@@ -9388,47 +8014,6 @@ class AgentRuntime:
         ok = bool(result.get("ok", False))
         return ok, result
 
-    def semantic_memory_doctor(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
-        service = self._semantic_memory_service
-        if service is None:
-            return True, {
-                "ok": True,
-                "mutated": False,
-                "enabled": bool(self.config.semantic_memory_enabled),
-                "healthy": False,
-                "reason": "semantic_memory_unavailable",
-                "issues": [{"kind": "unavailable", "severity": "info", "repairable": False}],
-                "repair_actions": [],
-                "summary": "semantic=unavailable; issues=1; repair_available=no",
-            }
-        scope = str(payload.get("scope") or payload.get("semantic_scope") or "global").strip() or "global"
-        return True, service.semantic_doctor_check(scope=scope)
-
-    def semantic_memory_repair(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
-        service = self._semantic_memory_service
-        if service is None:
-            return False, {
-                "ok": False,
-                "error": "semantic_memory_unavailable",
-                "message": "semantic memory service is unavailable.",
-            }
-        scope = str(payload.get("scope") or payload.get("semantic_scope") or "global").strip() or "global"
-        confirm = bool(payload.get("confirm") or payload.get("confirmed"))
-        plan = service.semantic_doctor_check(scope=scope)
-        if not confirm:
-            return False, {
-                "ok": False,
-                "preview": True,
-                "requires_confirmation": True,
-                "mutated": False,
-                "scope": scope,
-                "doctor": plan,
-                "message": "Semantic memory repair was not run. Review the plan and retry with confirm=true.",
-            }
-        result = service.repair_scope(scope=scope, now_ts=int(time.time()))
-        ok = bool(result.get("ok", False))
-        return ok, result
-
     def _value_policy(self, name: str) -> ValuePolicy:
         policy_name = str(name or "default").strip().lower() or "default"
         raw = self.config.premium_policy if policy_name == "premium" else self.config.default_policy
@@ -9586,55 +8171,6 @@ class AgentRuntime:
 
     def runtime_truth_service(self) -> RuntimeTruthService:
         return self._runtime_truth_service
-
-    def route_provider_model_mutation(
-        self,
-        operation: str,
-        payload: dict[str, Any] | None = None,
-    ) -> tuple[bool, dict[str, Any]]:
-        """Route one public provider/model/setup write through the central stack."""
-        return self._provider_model_authorization.route(operation, dict(payload or {}))
-
-    def route_organization_memory_mutation(
-        self,
-        operation: str,
-        payload: dict[str, Any] | None = None,
-    ) -> tuple[bool, dict[str, Any]]:
-        """Route a v2E user mutation through durable central authorization."""
-        return self._organization_memory_authorization.route(operation, dict(payload or {}))
-
-    def route_pack_search_mutation(
-        self,
-        operation: str,
-        payload: dict[str, Any] | None = None,
-    ) -> tuple[bool, dict[str, Any]]:
-        """Route a v2F pack/source/permission/search write through durable authorization."""
-        return self._pack_search_authorization.route(operation, dict(payload or {}))
-
-    def execute_authorized_assistant_mutation(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
-        """Executor-only bridge back into the one canonical assistant command path."""
-        command = str(payload.get("command") or "").strip().lower()
-        text = str(payload.get("private_content") or "").strip()
-        user_id = str(payload.get("user_id") or "").strip()
-        thread_id = str(payload.get("thread_id") or "").strip()
-        if not command or not text or not user_id:
-            return False, {"ok": False, "error": "authorized_assistant_mutation_payload_invalid", "mutated": False}
-        parsed = parse_command(text)
-        inferred_commands = {"memory_policy_store", "memory_policy_forget", "open_loop_add", "open_loop_complete"}
-        if command not in MUTATING_ASSISTANT_COMMANDS or (
-            command not in inferred_commands
-            and (parsed is None or str(parsed.name or "").strip().lower() != command)
-        ):
-            return False, {"ok": False, "error": "authorized_assistant_mutation_command_mismatch", "mutated": False}
-        with self._orchestrator_lock:
-            response = self._ensure_chat_runtime_bootstrapped().execute_authorized_organization_mutation(
-                text=text,
-                user_id=user_id,
-                thread_id=thread_id,
-            )
-        data = dict(response.data) if isinstance(response.data, dict) else {}
-        ok = bool(data.get("ok", True))
-        return ok, {"ok": ok, "message": str(response.text or "Mutation completed."), "result": redact_audit_value(data)}
 
     def _record_memory_issue(
         self,
@@ -10163,14 +8699,9 @@ class AgentRuntime:
                     chat_runtime_adapter=self,
                     semantic_memory_service=self._semantic_memory_service,
                     pack_install_handler=self.packs_install,
-                    web_search_handler=self.search_query,
                 )
-                if hasattr(self, "_assistant_planner"):
-                    self._orchestrator._assistant_planner = self._assistant_planner  # noqa: SLF001
             else:
                 self._orchestrator.llm_client = self._router
-                if hasattr(self, "_assistant_planner"):
-                    self._orchestrator._assistant_planner = self._assistant_planner  # noqa: SLF001
                 self._orchestrator._semantic_memory_service = self._semantic_memory_service  # noqa: SLF001
                 try:
                     setattr(self._orchestrator.db, "_semantic_memory_service", self._semantic_memory_service)
@@ -10234,59 +8765,6 @@ class AgentRuntime:
         if explicit_thread_id:
             return explicit_thread_id
         return f"{user_id}:thread"
-
-    def _record_chat_transcript(
-        self,
-        *,
-        user_id: str,
-        thread_id: str,
-        user_content: str,
-        assistant_content: str,
-        source_surface: str,
-        request_id: str,
-    ) -> None:
-        """Persist display history without making chat availability depend on history writes."""
-        try:
-            with self._orchestrator_lock:
-                self._ensure_memory_db().record_chat_turn(
-                    user_id=user_id,
-                    thread_id=thread_id,
-                    user_content=user_content,
-                    assistant_content=assistant_content,
-                    source_surface=source_surface,
-                    request_id=request_id,
-                )
-        except Exception as exc:
-            self._safe_log_event(
-                "chat.transcript_write_failed",
-                {
-                    "error": exc.__class__.__name__,
-                    "source_surface": source_surface,
-                },
-            )
-
-    def chat_threads(self, payload: dict[str, Any]) -> dict[str, Any]:
-        user_id = self._chat_user_id(payload)
-        try:
-            limit = min(50, max(1, int(payload.get("limit") or 50)))
-        except (TypeError, ValueError):
-            limit = 50
-        with self._orchestrator_lock:
-            threads = self._ensure_memory_db().list_chat_threads(user_id=user_id, limit=limit)
-        return {"ok": True, "threads": threads, "count": len(threads), "limit": limit}
-
-    def chat_thread(self, thread_id: str, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
-        user_id = self._chat_user_id(payload)
-        with self._orchestrator_lock:
-            thread = self._ensure_memory_db().get_chat_thread(user_id=user_id, thread_id=thread_id)
-        if thread is None:
-            return False, {
-                "ok": False,
-                "error": "chat_thread_not_found",
-                "error_kind": "not_found",
-                "message": "That conversation was not found for this browser session.",
-            }
-        return True, {"ok": True, "thread": thread}
 
     @staticmethod
     def _payload_setup_state_hint(payload: dict[str, Any]) -> dict[str, Any]:
@@ -10614,32 +9092,17 @@ class AgentRuntime:
             require_available=False,
         )
         if not resolved_ok:
-            error_kind = str(
-                (resolved_body if isinstance(resolved_body, dict) else {}).get("error_kind")
-                or (resolved_body if isinstance(resolved_body, dict) else {}).get("error")
-                or "default_model_not_found"
-            )
-            journal = self._failed_default_model_preflight_journal(requested_model, error_kind)
-            response = resolved_body if isinstance(resolved_body, dict) else {"ok": False, "error": "default_model not found"}
-            response["managed_action_journal"] = journal.to_dict()
-            return False, response
+            return False, resolved_body if isinstance(resolved_body, dict) else {"ok": False, "error": "default_model not found"}
         normalized_model = str((resolved_body if isinstance(resolved_body, dict) else {}).get("model_id") or "").strip()
         provider_id = str((resolved_body if isinstance(resolved_body, dict) else {}).get("provider") or "").strip().lower()
         if not normalized_model or not provider_id:
-            journal = self._failed_default_model_preflight_journal(requested_model, "default_model_not_found")
-            return False, {"ok": False, "error": "default_model not found", "managed_action_journal": journal.to_dict()}
+            return False, {"ok": False, "error": "default_model not found"}
         switch_allowed, blocked_response = self._guard_switch_target_allowed(
             resolved_body if isinstance(resolved_body, dict) else {},
             requested_model=normalized_model,
         )
         if not switch_allowed:
-            response = blocked_response if isinstance(blocked_response, dict) else self._safe_mode_remote_switch_response(normalized_model)
-            error_kind = str(response.get("error_kind") or response.get("error") or "default_model_blocked")
-            journal = self._failed_default_model_preflight_journal(normalized_model or requested_model, error_kind)
-            response["managed_action_journal"] = journal.to_dict()
-            return False, response
-        previous_default = self._stored_chat_default_target() or {}
-        previous_model = str(previous_default.get("model") or "").strip() or "none"
+            return False, blocked_response if isinstance(blocked_response, dict) else self._safe_mode_remote_switch_response(normalized_model)
         ok, body = self.update_defaults(
             {
                 "default_provider": provider_id,
@@ -10652,11 +9115,7 @@ class AgentRuntime:
         response = body if isinstance(body, dict) else {"ok": True}
         response["provider"] = provider_id
         response["model_id"] = normalized_model
-        response["previous_model_id"] = None if previous_model == "none" else previous_model
-        response["message"] = (
-            f"Default chat model updated from {previous_model} to {normalized_model}. "
-            f"Previous default: {previous_model}. New default: {normalized_model}."
-        )
+        response["message"] = f"Now using {normalized_model} for chat."
         return True, response
 
     def set_confirmed_chat_model_target(
@@ -10672,20 +9131,11 @@ class AgentRuntime:
             require_usable=True,
         )
         if not resolved_ok:
-            requested_model = str(model_id or "").strip()
-            error_kind = str(
-                (resolved_body if isinstance(resolved_body, dict) else {}).get("error_kind")
-                or (resolved_body if isinstance(resolved_body, dict) else {}).get("error")
-                or "switch_target_unavailable"
-            )
-            journal = self._failed_default_model_preflight_journal(requested_model, error_kind)
-            response = resolved_body if isinstance(resolved_body, dict) else {
+            return False, resolved_body if isinstance(resolved_body, dict) else {
                 "ok": False,
                 "error": "switch_target_unavailable",
                 "message": "That model is no longer available, so I couldn't switch to it.",
             }
-            response["managed_action_journal"] = journal.to_dict()
-            return False, response
         applied_model = str((resolved_body if isinstance(resolved_body, dict) else {}).get("model_id") or "").strip()
         applied_provider = str((resolved_body if isinstance(resolved_body, dict) else {}).get("provider") or "").strip().lower()
         switch_allowed, blocked_response = self._guard_switch_target_allowed(
@@ -10693,21 +9143,13 @@ class AgentRuntime:
             requested_model=applied_model or model_id,
         )
         if not switch_allowed:
-            response = blocked_response if isinstance(blocked_response, dict) else self._safe_mode_remote_switch_response(applied_model or model_id)
-            error_kind = str(response.get("error_kind") or response.get("error") or "switch_target_blocked")
-            journal = self._failed_default_model_preflight_journal(applied_model or str(model_id or "").strip(), error_kind)
-            response["managed_action_journal"] = journal.to_dict()
-            return False, response
+            return False, blocked_response if isinstance(blocked_response, dict) else self._safe_mode_remote_switch_response(applied_model or model_id)
         if not applied_model or not applied_provider:
-            journal = self._failed_default_model_preflight_journal(str(model_id or "").strip(), "switch_target_unavailable")
             return False, {
                 "ok": False,
                 "error": "switch_target_unavailable",
                 "message": "That model is no longer available, so I couldn't switch to it.",
-                "managed_action_journal": journal.to_dict(),
             }
-        previous_default = self._stored_chat_default_target() or {}
-        previous_model = str(previous_default.get("model") or "").strip() or "none"
         previous_override = (
             dict(self._safe_mode_explicit_chat_target_override)
             if isinstance(self._safe_mode_explicit_chat_target_override, dict)
@@ -10738,11 +9180,7 @@ class AgentRuntime:
         response = body if isinstance(body, dict) else {"ok": True}
         response["provider"] = applied_provider
         response["model_id"] = applied_model
-        response["previous_model_id"] = None if previous_model == "none" else previous_model
-        response["message"] = (
-            f"Default chat model updated from {previous_model} to {applied_model}. "
-            f"Previous default: {previous_model}. New default: {applied_model}."
-        )
+        response["message"] = f"Now using {applied_model} for chat."
         return True, response
 
     def set_temporary_chat_model_target(
@@ -10751,13 +9189,6 @@ class AgentRuntime:
         *,
         provider_id: str | None = None,
     ) -> tuple[bool, dict[str, Any]]:
-        requested_model = str(model_id or "").strip()
-        journal = ManagedActionJournal(action_type="temporary_chat_model_override", target=requested_model or "temporary_chat_target")
-        journal.plan_step("preflight_temporary_chat_target", resource="temporary_chat_target")
-        journal.plan_step("capture_previous_temporary_target", resource="temporary_chat_target")
-        journal.plan_step("apply_temporary_chat_target", resource="temporary_chat_target")
-        journal.plan_step("verify_temporary_chat_target", resource="temporary_chat_target")
-        self._persist_managed_action_journal(journal, status="planned")
         resolved_ok, resolved_body = self._resolve_switch_target_with_policy_guard(
             model_id,
             provider_id=provider_id,
@@ -10765,20 +9196,11 @@ class AgentRuntime:
             require_usable=True,
         )
         if not resolved_ok:
-            error_kind = (
-                str((resolved_body if isinstance(resolved_body, dict) else {}).get("error_kind") or (resolved_body if isinstance(resolved_body, dict) else {}).get("error") or "switch_target_unavailable")
-            )
-            journal.record_step("preflight_temporary_chat_target", ok=False, resource="temporary_chat_target", reason=error_kind)
-            journal.mark_verification(ok=False, error_kind=error_kind)
-            journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
-            self._persist_managed_action_journal(journal, status="failed")
-            response = resolved_body if isinstance(resolved_body, dict) else {
+            return False, resolved_body if isinstance(resolved_body, dict) else {
                 "ok": False,
                 "error": "switch_target_unavailable",
                 "message": "That model is no longer available, so I couldn't switch to it.",
             }
-            response["managed_action_journal"] = journal.to_dict()
-            return False, response
         applied_model = str((resolved_body if isinstance(resolved_body, dict) else {}).get("model_id") or "").strip()
         applied_provider = str((resolved_body if isinstance(resolved_body, dict) else {}).get("provider") or "").strip().lower()
         switch_allowed, blocked_response = self._guard_switch_target_allowed(
@@ -10786,160 +9208,42 @@ class AgentRuntime:
             requested_model=applied_model or model_id,
         )
         if not switch_allowed:
-            response = blocked_response if isinstance(blocked_response, dict) else self._safe_mode_remote_switch_response(applied_model or model_id)
-            error_kind = str(response.get("error_kind") or response.get("error") or "switch_target_blocked")
-            journal.record_step("preflight_temporary_chat_target", ok=False, resource="temporary_chat_target", reason=error_kind)
-            journal.mark_verification(ok=False, error_kind=error_kind)
-            journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
-            self._persist_managed_action_journal(journal, status="failed")
-            response["managed_action_journal"] = journal.to_dict()
-            return False, response
+            return False, blocked_response if isinstance(blocked_response, dict) else self._safe_mode_remote_switch_response(applied_model or model_id)
         if not applied_model or not applied_provider:
-            journal.record_step("preflight_temporary_chat_target", ok=False, resource="temporary_chat_target", reason="switch_target_unavailable")
-            journal.mark_verification(ok=False, error_kind="switch_target_unavailable")
-            journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
-            self._persist_managed_action_journal(journal, status="failed")
             return False, {
                 "ok": False,
                 "error": "switch_target_unavailable",
                 "message": "That model is no longer available, so I couldn't switch to it.",
-                "managed_action_journal": journal.to_dict(),
             }
-        previous_safe_override = (
-            dict(self._safe_mode_explicit_chat_target_override)
-            if isinstance(self._safe_mode_explicit_chat_target_override, dict)
-            else None
-        )
-        previous_temporary_override = (
-            dict(self._temporary_chat_target_override)
-            if isinstance(self._temporary_chat_target_override, dict)
-            else None
-        )
-        journal.record_step(
-            "capture_previous_temporary_target",
-            ok=True,
-            resource="temporary_chat_target",
-            previous_safe_override=self._temporary_target_metadata(previous_safe_override),
-            previous_temporary_override=self._temporary_target_metadata(previous_temporary_override),
-        )
-        journal.record_step(
-            "preflight_temporary_chat_target",
-            ok=True,
-            resource="temporary_chat_target",
-            requested_model_id=applied_model,
-            requested_provider_id=applied_provider,
-        )
-        self._persist_managed_action_journal(journal, status="running")
         if self._safe_mode_enabled():
             self._safe_mode_explicit_chat_target_override = {
                 "provider": applied_provider,
                 "model": applied_model,
             }
-            expected_safe_override = {"provider": applied_provider, "model": applied_model}
-            verified = self._safe_mode_explicit_chat_target_override == expected_safe_override
-            journal.record_step(
-                "apply_temporary_chat_target",
-                ok=True,
-                resource="safe_mode_explicit_chat_target",
-                new_override=self._temporary_target_metadata(expected_safe_override),
-            )
-            journal.record_step("verify_temporary_chat_target", ok=verified, resource="safe_mode_explicit_chat_target")
-            if not verified:
-                self._safe_mode_explicit_chat_target_override = previous_safe_override
-                journal.record_rollback_step(
-                    "restore_temporary_chat_target",
-                    ok=True,
-                    resource="safe_mode_explicit_chat_target",
-                    restored_override=self._temporary_target_metadata(previous_safe_override),
-                )
-                journal.mark_verification(ok=False, target=applied_model)
-                journal.mark_rollback(ok=True, attempted=True, summary="restored previous temporary chat target")
-                self._persist_managed_action_journal(journal, status="rolled_back")
-                return False, {
-                    "ok": False,
-                    "error": "temporary_chat_target_verification_failed",
-                    "error_kind": "temporary_chat_target_verification_failed",
-                    "message": "The temporary model switch did not finish, so I restored the previous chat target.",
-                    "managed_action_journal": journal.to_dict(),
-                }
-            journal.mark_verification(ok=True, target=applied_model)
-            journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
-            self._persist_managed_action_journal(journal, status="verified")
             return True, {
                 "ok": True,
                 "provider": applied_provider,
                 "model_id": applied_model,
-                "message": (
-                    f"Temporary chat model switched to {applied_model}. "
-                    "This does not change your default model."
-                ),
-                "managed_action_journal": journal.to_dict(),
+                "message": f"Temporarily using {applied_model} for chat.",
             }
         stored_default = self._stored_chat_default_target()
         default_model = str((stored_default or {}).get("model") or "").strip() or None
         default_provider = str((stored_default or {}).get("provider") or "").strip().lower() or None
         if applied_model == default_model and applied_provider == default_provider:
             self._temporary_chat_target_override = None
-            expected_temporary_override = None
         else:
             self._temporary_chat_target_override = {
                 "provider": applied_provider,
                 "model": applied_model,
-                "user_id": str((self._active_chat_scope or {}).get("user_id") or "").strip(),
-                "thread_id": str((self._active_chat_scope or {}).get("thread_id") or "").strip(),
-            }
-            expected_temporary_override = dict(self._temporary_chat_target_override)
-        verified = self._temporary_chat_target_override == expected_temporary_override
-        journal.record_step(
-            "apply_temporary_chat_target",
-            ok=True,
-            resource="temporary_chat_target",
-            new_override=self._temporary_target_metadata(expected_temporary_override),
-        )
-        journal.record_step("verify_temporary_chat_target", ok=verified, resource="temporary_chat_target")
-        if not verified:
-            self._safe_mode_explicit_chat_target_override = previous_safe_override
-            self._temporary_chat_target_override = previous_temporary_override
-            journal.record_rollback_step(
-                "restore_temporary_chat_target",
-                ok=True,
-                resource="temporary_chat_target",
-                restored_override=self._temporary_target_metadata(previous_temporary_override),
-            )
-            journal.mark_verification(ok=False, target=applied_model)
-            journal.mark_rollback(ok=True, attempted=True, summary="restored previous temporary chat target")
-            self._persist_managed_action_journal(journal, status="rolled_back")
-            return False, {
-                "ok": False,
-                "error": "temporary_chat_target_verification_failed",
-                "error_kind": "temporary_chat_target_verification_failed",
-                "message": "The temporary model switch did not finish, so I restored the previous chat target.",
-                "managed_action_journal": journal.to_dict(),
             }
         invalidate_truth_cache = getattr(self._runtime_truth_service, "_invalidate_snapshot_cache", None)
         if callable(invalidate_truth_cache):
             invalidate_truth_cache()
-        journal.mark_verification(ok=True, target=applied_model)
-        journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
-        self._persist_managed_action_journal(journal, status="verified")
         return True, {
             "ok": True,
             "provider": applied_provider,
             "model_id": applied_model,
-            "message": (
-                f"Temporary chat model switched to {applied_model}. "
-                "This does not change your default model."
-            ),
-            "managed_action_journal": journal.to_dict(),
-        }
-
-    @staticmethod
-    def _temporary_target_metadata(target: Mapping[str, Any] | None) -> dict[str, Any]:
-        source = target if isinstance(target, Mapping) else {}
-        return {
-            "present": bool(source),
-            "provider": str(source.get("provider") or "").strip().lower() or None,
-            "model": str(source.get("model") or "").strip() or None,
+            "message": f"Temporarily using {applied_model} for chat.",
         }
 
     def restore_temporary_chat_model_target(
@@ -10948,13 +9252,6 @@ class AgentRuntime:
         *,
         provider_id: str | None = None,
     ) -> tuple[bool, dict[str, Any]]:
-        requested_model = str(model_id or "").strip()
-        journal = ManagedActionJournal(action_type="temporary_chat_model_restore", target=requested_model or "temporary_chat_target")
-        journal.plan_step("preflight_temporary_chat_target_restore", resource="temporary_chat_target")
-        journal.plan_step("capture_previous_temporary_target", resource="temporary_chat_target")
-        journal.plan_step("apply_temporary_chat_target_restore", resource="temporary_chat_target")
-        journal.plan_step("verify_temporary_chat_target_restore", resource="temporary_chat_target")
-        self._persist_managed_action_journal(journal, status="planned")
         resolved_ok, resolved_body = self._resolve_switch_target_with_policy_guard(
             model_id,
             provider_id=provider_id,
@@ -10962,18 +9259,11 @@ class AgentRuntime:
             require_usable=True,
         )
         if not resolved_ok:
-            error_kind = str((resolved_body if isinstance(resolved_body, dict) else {}).get("error_kind") or (resolved_body if isinstance(resolved_body, dict) else {}).get("error") or "switch_target_unavailable")
-            journal.record_step("preflight_temporary_chat_target_restore", ok=False, resource="temporary_chat_target", reason=error_kind)
-            journal.mark_verification(ok=False, error_kind=error_kind)
-            journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
-            self._persist_managed_action_journal(journal, status="failed")
-            response = resolved_body if isinstance(resolved_body, dict) else {
+            return False, resolved_body if isinstance(resolved_body, dict) else {
                 "ok": False,
                 "error": "switch_target_unavailable",
                 "message": "That model is no longer available, so I couldn't switch to it.",
             }
-            response["managed_action_journal"] = journal.to_dict()
-            return False, response
         applied_model = str((resolved_body if isinstance(resolved_body, dict) else {}).get("model_id") or "").strip()
         applied_provider = str((resolved_body if isinstance(resolved_body, dict) else {}).get("provider") or "").strip().lower()
         switch_allowed, blocked_response = self._guard_switch_target_allowed(
@@ -10981,50 +9271,13 @@ class AgentRuntime:
             requested_model=applied_model or model_id,
         )
         if not switch_allowed:
-            response = blocked_response if isinstance(blocked_response, dict) else self._safe_mode_remote_switch_response(applied_model or model_id)
-            error_kind = str(response.get("error_kind") or response.get("error") or "switch_target_blocked")
-            journal.record_step("preflight_temporary_chat_target_restore", ok=False, resource="temporary_chat_target", reason=error_kind)
-            journal.mark_verification(ok=False, error_kind=error_kind)
-            journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
-            self._persist_managed_action_journal(journal, status="failed")
-            response["managed_action_journal"] = journal.to_dict()
-            return False, response
+            return False, blocked_response if isinstance(blocked_response, dict) else self._safe_mode_remote_switch_response(applied_model or model_id)
         if not applied_model or not applied_provider:
-            journal.record_step("preflight_temporary_chat_target_restore", ok=False, resource="temporary_chat_target", reason="switch_target_unavailable")
-            journal.mark_verification(ok=False, error_kind="switch_target_unavailable")
-            journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
-            self._persist_managed_action_journal(journal, status="failed")
             return False, {
                 "ok": False,
                 "error": "switch_target_unavailable",
                 "message": "That model is no longer available, so I couldn't switch to it.",
-                "managed_action_journal": journal.to_dict(),
             }
-        previous_safe_override = (
-            dict(self._safe_mode_explicit_chat_target_override)
-            if isinstance(self._safe_mode_explicit_chat_target_override, dict)
-            else None
-        )
-        previous_temporary_override = (
-            dict(self._temporary_chat_target_override)
-            if isinstance(self._temporary_chat_target_override, dict)
-            else None
-        )
-        journal.record_step(
-            "capture_previous_temporary_target",
-            ok=True,
-            resource="temporary_chat_target",
-            previous_safe_override=self._temporary_target_metadata(previous_safe_override),
-            previous_temporary_override=self._temporary_target_metadata(previous_temporary_override),
-        )
-        journal.record_step(
-            "preflight_temporary_chat_target_restore",
-            ok=True,
-            resource="temporary_chat_target",
-            requested_model_id=applied_model,
-            requested_provider_id=applied_provider,
-        )
-        self._persist_managed_action_journal(journal, status="running")
         if self._safe_mode_enabled():
             document = self.registry_document if isinstance(self.registry_document, dict) else {}
             defaults = self._ensure_defaults(document)
@@ -11046,108 +9299,35 @@ class AgentRuntime:
             )
             if applied_model == default_model and applied_provider == default_provider:
                 self._safe_mode_explicit_chat_target_override = None
-                expected_override = None
             else:
                 self._safe_mode_explicit_chat_target_override = {
                     "provider": applied_provider,
                     "model": applied_model,
                 }
-                expected_override = dict(self._safe_mode_explicit_chat_target_override)
-            verified = self._safe_mode_explicit_chat_target_override == expected_override
-            journal.record_step(
-                "apply_temporary_chat_target_restore",
-                ok=True,
-                resource="safe_mode_explicit_chat_target",
-                new_override=self._temporary_target_metadata(expected_override),
-            )
-            journal.record_step("verify_temporary_chat_target_restore", ok=verified, resource="safe_mode_explicit_chat_target")
-            if not verified:
-                self._safe_mode_explicit_chat_target_override = previous_safe_override
-                journal.record_rollback_step(
-                    "restore_temporary_chat_target",
-                    ok=True,
-                    resource="safe_mode_explicit_chat_target",
-                    restored_override=self._temporary_target_metadata(previous_safe_override),
-                )
-                journal.mark_verification(ok=False, target=applied_model)
-                journal.mark_rollback(ok=True, attempted=True, summary="restored previous temporary chat target")
-                self._persist_managed_action_journal(journal, status="rolled_back")
-                return False, {
-                    "ok": False,
-                    "error": "temporary_chat_target_verification_failed",
-                    "error_kind": "temporary_chat_target_verification_failed",
-                    "message": "The temporary model switch did not finish, so I restored the previous chat target.",
-                    "managed_action_journal": journal.to_dict(),
-                }
-            journal.mark_verification(ok=True, target=applied_model)
-            journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
-            self._persist_managed_action_journal(journal, status="verified")
             return True, {
                 "ok": True,
                 "provider": applied_provider,
                 "model_id": applied_model,
-                "message": (
-                    f"Temporary chat model switched to {applied_model}. "
-                    "This does not change your default model."
-                ),
-                "managed_action_journal": journal.to_dict(),
+                "message": f"Now using {applied_model} for chat.",
             }
         stored_default = self._stored_chat_default_target()
         default_model = str((stored_default or {}).get("model") or "").strip() or None
         default_provider = str((stored_default or {}).get("provider") or "").strip().lower() or None
         if applied_model == default_model and applied_provider == default_provider:
             self._temporary_chat_target_override = None
-            expected_override = None
         else:
             self._temporary_chat_target_override = {
                 "provider": applied_provider,
                 "model": applied_model,
-                "user_id": str((self._active_chat_scope or {}).get("user_id") or "").strip(),
-                "thread_id": str((self._active_chat_scope or {}).get("thread_id") or "").strip(),
-            }
-            expected_override = dict(self._temporary_chat_target_override)
-        verified = self._temporary_chat_target_override == expected_override
-        journal.record_step(
-            "apply_temporary_chat_target_restore",
-            ok=True,
-            resource="temporary_chat_target",
-            new_override=self._temporary_target_metadata(expected_override),
-        )
-        journal.record_step("verify_temporary_chat_target_restore", ok=verified, resource="temporary_chat_target")
-        if not verified:
-            self._safe_mode_explicit_chat_target_override = previous_safe_override
-            self._temporary_chat_target_override = previous_temporary_override
-            journal.record_rollback_step(
-                "restore_temporary_chat_target",
-                ok=True,
-                resource="temporary_chat_target",
-                restored_override=self._temporary_target_metadata(previous_temporary_override),
-            )
-            journal.mark_verification(ok=False, target=applied_model)
-            journal.mark_rollback(ok=True, attempted=True, summary="restored previous temporary chat target")
-            self._persist_managed_action_journal(journal, status="rolled_back")
-            return False, {
-                "ok": False,
-                "error": "temporary_chat_target_verification_failed",
-                "error_kind": "temporary_chat_target_verification_failed",
-                "message": "The temporary model switch did not finish, so I restored the previous chat target.",
-                "managed_action_journal": journal.to_dict(),
             }
         invalidate_truth_cache = getattr(self._runtime_truth_service, "_invalidate_snapshot_cache", None)
         if callable(invalidate_truth_cache):
             invalidate_truth_cache()
-        journal.mark_verification(ok=True, target=applied_model)
-        journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
-        self._persist_managed_action_journal(journal, status="verified")
         return True, {
             "ok": True,
             "provider": applied_provider,
             "model_id": applied_model,
-            "message": (
-                f"Temporary chat model switched to {applied_model}. "
-                "This does not change your default model."
-            ),
-            "managed_action_journal": journal.to_dict(),
+            "message": f"Now using {applied_model} for chat.",
         }
 
     def configure_local_chat_model(self, model_id: str) -> tuple[bool, dict[str, Any]]:
@@ -11209,53 +9389,6 @@ class AgentRuntime:
             return False, {"ok": False, "error": "api_key is required"}
         started_at = time.monotonic()
         timings_ms: dict[str, int] = {}
-        journal = ManagedActionJournal(action_type="provider_openrouter_config", target="openrouter")
-        journal.plan_step("preflight_provider_config", resource="openrouter")
-        journal.plan_step("write_provider_config", resource="openrouter")
-        previous_document = copy.deepcopy(self.registry_document)
-        previous_providers = previous_document.get("providers") if isinstance(previous_document.get("providers"), dict) else {}
-        previous_openrouter = copy.deepcopy(previous_providers.get("openrouter")) if isinstance(previous_providers.get("openrouter"), dict) else None
-        provider_existed = isinstance(previous_openrouter, dict)
-        journal.record_step(
-            "preflight_provider_config",
-            ok=True,
-            resource="openrouter",
-            provider_existed=provider_existed,
-            secret=self._secret_metadata(normalized_key),
-        )
-        self._persist_managed_action_journal(journal, status="planned")
-        self._persist_managed_action_journal(journal, status="running")
-
-        def _restore_openrouter_config(reason: str) -> tuple[bool, str]:
-            restore_doc = copy.deepcopy(self.registry_document)
-            restore_providers = restore_doc.get("providers") if isinstance(restore_doc.get("providers"), dict) else {}
-            if not isinstance(restore_providers, dict):
-                restore_providers = {}
-            if provider_existed and isinstance(previous_openrouter, dict):
-                restore_providers["openrouter"] = copy.deepcopy(previous_openrouter)
-                summary = "restored previous OpenRouter provider config"
-            else:
-                restore_providers.pop("openrouter", None)
-                summary = "removed newly created OpenRouter provider config"
-            restore_doc["providers"] = restore_providers
-            saved, error = self._persist_registry_document(restore_doc)
-            if not saved:
-                journal.record_rollback_step(
-                    "restore_openrouter_provider_config",
-                    ok=False,
-                    resource="openrouter",
-                    reason=reason,
-                    error=str((error or {}).get("error") or "persist_failed"),
-                )
-                return False, "could not restore OpenRouter provider config"
-            journal.record_rollback_step(
-                "restore_openrouter_provider_config",
-                ok=True,
-                resource="openrouter",
-                reason=reason,
-                provider_existed=provider_existed,
-            )
-            return True, summary
 
         def _mark(label: str, step_started_at: float) -> None:
             timings_ms[str(label)] = int(max(0.0, time.monotonic() - step_started_at) * 1000)
@@ -11282,17 +9415,7 @@ class AgentRuntime:
                 }
             )
             if not add_ok:
-                journal.record_step("write_provider_config", ok=False, resource="openrouter", reason=str((add_body or {}).get("error") if isinstance(add_body, dict) else "provider_config_failed"))
-                response = add_body if isinstance(add_body, dict) else {"ok": False, "error": "provider_config_failed"}
-                response["managed_action_journal"] = journal.to_dict()
-                self._persist_managed_action_journal(
-                    journal,
-                    status="failed",
-                    recovery_hint="OpenRouter setup failed before provider config was written.",
-                )
-                return False, response
-            journal.record_step("write_provider_config", ok=True, resource="openrouter", operation="add")
-            journal.record_created_resource("provider_config", "openrouter")
+                return False, add_body if isinstance(add_body, dict) else {"ok": False, "error": "provider_config_failed"}
         else:
             update_ok, update_body = self.update_provider(
                 "openrouter",
@@ -11305,64 +9428,17 @@ class AgentRuntime:
                 },
             )
             if not update_ok:
-                journal.record_step("write_provider_config", ok=False, resource="openrouter", reason=str((update_body or {}).get("error") if isinstance(update_body, dict) else "provider_config_failed"))
-                response = update_body if isinstance(update_body, dict) else {"ok": False, "error": "provider_config_failed"}
-                response["managed_action_journal"] = journal.to_dict()
-                self._persist_managed_action_journal(
-                    journal,
-                    status="failed",
-                    recovery_hint="OpenRouter setup failed while updating provider config.",
-                )
-                return False, response
-            journal.record_step("write_provider_config", ok=True, resource="openrouter", operation="update")
-            journal.record_changed_resource("provider_config", "openrouter", rollback_supported=True)
-        self._persist_managed_action_journal(journal, status="running")
+                return False, update_body if isinstance(update_body, dict) else {"ok": False, "error": "provider_config_failed"}
         _mark("provider_config", provider_step_started)
 
         secret_step_started = time.monotonic()
-        secret_ok, secret_body = self.set_provider_secret(
-            "openrouter",
-            {
-                "api_key": normalized_key,
-                "verify_provider": True,
-                "model": str(request.get("model") or "").strip(),
-            },
-        )
+        secret_ok, secret_body = self.set_provider_secret("openrouter", {"api_key": normalized_key})
         if not secret_ok:
-            config_restore_ok, config_restore_summary = _restore_openrouter_config("secret_or_provider_test_failed")
-            journal.record_step(
-                "write_provider_secret_and_verify",
-                ok=False,
-                resource="provider:openrouter:api_key",
-                error_kind=str((secret_body or {}).get("error_kind") if isinstance(secret_body, dict) else "secret_store_failed"),
-            )
-            journal.mark_verification(ok=False, provider="openrouter", provider_test=False)
-            journal.mark_rollback(ok=bool(config_restore_ok), attempted=True, summary=config_restore_summary)
-            response = secret_body if isinstance(secret_body, dict) else {"ok": False, "error": "secret_store_failed"}
-            response["message"] = str(
-                response.get("message")
-                or f"OpenRouter setup failed and {config_restore_summary}. Check the key and paste it again."
-            )
-            response["provider_config_rollback_ok"] = bool(config_restore_ok)
-            response["provider_config_rollback_summary"] = config_restore_summary
-            response["managed_action_journal"] = journal.to_dict()
-            self._persist_managed_action_journal(
-                journal,
-                status="rolled_back" if config_restore_ok else "recovery_needed",
-                recovery_hint=str(
-                    "OpenRouter setup failed and provider config rollback completed."
-                    if config_restore_ok
-                    else "OpenRouter setup failed and provider config rollback needs attention."
-                ),
-            )
-            return False, response
-        journal.record_step("write_provider_secret_and_verify", ok=True, resource="provider:openrouter:api_key")
-        self._persist_managed_action_journal(journal, status="running")
+            return False, secret_body if isinstance(secret_body, dict) else {"ok": False, "error": "secret_store_failed"}
         _mark("secret_store", secret_step_started)
 
         provider_test_started = time.monotonic()
-        test_ok = True
-        test_body = secret_body.get("provider_test") if isinstance(secret_body.get("provider_test"), dict) else {"ok": True}
+        test_ok, test_body = self.test_provider("openrouter", {"api_key": normalized_key})
         _mark("provider_test", provider_test_started)
         if not test_ok:
             response = test_body if isinstance(test_body, dict) else {"ok": False, "error": "provider_test_failed"}
@@ -11444,10 +9520,6 @@ class AgentRuntime:
                 )
             ),
         }
-        journal.mark_verification(ok=True, provider="openrouter", provider_test=True)
-        journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
-        response["managed_action_journal"] = journal.to_dict()
-        self._persist_managed_action_journal(journal, status="verified")
         self._safe_log_event(
             "runtime.configure_openrouter",
             {
@@ -11683,16 +9755,7 @@ class AgentRuntime:
                 generic_fallback_allowed=serialized.generic_fallback_allowed,
                 generic_fallback_reason=serialized.generic_fallback_reason,
             )
-            self._record_chat_transcript(
-                user_id=user_id,
-                thread_id=thread_id,
-                user_content=last_user_text,
-                assistant_content=str(serialized.body.get("message") or social_turn_text),
-                source_surface=source_surface,
-                request_id=request_id,
-            )
             return bool(serialized.ok), serialized.body
-        previous_chat_scope = self._set_active_chat_scope(user_id=user_id, thread_id=thread_id)
         try:
             with self._orchestrator_lock:
                 orchestrator_started = time.monotonic()
@@ -11760,8 +9823,6 @@ class AgentRuntime:
                 },
             )
             raise
-        finally:
-            self._restore_active_chat_scope(previous_chat_scope)
         meta = serialized.body.get("meta") if isinstance(serialized.body.get("meta"), dict) else {}
         meta = dict(meta)
         meta["chat_timing_ms"] = chat_timing_ms
@@ -11788,17 +9849,6 @@ class AgentRuntime:
             generic_fallback_allowed=serialized.generic_fallback_allowed,
             generic_fallback_reason=serialized.generic_fallback_reason,
         )
-        assistant_payload = serialized.body.get("assistant") if isinstance(serialized.body.get("assistant"), dict) else {}
-        assistant_content = str((assistant_payload or {}).get("content") or serialized.body.get("message") or "").strip()
-        if assistant_content:
-            self._record_chat_transcript(
-                user_id=user_id,
-                thread_id=thread_id,
-                user_content=last_user_text,
-                assistant_content=assistant_content,
-                source_surface=source_surface,
-                request_id=request_id,
-            )
         self._log_request("/chat", serialized.ok, meta)
         return serialized.ok, serialized.body
 
@@ -12455,10 +10505,7 @@ class AgentRuntime:
             }
 
         saved, txn_meta = self._persist_registry_document_transactional(
-            lambda current: apply_capabilities_reconcile_plan(current, plan),
-            action_type="llm.capabilities.reconcile.apply",
-            target="llm_registry",
-            modified_ids=modified_ids,
+            lambda current: apply_capabilities_reconcile_plan(current, plan)
         )
         if not saved:
             error = txn_meta
@@ -12545,811 +10592,17 @@ class AgentRuntime:
             "snapshot_id": snapshot_id,
             "snapshot_id_after": snapshot_id_after,
             "resulting_registry_hash": resulting_registry_hash,
-            "managed_action_journal": txn_meta.get("managed_action_journal") if isinstance(txn_meta.get("managed_action_journal"), dict) else {},
         }
 
     def get_config(self) -> dict[str, Any]:
         defaults = self.get_defaults()
-        secret_status_getter = getattr(self.secret_store, "status", None)
-        try:
-            raw_secret_status = secret_status_getter() if callable(secret_status_getter) else {}
-        except Exception as exc:
-            raw_secret_status = {"state": "error", "valid": False, "error_kind": exc.__class__.__name__}
-        secret_status = {
-            "backend": str(raw_secret_status.get("backend") or "unknown") if isinstance(raw_secret_status, dict) else "unknown",
-            "exists": raw_secret_status.get("exists") if isinstance(raw_secret_status, dict) else None,
-            "readable": raw_secret_status.get("readable") if isinstance(raw_secret_status, dict) else None,
-            "valid": bool(raw_secret_status.get("valid", False)) if isinstance(raw_secret_status, dict) else False,
-            "state": str(raw_secret_status.get("state") or "unknown") if isinstance(raw_secret_status, dict) else "unknown",
-            "error_kind": raw_secret_status.get("error_kind") if isinstance(raw_secret_status, dict) else None,
-        }
         return {
             "routing_mode": defaults.get("routing_mode"),
             "retry_attempts": self._router.policy.retry_attempts,
             "timeout_seconds": self._router.policy.default_timeout_seconds,
             "secret_storage": self.secret_store.backend_name,
-            "secret_store": secret_status,
             "runtime_instance": self.runtime_instance,
-            "search": self.search_status(),
         }
-
-    def plan_mode_policy(self, action_type: str) -> dict[str, Any]:
-        decision = classify_operation(action_type)
-        return {
-            "ok": True,
-            "action_type": decision.action_type,
-            "classification": decision.classification,
-            "allowed_without_confirmation": decision.allowed_without_confirmation,
-            "requires_plan": decision.requires_plan,
-            "requires_confirmation": decision.requires_confirmation,
-            "reason": decision.reason,
-        }
-
-    def _safe_web_search(self) -> SafeWebSearchClient:
-        if self._safe_web_search_client is None:
-            self._safe_web_search_client = SafeWebSearchClient(SafeWebSearchConfig.from_runtime_config(self.config))
-        return self._safe_web_search_client
-
-    def search_status(self) -> dict[str, Any]:
-        cache = getattr(self, "_search_status_cache", None)
-        now = time.monotonic()
-        if isinstance(cache, dict):
-            cached_at = float(cache.get("cached_at_monotonic") or 0.0)
-            cached_payload = cache.get("payload")
-            if cached_at and now - cached_at <= 2.0 and isinstance(cached_payload, dict):
-                payload = dict(cached_payload)
-                payload["cached"] = True
-                payload["cached_age_ms"] = int(max(0.0, now - cached_at) * 1000)
-                return payload
-        started = time.monotonic()
-        status = self._safe_web_search().status()
-        elapsed_ms = int(max(0.0, time.monotonic() - started) * 1000)
-        status["persistent_config"] = {
-            "supported": True,
-            "path": "runtime_state/search_runtime_config.json",
-            "loaded": bool(getattr(self, "_search_persisted_config_loaded", False)),
-            "error": self._search_runtime_config_error,
-        }
-        if self._search_runtime_config_error and str(status.get("reason") or "") == "search_disabled":
-            status["reason"] = "invalid_persisted_search_config"
-            status["next_action"] = (
-                "Preview managed SearXNG setup again or remove the invalid persisted search_runtime_config.json after backing up state."
-            )
-        if str(status.get("reason") or "") == "invalid_persisted_search_config":
-            status["search_state"] = "invalid_or_untrusted_config"
-        status["cached"] = False
-        status["cached_at"] = datetime.now(timezone.utc).isoformat()
-        status["timing_ms"] = {"search_health_ms": elapsed_ms, "total_ms": elapsed_ms}
-        self._search_status_cache = {"cached_at_monotonic": time.monotonic(), "payload": dict(status)}
-        return status
-
-    def _search_runtime_config_path(self) -> Path | None:
-        explicit = str(os.getenv("AGENT_SEARCH_RUNTIME_CONFIG_PATH", "") or "").strip()
-        if explicit:
-            return Path(explicit).expanduser().resolve()
-        try:
-            return Path(self.config.db_path).expanduser().resolve().parent / "search_runtime_config.json"
-        except (OSError, RuntimeError, ValueError):
-            return None
-
-    @staticmethod
-    def _search_env_explicitly_configured() -> bool:
-        return any(name in os.environ for name in ("SEARCH_ENABLED", "SEARCH_PROVIDER", "SEARXNG_BASE_URL"))
-
-    def _apply_persisted_search_config_if_allowed(self) -> None:
-        self._search_persisted_config_loaded = False
-        if self._search_env_explicitly_configured():
-            return
-        path = self._search_runtime_config_path()
-        if path is None or not path.exists():
-            return
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            self._search_runtime_config_error = "persisted_search_config_unreadable"
-            return
-        if not isinstance(payload, dict):
-            self._search_runtime_config_error = "persisted_search_config_invalid"
-            return
-        enabled = bool(payload.get("search_enabled", False))
-        provider = str(payload.get("search_provider") or "searxng").strip().lower() or "searxng"
-        base_url = str(payload.get("searxng_base_url") or "").strip() or None
-        if enabled and (provider != "searxng" or not self._is_loopback_http_url(base_url)):
-            self._search_runtime_config_error = "persisted_search_config_untrusted"
-            return
-        self.config = replace(
-            self.config,
-            search_enabled=enabled,
-            search_provider=provider,
-            searxng_base_url=base_url,
-        )
-        self._search_persisted_config_loaded = True
-        self._search_runtime_config_error = None
-
-    def _persist_runtime_search_config(self) -> None:
-        path = self._search_runtime_config_path()
-        if path is None:
-            return
-        payload = {
-            "version": 1,
-            "search_enabled": bool(self.config.search_enabled),
-            "search_provider": str(self.config.search_provider or "searxng"),
-            "searxng_base_url": str(self.config.searxng_base_url or "") or None,
-            "setup_source": "managed_or_user_loopback",
-            "metadata_only": True,
-        }
-        if payload["searxng_base_url"] and not self._is_loopback_http_url(str(payload["searxng_base_url"])):
-            raise RuntimeError("refusing_to_persist_non_loopback_search_url")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = path.with_suffix(path.suffix + ".tmp")
-        tmp_path.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-        tmp_path.replace(path)
-
-    def managed_services_status(self, *, force_refresh: bool = False) -> dict[str, Any]:
-        now = time.monotonic()
-        if (
-            not force_refresh
-            and self._managed_services_status_cache is not None
-            and now - self._managed_services_status_cache_at <= self._managed_services_status_cache_ttl_seconds
-        ):
-            return copy.deepcopy(self._managed_services_status_cache)
-        if self._managed_local_services is None:
-            self._managed_local_services = ManagedLocalServiceDetector(
-                search_status_provider=self.search_status,
-                searxng_url_provider=lambda: self.config.searxng_base_url,
-            )
-        payload = self._managed_local_services.status()
-        self._managed_services_status_cache = copy.deepcopy(payload)
-        self._managed_services_status_cache_at = now
-        return copy.deepcopy(payload)
-
-    def _managed_service_executor(self) -> ManagedLocalServiceExecutor:
-        if self._managed_local_service_executor is None:
-            self._managed_local_service_executor = ManagedLocalServiceExecutor(managed_root=Path(self.config.db_path).expanduser().resolve().parent)
-        return self._managed_local_service_executor
-
-    def preview_managed_service_setup(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self._managed_service_executor().preview_setup_from_status(
-            service_id=str((params or {}).get("service_id") or "searxng"),
-            selected_engine=str((params or {}).get("selected_engine") or "docker"),
-        )
-
-    def execute_managed_service_setup(self, params: dict[str, Any]) -> dict[str, Any]:
-        params = dict(params or {})
-        plan = self._search_setup_plan_from_pending(params)
-        return self._execute_search_setup_plan(plan)
-
-    def _build_search_setup_execution_plan(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        payload = dict(payload or {})
-        base_url = str(payload.get("searxng_base_url") or payload.get("base_url") or "").strip()
-        if base_url:
-            if not self._is_loopback_http_url(base_url):
-                return {
-                    "ok": False,
-                    "blocked": True,
-                    "blocked_reason": "searxng_endpoint_not_loopback",
-                    "reason": "Managed search setup only accepts http://127.0.0.1, http://localhost, or http://[::1] endpoints.",
-                    "next_action": "Run your trusted SearXNG locally and provide its loopback URL, or use the managed container plan.",
-                    "mutated": False,
-                }
-            plan = {
-                "service_id": "searxng",
-                "setup_mode": "user_provided_url",
-                "provider": "searxng",
-                "base_url": self._redact_url(base_url),
-                "raw_base_url": base_url,
-                "bind_address": urllib.parse.urlparse(base_url).hostname or "127.0.0.1",
-                "port": urllib.parse.urlparse(base_url).port,
-                "state_config_scope": "runtime_config",
-                "settings_changed": ["SEARCH_ENABLED", "SEARCH_PROVIDER", "SEARXNG_BASE_URL"],
-                "rollback_scope": "restore previous runtime search config only",
-                "safety_notes": [
-                    "Search remains metadata-only.",
-                    "No page fetching, browser automation, downloads, or pack install runs from search.",
-                ],
-            }
-            return self._search_setup_execution_preview(plan)
-
-        services = self.managed_services_status()
-        services_rows = services.get("services") if isinstance(services.get("services"), list) else []
-        searxng = next((row for row in services_rows if isinstance(row, dict) and row.get("service_id") == "searxng"), {})
-        try:
-            status = self.search_status()
-        except Exception:  # noqa: BLE001 - setup planning can continue without status.
-            status = {}
-        if bool(status.get("enabled")) and bool(status.get("endpoint_configured")) and bool(status.get("available")):
-            base_url_safe = str(status.get("base_url") or self._redact_url(self.config.searxng_base_url or "")).strip()
-            return {
-                "ok": True,
-                "requires_confirmation": False,
-                "blocked": False,
-                "plan": {
-                    "service_id": "searxng",
-                    "setup_mode": "already_configured",
-                    "provider": "searxng",
-                    "selected_engine": str(services.get("preferred_engine") or searxng.get("preferred_engine") or "podman"),
-                    "base_url": base_url_safe,
-                    "search_state": str(status.get("search_state") or "configured_running"),
-                    "state_config_scope": "runtime_config",
-                    "settings_changed": [],
-                    "rollback_scope": "no mutation planned",
-                    "safety_notes": [
-                        "Search remains metadata-only.",
-                        "No page fetching, browser automation, downloads, or pack install runs from search.",
-                    ],
-                },
-                "search_status": status,
-                "services_status": services,
-                "mutated": False,
-            }
-        engine_choice = self._select_searxng_setup_engine(
-            services,
-            searxng,
-            allow_docker_fallback=bool(payload.get("allow_docker_fallback", False)),
-        )
-        engine = str(engine_choice.get("selected_engine") or "")
-        if str(engine_choice.get("setup_mode") or "") == "podman_prerequisite":
-            return self._podman_prerequisite_execution_preview(self._build_podman_prerequisite_plan(engine_choice))
-        if not engine:
-            return {
-                "ok": False,
-                "blocked": True,
-                "blocked_reason": "managed_service_runtime_unavailable",
-                "reason": str(engine_choice.get("reason") or "Neither rootless Podman nor Docker is available to this runtime."),
-                "next_action": str(engine_choice.get("next_action") or "Install/run SearXNG yourself and provide SEARXNG_BASE_URL, or install rootless Podman manually and retry the setup plan."),
-                "mutated": False,
-            }
-        preview = self.preview_managed_service_setup({"service_id": "searxng", "selected_engine": engine})
-        if not bool(preview.get("ok")):
-            return {
-                "ok": False,
-                "blocked": True,
-                "blocked_reason": str(preview.get("blocked_reason") or "managed_service_setup_unavailable"),
-                "reason": str(preview.get("error") or preview.get("blocked_reason") or "SearXNG setup plan could not be prepared."),
-                "setup_preview": preview,
-                "mutated": False,
-            }
-        plan = dict(preview.get("plan") if isinstance(preview.get("plan"), dict) else {})
-        setup_plan = {
-            "service_id": "searxng",
-            "setup_mode": "managed_container",
-            "provider": "searxng",
-            "selected_engine": engine,
-            "preferred_engine": "podman",
-            "fallback_reason": engine_choice.get("fallback_reason"),
-            "rootless_expected": engine_choice.get("rootless_expected"),
-            "requires_docker_fallback_confirmation": bool(engine_choice.get("requires_docker_fallback_confirmation", False)),
-            "engine_warning": engine_choice.get("engine_warning"),
-            "podman_found": bool(services.get("podman_found") or services.get("podman_available") or searxng.get("podman_found") or searxng.get("podman_available")),
-            "podman_path": services.get("podman_path") or searxng.get("podman_path"),
-            "podman_version": services.get("podman_version") or searxng.get("podman_version"),
-            "podman_rootless": services.get("podman_rootless", searxng.get("podman_rootless")),
-            "detection_source": services.get("detection_source") or searxng.get("detection_source"),
-            "image": plan.get("image"),
-            "container_name": plan.get("container_name"),
-            "loopback_bind": plan.get("loopback_bind"),
-            "bind_address": "127.0.0.1",
-            "port": int(plan.get("host_port") or 8080),
-            "health_url": plan.get("health_url"),
-            "state_config_scope": "runtime_config",
-            "settings_changed": ["SEARCH_ENABLED", "SEARCH_PROVIDER", "SEARXNG_BASE_URL"],
-            "state_files_touched": ["memory/local_services/searxng/settings.yml"],
-            "volume_mount": True,
-            "config_seeded": True,
-            "approved_volume_path": "memory/local_services/searxng",
-            "config_purpose": "enable_json_output_for_safe_metadata_search",
-            "service_name": "personal-agent-searxng",
-            "rollback_scope": "remove only the owned personal-agent-searxng container created by this action and restore previous runtime search config",
-            "safety_notes": [
-                "The service binds to 127.0.0.1 only.",
-                "The setup seeds a minimal approved SearXNG config before mounting /etc/searxng.",
-                "The seeded config enables JSON output for metadata-only safe search.",
-                "No system packages are installed automatically.",
-                "Search remains metadata-only.",
-            ],
-            "executor_pending": {
-                "service_id": "searxng",
-                "selected_engine": engine,
-                "action": "preview_only",
-                "approved_image": plan.get("image"),
-                "approved_container_name": plan.get("container_name"),
-                "loopback_bind": plan.get("loopback_bind"),
-                "volume_mount": True,
-                "config_seeded": True,
-                "approved_volume_path": "memory/local_services/searxng",
-                "config_purpose": "enable_json_output_for_safe_metadata_search",
-                "health_url": plan.get("health_url"),
-            },
-        }
-        if setup_plan["engine_warning"]:
-            setup_plan["safety_notes"].append(str(setup_plan["engine_warning"]))
-        return self._search_setup_execution_preview(setup_plan)
-
-    def _build_podman_prerequisite_execution_plan(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        _ = payload
-        return self._podman_prerequisite_execution_preview(
-            self._build_podman_prerequisite_plan({"reason": "Podman is required before managed SearXNG setup."})
-        )
-
-    def search_setup_plan(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        request = dict(payload or {})
-        raw = self._build_search_setup_execution_plan(request)
-        raw_plan = raw.get("_execution_plan") or raw.get("plan") or raw
-        operation = (
-            "search.prerequisite"
-            if str(raw_plan.get("setup_mode") or "") == "podman_prerequisite"
-            else "search.searxng.repair"
-        )
-        _ok, body = self.route_pack_search_mutation(operation, request)
-        return body
-
-    def podman_prerequisite_plan(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        _ok, body = self.route_pack_search_mutation("search.prerequisite", dict(payload or {}))
-        return body
-
-    def apply_podman_prerequisite(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        _ok, body = self.route_pack_search_mutation("search.prerequisite", dict(payload or {}))
-        return body
-
-    def _build_podman_prerequisite_plan(self, engine_choice: dict[str, Any]) -> dict[str, Any]:
-        apt_get = self._prerequisite_command_finder("apt-get")
-        sudo = self._prerequisite_command_finder("sudo")
-        running_as_root = self._prerequisite_running_as_root()
-        command = ["apt-get", "install", "-y", "podman"] if running_as_root else ["sudo", "apt-get", "install", "-y", "podman"]
-        return {
-            "service_id": "searxng",
-            "setup_mode": "podman_prerequisite",
-            "prerequisite": "podman",
-            "preferred_engine": "podman",
-            "selected_engine": None,
-            "package_manager": "apt-get" if apt_get else None,
-            "package_name": "podman",
-            "commands": [command],
-            "privilege_required": not running_as_root,
-            "privilege_path": "sudo apt-get" if not running_as_root else "root apt-get",
-            "sudo_password_storage": False,
-            "podman_required": True,
-            "docker_fallback_available": bool(engine_choice.get("docker_fallback_available", False)),
-            "reason": str(engine_choice.get("reason") or "Podman is required before managed SearXNG setup."),
-            "next_after_verified": "Preview SearXNG setup again; it should select rootless Podman.",
-            "safety_notes": [
-                "This is only a Podman prerequisite plan for SearXNG.",
-                "It must not install Docker, SearXNG, or arbitrary packages.",
-                "It must not store sudo passwords.",
-                "Search remains disabled until SearXNG itself is verified.",
-            ],
-        }
-
-    def _podman_prerequisite_execution_preview(self, plan: dict[str, Any]) -> dict[str, Any]:
-        return {"ok": True, "requires_confirmation": True, "plan": dict(plan)}
-
-    def _execute_podman_prerequisite_plan(self, plan: dict[str, Any]) -> dict[str, Any]:
-        journal = ManagedActionJournal(action_type="podman_prerequisite_setup", target="searxng:podman")
-        for step in ("preflight_podman_install", "install_podman_package", "verify_podman_present", "verify_rootless_podman"):
-            journal.plan_step(step, resource="podman")
-        if str(plan.get("setup_mode") or "") != "podman_prerequisite" or str(plan.get("package_name") or "") != "podman":
-            journal.record_step("preflight_podman_install", ok=False, resource="podman", reason="invalid_plan")
-            journal.mark_verification(ok=False, reason="invalid_plan")
-            journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
-            self._persist_managed_action_journal(journal, status="failed")
-            return {"ok": False, "error": "invalid_podman_prerequisite_plan", "mutated": False, "managed_action_journal": journal.to_dict()}
-        if sys.platform != "linux":
-            journal.record_step("preflight_podman_install", ok=False, resource="podman", reason="unsupported_platform")
-            journal.mark_verification(ok=False, reason="unsupported_platform")
-            journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
-            self._persist_managed_action_journal(journal, status="failed")
-            return {"ok": False, "error": "podman_prerequisite_unsupported_platform", "mutated": False, "managed_action_journal": journal.to_dict()}
-        apt_get = self._prerequisite_command_finder("apt-get")
-        sudo = self._prerequisite_command_finder("sudo")
-        running_as_root = self._prerequisite_running_as_root()
-        if not apt_get:
-            journal.record_step("preflight_podman_install", ok=False, resource="apt-get", reason="apt_get_missing")
-            journal.mark_verification(ok=False, reason="apt_get_missing")
-            journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
-            self._persist_managed_action_journal(journal, status="failed")
-            return {"ok": False, "error": "apt_get_missing", "next_action": "Install Podman with your system package manager, then retry SearXNG setup.", "mutated": False, "managed_action_journal": journal.to_dict()}
-        if not running_as_root and not sudo:
-            journal.record_step("preflight_podman_install", ok=False, resource="sudo", reason="sudo_missing")
-            journal.mark_verification(ok=False, reason="sudo_missing")
-            journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
-            self._persist_managed_action_journal(journal, status="failed")
-            return {"ok": False, "error": "sudo_missing", "next_action": "Install Podman manually or provide sudo/polkit access, then retry.", "mutated": False, "managed_action_journal": journal.to_dict()}
-        if not running_as_root:
-            journal.record_step("preflight_podman_install", ok=False, resource="sudo", reason="elevated_handoff_required")
-            journal.mark_verification(ok=False, reason="elevated_handoff_required")
-            journal.mark_rollback(ok=True, attempted=False, summary="No mutation started; elevated terminal handoff required.")
-            self._persist_managed_action_journal(journal, status="planned")
-            self._persist_managed_action_journal(journal, status="failed")
-            return {
-                "ok": False,
-                "error": "elevated_handoff_required",
-                "error_kind": "elevated_handoff_required",
-                "reason": "Podman installation requires interactive privilege, and the background API service cannot safely handle sudo prompts.",
-                "mutated": False,
-                "elevated_handoff_required": True,
-                "handoff": self._podman_prerequisite_elevated_handoff(),
-                "next_action": "Run the handoff command in a visible terminal, then retry /search/setup/plan.",
-                "managed_action_journal": journal.to_dict(),
-            }
-        argv = [apt_get, "install", "-y", "podman"] if running_as_root else [sudo, apt_get, "install", "-y", "podman"]
-        journal.record_step("preflight_podman_install", ok=True, resource="podman", command=" ".join(Path(part).name if index < 2 else str(part) for index, part in enumerate(argv)))
-        self._persist_managed_action_journal(journal, status="planned")
-        self._persist_managed_action_journal(journal, status="running")
-        try:
-            result = self._prerequisite_runner(argv, capture_output=True, text=True, timeout=600, shell=False)
-        except Exception as exc:  # noqa: BLE001 - safe failure copy uses class only.
-            journal.record_step("install_podman_package", ok=False, resource="podman", error=exc.__class__.__name__)
-            journal.mark_verification(ok=False, reason="podman_install_execution_failed")
-            journal.mark_rollback(ok=True, attempted=False, summary="No automatic rollback for system package install.")
-            self._persist_managed_action_journal(journal, status="failed")
-            return {"ok": False, "error": "podman_install_execution_failed", "next_action": "Install Podman manually, then retry SearXNG setup.", "mutated": False, "managed_action_journal": journal.to_dict()}
-        install_ok = int(getattr(result, "returncode", 1) or 0) == 0
-        journal.record_step("install_podman_package", ok=install_ok, resource="podman", returncode=int(getattr(result, "returncode", 1) or 0))
-        if not install_ok:
-            journal.mark_verification(ok=False, reason="podman_install_failed")
-            journal.mark_rollback(ok=True, attempted=False, summary="No automatic rollback for system package install.")
-            self._persist_managed_action_journal(journal, status="failed")
-            return {"ok": False, "error": "podman_install_failed", "returncode": int(getattr(result, "returncode", 1) or 0), "next_action": "Read the package-manager error, install Podman manually if needed, then retry.", "mutated": False, "managed_action_journal": journal.to_dict()}
-        podman_path = self._prerequisite_command_finder("podman")
-        present = bool(podman_path)
-        journal.record_step("verify_podman_present", ok=present, resource="podman")
-        rootless = self._verify_rootless_podman(podman_path)
-        journal.record_step("verify_rootless_podman", ok=rootless is True, resource="podman", rootless=rootless)
-        verified = present and rootless is True
-        journal.mark_verification(ok=verified, podman_present=present, rootless_podman=rootless)
-        journal.mark_rollback(ok=True, attempted=False, summary="No automatic rollback for system package install.")
-        self._persist_managed_action_journal(journal, status="verified" if verified else "recovery_needed")
-        if not verified:
-            return {"ok": False, "error": "rootless_podman_not_usable" if present else "podman_not_found_after_install", "next_action": "Verify rootless Podman for this user, then retry SearXNG setup.", "mutated": True, "managed_action_journal": journal.to_dict()}
-        self._managed_local_services = None
-        self._managed_services_status_cache = None
-        self._managed_services_status_cache_at = 0.0
-        return {"ok": True, "mutated": True, "podman_present": True, "rootless_podman": True, "next_action": "Preview SearXNG setup again; it should select Podman.", "managed_action_journal": journal.to_dict()}
-
-    @staticmethod
-    def _prerequisite_running_as_root() -> bool:
-        return hasattr(os, "geteuid") and os.geteuid() == 0
-
-    @staticmethod
-    def _podman_prerequisite_elevated_handoff() -> dict[str, Any]:
-        command = ["sudo", "apt-get", "install", "-y", "podman"]
-        return {
-            "kind": "visible_terminal",
-            "bounded_action": "install_podman_prerequisite_for_searxng",
-            "command": command,
-            "command_string": "sudo apt-get install -y podman",
-            "allowed_commands": [command],
-            "why_privilege_is_required": "Installing the Podman system package requires operating-system package-manager privileges.",
-            "sudo_password_storage": False,
-            "will_install_searxng": False,
-            "will_enable_search": False,
-            "after_command_verification": [
-                "command -v podman",
-                "podman --version",
-                "podman info --format '{{.Host.Security.Rootless}}'",
-            ],
-            "verification_commands": [
-                ["podman", "--version"],
-                ["podman", "info", "--format", "{{.Host.Security.Rootless}}"],
-            ],
-            "retry_endpoint": "POST /search/setup/plan",
-            "retry_expectation": "After rootless Podman is available, the SearXNG setup plan should use setup_mode=managed_container and selected_engine=podman.",
-        }
-
-    def _verify_rootless_podman(self, podman_path: str | None) -> bool | None:
-        if not podman_path:
-            return False
-        try:
-            result = self._prerequisite_runner(
-                [podman_path, "info", "--format", "{{.Host.Security.Rootless}}"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                shell=False,
-            )
-        except Exception:
-            return None
-        if int(getattr(result, "returncode", 1) or 0) != 0:
-            return None
-        output = str(getattr(result, "stdout", "") or "").strip().lower()
-        if output in {"true", "1", "yes"}:
-            return True
-        if output in {"false", "0", "no"}:
-            return False
-        return None
-
-    @staticmethod
-    def _select_searxng_setup_engine(
-        services: dict[str, Any],
-        searxng: dict[str, Any],
-        *,
-        allow_docker_fallback: bool = False,
-    ) -> dict[str, Any]:
-        podman_available = bool(services.get("podman_available") or searxng.get("podman_available"))
-        docker_available = bool(services.get("docker_available") or searxng.get("docker_available"))
-        podman_rootless = services.get("podman_rootless", searxng.get("podman_rootless"))
-        docker_rootless = services.get("docker_rootless", searxng.get("docker_rootless"))
-        if podman_available and podman_rootless is True:
-            return {
-                "selected_engine": "podman",
-                "preferred_engine": "podman",
-                "rootless_expected": True,
-                "requires_docker_fallback_confirmation": False,
-            }
-        if podman_available and not allow_docker_fallback:
-            return {
-                "selected_engine": "",
-                "preferred_engine": "podman",
-                "reason": "Podman is installed, but rootless Podman was not confirmed.",
-                "next_action": "Retry after the rootless Podman status check finishes, enable rootless Podman for this user, or provide a trusted loopback SEARXNG_BASE_URL.",
-                "podman_available": True,
-                "podman_rootless": podman_rootless,
-                "docker_available": docker_available,
-                "docker_fallback_available": docker_available,
-            }
-        if docker_available:
-            if not allow_docker_fallback:
-                return {
-                    "selected_engine": "",
-                    "preferred_engine": "podman",
-                    "setup_mode": "podman_prerequisite",
-                    "reason": "Podman is missing or rootless Podman was not confirmed.",
-                    "next_action": "Preview and confirm Podman prerequisite setup, or explicitly request the Docker fallback plan.",
-                    "docker_available": True,
-                    "docker_fallback_available": True,
-                }
-            if not podman_available:
-                fallback_reason = "rootless_podman_not_found"
-                warning = "Podman was not found. Docker is available, but it may use a root-level daemon."
-            else:
-                fallback_reason = "rootless_podman_not_confirmed"
-                warning = "Rootless Podman was not confirmed. Docker is available, but it may use a root-level daemon."
-            return {
-                "selected_engine": "docker",
-                "preferred_engine": "podman",
-                "fallback_reason": fallback_reason,
-                "rootless_expected": bool(docker_rootless) if docker_rootless is not None else None,
-                "requires_docker_fallback_confirmation": True,
-                "engine_warning": warning,
-            }
-        return {
-            "selected_engine": "",
-            "preferred_engine": "podman",
-            "setup_mode": "podman_prerequisite",
-            "reason": "Rootless Podman was not found and Docker is not available.",
-            "next_action": "Preview and confirm Podman prerequisite setup, or run SearXNG yourself and provide a trusted loopback SEARXNG_BASE_URL.",
-        }
-
-    def apply_search_setup(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        request = dict(payload or {})
-        plan = request.get("mutation_plan") if isinstance(request.get("mutation_plan"), dict) else {}
-        operation = (
-            "search.prerequisite"
-            if str(plan.get("capability_id") or "") == "search.prerequisite.install"
-            else "search.searxng.repair"
-        )
-        _ok, body = self.route_pack_search_mutation(operation, request)
-        return body
-
-    def _search_setup_execution_preview(self, plan: dict[str, Any]) -> dict[str, Any]:
-        public_plan = {key: value for key, value in plan.items() if key != "raw_base_url"}
-        return {"ok": True, "requires_confirmation": True, "plan": public_plan, "_execution_plan": dict(plan)}
-
-    @staticmethod
-    def _search_setup_plan_from_pending(params: dict[str, Any]) -> dict[str, Any]:
-        health_url = str(params.get("health_url") or "http://127.0.0.1:8080")
-        bind = str(params.get("loopback_bind") or "127.0.0.1:8080:8080")
-        try:
-            host_port = int(bind.split(":", 2)[1])
-        except (IndexError, ValueError):
-            host_port = 8080
-        return {
-            "service_id": "searxng",
-            "setup_mode": "managed_container",
-            "provider": "searxng",
-            "selected_engine": str(params.get("selected_engine") or "docker"),
-            "image": str(params.get("approved_image") or "docker.io/searxng/searxng:latest"),
-            "container_name": str(params.get("approved_container_name") or "personal-agent-searxng"),
-            "loopback_bind": bind,
-            "bind_address": "127.0.0.1",
-            "port": host_port,
-            "health_url": health_url,
-            "settings_changed": ["SEARCH_ENABLED", "SEARCH_PROVIDER", "SEARXNG_BASE_URL"],
-            "executor_pending": {
-                "service_id": "searxng",
-                "selected_engine": str(params.get("selected_engine") or "docker"),
-                "action": "preview_only",
-                "approved_image": str(params.get("approved_image") or "docker.io/searxng/searxng:latest"),
-                "approved_container_name": str(params.get("approved_container_name") or "personal-agent-searxng"),
-                "loopback_bind": bind,
-                "volume_mount": True,
-                "config_seeded": True,
-                "approved_volume_path": "memory/local_services/searxng",
-                "config_purpose": "enable_json_output_for_safe_metadata_search",
-                "health_url": health_url,
-            },
-        }
-
-    def _execute_search_setup_plan(self, plan: dict[str, Any]) -> dict[str, Any]:
-        journal = ManagedActionJournal(action_type="searxng_managed_service_setup", target="searxng")
-        for step in ("preflight_setup_plan", "apply_service_setup", "configure_runtime_search", "verify_search_status"):
-            journal.plan_step(step, resource="searxng")
-        previous = {
-            "search_enabled": bool(self.config.search_enabled),
-            "search_provider": str(self.config.search_provider or "searxng"),
-            "searxng_base_url": str(self.config.searxng_base_url or "") or None,
-        }
-        journal.record_step("preflight_setup_plan", ok=True, resource="searxng", setup_mode=str(plan.get("setup_mode") or ""))
-        self._persist_managed_action_journal(journal, status="planned")
-        self._persist_managed_action_journal(journal, status="running")
-        setup_mode = str(plan.get("setup_mode") or "").strip()
-        base_url = str(plan.get("raw_base_url") or plan.get("health_url") or "").strip()
-        service_result: dict[str, Any] = {"ok": True, "mutated": False}
-        if setup_mode == "managed_container":
-            pending = dict(plan.get("executor_pending") if isinstance(plan.get("executor_pending"), dict) else {})
-            service_result = self._managed_service_executor().execute_from_pending(pending).to_dict()
-            journal.record_step("apply_service_setup", ok=bool(service_result.get("ok")), resource="personal-agent-searxng", engine=str(plan.get("selected_engine") or ""))
-            if bool(service_result.get("did_run")):
-                journal.record_created_resource("container", "personal-agent-searxng", engine=str(plan.get("selected_engine") or ""))
-            if not bool(service_result.get("ok")):
-                rollback_ok = bool(service_result.get("rollback_ok", not service_result.get("rollback_attempted")))
-                readiness_failure = str(service_result.get("blocked_reason") or "") in {
-                    "managed_service_health_check_failed",
-                    "managed_service_existing_container_unhealthy",
-                    "managed_service_startup_pending",
-                }
-                initial_failure_stage = "readiness" if readiness_failure else "setup"
-                failure_stage = "rollback" if bool(service_result.get("cleanup_incomplete")) else initial_failure_stage
-                journal.mark_verification(ok=False, reason=str(service_result.get("blocked_reason") or "service_setup_failed"))
-                journal.mark_rollback(ok=rollback_ok, attempted=bool(service_result.get("rollback_attempted")), summary=str(service_result.get("error") or "Service setup failed."))
-                self._persist_managed_action_journal(
-                    journal,
-                    status="rolled_back" if rollback_ok else "recovery_needed",
-                    recovery_hint="Inspect only the personal-agent-searxng container if cleanup was incomplete.",
-                )
-                response = dict(service_result)
-                response.update({
-                    "ok": False,
-                    "did_configure": False,
-                    "failure_stage": failure_stage,
-                    "initial_failure_stage": initial_failure_stage if failure_stage == "rollback" else None,
-                    "managed_action_journal": journal.to_dict(),
-                })
-                return response
-            service_plan = service_result.get("plan") if isinstance(service_result.get("plan"), dict) else {}
-            if str(service_plan.get("health_url") or "").strip():
-                base_url = str(service_plan.get("health_url") or "").strip()
-        else:
-            journal.record_step("apply_service_setup", ok=True, resource="user_provided_searxng_url", setup_mode=setup_mode)
-        if not self._is_loopback_http_url(base_url):
-            journal.record_step("configure_runtime_search", ok=False, resource="runtime_search_config", reason="non_loopback_url")
-            journal.mark_verification(ok=False, reason="non_loopback_url")
-            journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
-            self._persist_managed_action_journal(journal, status="failed")
-            return {"ok": False, "error": "searxng_endpoint_not_loopback", "mutated": False, "managed_action_journal": journal.to_dict()}
-        self._set_runtime_search_config(enabled=True, provider="searxng", base_url=base_url)
-        journal.record_changed_resource("runtime_search_config", "search", rollback_supported=True)
-        journal.record_step("configure_runtime_search", ok=True, resource="runtime_search_config", settings_changed=["SEARCH_ENABLED", "SEARCH_PROVIDER", "SEARXNG_BASE_URL"])
-        status = self.search_status()
-        verified = bool(status.get("available")) and bool(status.get("enabled")) and bool(status.get("endpoint_configured"))
-        journal.record_step("verify_search_status", ok=verified, resource="/search/status", reason=str(status.get("reason") or "ok"))
-        journal.mark_verification(ok=verified, available=bool(status.get("available")), provider=str(status.get("provider") or ""))
-        if verified:
-            journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
-            self._persist_managed_action_journal(journal, status="verified")
-            response = dict(service_result)
-            response.update({"ok": True, "did_configure": True, "search_status": status, "managed_action_journal": journal.to_dict()})
-            return response
-        self._set_runtime_search_config(
-            enabled=bool(previous["search_enabled"]),
-            provider=str(previous["search_provider"]),
-            base_url=previous["searxng_base_url"],
-        )
-        rollback_ok = True
-        cleanup_result: dict[str, Any] = {}
-        journal.record_rollback_step("restore_runtime_search_config", ok=True, resource="runtime_search_config")
-        rollback_summary = "Restored previous runtime search configuration."
-        if setup_mode == "managed_container" and bool(service_result.get("did_run")):
-            try:
-                cleanup_result = self._managed_service_executor().stop_from_pending(
-                    {
-                        "service_id": "searxng",
-                        "selected_engine": str(plan.get("selected_engine") or "docker"),
-                        "action": "stop_preview_only",
-                        "approved_container_name": "personal-agent-searxng",
-                    }
-                ).to_dict()
-                cleanup_ok = bool(cleanup_result.get("ok"))
-            except Exception as exc:  # noqa: BLE001 - rollback records recovery-needed safely.
-                cleanup_result = {"ok": False, "error": exc.__class__.__name__}
-                cleanup_ok = False
-            rollback_ok = rollback_ok and cleanup_ok
-            journal.record_rollback_step(
-                "remove_owned_searxng_container_after_verification_failure",
-                ok=cleanup_ok,
-                resource="personal-agent-searxng",
-            )
-            rollback_summary += (
-                " Removed the owned SearXNG container created by this setup."
-                if cleanup_ok
-                else " Could not fully remove the owned SearXNG container created by this setup."
-            )
-        journal.mark_rollback(ok=rollback_ok, attempted=True, summary=rollback_summary)
-        self._persist_managed_action_journal(
-            journal,
-            status="rolled_back" if rollback_ok else "recovery_needed",
-            recovery_hint=None if rollback_ok else "Inspect only the personal-agent-searxng container; do not remove unrelated containers.",
-        )
-        response = dict(service_result)
-        response.update(
-            {
-                "ok": False,
-                "did_configure": False,
-                "blocked_reason": "search_status_verification_failed",
-                "failure_stage": "readiness" if rollback_ok else "rollback",
-                "initial_failure_stage": None if rollback_ok else "readiness",
-                "error": (
-                    "SearXNG readiness verification failed; previous search settings and owned setup resources were restored."
-                    if rollback_ok
-                    else "SearXNG readiness verification failed, and rollback of the owned setup resources did not complete."
-                ),
-                "search_status": status,
-                "cleanup_result": cleanup_result,
-                "rollback_ok": rollback_ok,
-                "managed_action_journal": journal.to_dict(),
-            }
-        )
-        return response
-
-    def _set_runtime_search_config(self, *, enabled: bool, provider: str, base_url: str | None) -> None:
-        self.config = replace(self.config, search_enabled=bool(enabled), search_provider=str(provider or "searxng"), searxng_base_url=base_url)
-        self._persist_runtime_search_config()
-        self._safe_web_search_client = None
-        self._search_status_cache = None
-        self._managed_local_services = None
-        self._managed_services_status_cache = None
-        self._managed_services_status_cache_at = 0.0
-
-    @staticmethod
-    def _is_loopback_http_url(url: str | None) -> bool:
-        parsed = urllib.parse.urlparse(str(url or "").strip())
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            return False
-        host = parsed.hostname.strip().lower()
-        if host == "localhost":
-            return True
-        try:
-            return ipaddress.ip_address(host).is_loopback
-        except ValueError:
-            return False
-
-    @staticmethod
-    def _redact_url(url: str) -> str:
-        parsed = urllib.parse.urlparse(str(url or "").strip())
-        if not parsed.scheme or not parsed.netloc:
-            return "<configured>"
-        host = parsed.hostname or ""
-        port = f":{parsed.port}" if parsed.port else ""
-        return f"{parsed.scheme}://{host}{port}{parsed.path.rstrip('/')}"
-
-    def preview_managed_service_stop(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self._managed_service_executor().preview_stop_from_status(
-            service_id=str((params or {}).get("service_id") or "searxng"),
-            selected_engine=str((params or {}).get("selected_engine") or "docker"),
-        )
-
-    def execute_managed_service_stop(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self._managed_service_executor().stop_from_pending(params).to_dict()
-
-    def search_query(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
-        query = str((payload or {}).get("query") or "").strip()
-        max_results_raw = (payload or {}).get("max_results")
-        try:
-            max_results = int(max_results_raw) if max_results_raw is not None else None
-        except (TypeError, ValueError):
-            max_results = None
-        result = self._safe_web_search().search(query, max_results=max_results)
-        return bool(result.ok), result.to_dict()
 
     def update_config(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         if "routing_mode" not in payload:
@@ -13893,46 +11146,9 @@ class AgentRuntime:
         payload = {"message": str(outbound_message or "").strip()}
         telegram_descriptor = telegram_target.target
         local_descriptor = local_target.target
-        plan_fingerprint = hashlib.sha256(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "message_sha256": hashlib.sha256(payload["message"].encode("utf-8", errors="replace")).hexdigest(),
-                    "telegram_chat_id_sha256": hashlib.sha256(str(chat_id or "").encode("utf-8", errors="replace")).hexdigest(),
-                    "allow_remote": remote_allowed,
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()
-        operation_id = f"notification-{uuid.uuid4().hex[:12]}"
-        telegram_context = TrustedInvocationContext(
-            capability_id="notification.external.send",
-            executor_id="operator.notification.telegram.send.v1",
-            authorization_decision_id=f"authz-{uuid.uuid4().hex[:12]}",
-            plan_fingerprint=plan_fingerprint,
-            operation_id=operation_id,
-            caller_type="core",
-            caller_id="autopilot_notification",
-            source_module="agent.api_server",
-            source_surface="autopilot_notification",
-            target_fingerprint=plan_fingerprint,
-        ).to_dict()
-        local_context = TrustedInvocationContext(
-            capability_id="notification.local.send",
-            executor_id="operator.notification.local.send.v1",
-            authorization_decision_id=f"authz-{uuid.uuid4().hex[:12]}",
-            plan_fingerprint=plan_fingerprint,
-            operation_id=operation_id,
-            caller_type="core",
-            caller_id="autopilot_notification",
-            source_module="agent.api_server",
-            source_surface="autopilot_notification",
-            target_fingerprint=plan_fingerprint,
-        ).to_dict()
 
         if telegram_descriptor.enabled and telegram_descriptor.configured:
-            result = telegram_target.deliver(payload, trusted_invocation_context=telegram_context, plan_fingerprint=plan_fingerprint)
+            result = telegram_target.deliver(payload)
             if result.ok:
                 if isinstance(fixit_prompt_state, dict):
                     self._audit_telegram_fixit_prompt_shown(
@@ -13942,7 +11158,7 @@ class AgentRuntime:
                         step=str(fixit_prompt_state.get("step") or ""),
                     )
                 return result
-            fallback = local_target.deliver(payload, trusted_invocation_context=local_context, plan_fingerprint=plan_fingerprint)
+            fallback = local_target.deliver(payload)
             if fallback.ok:
                 return DeliveryResult(
                     ok=True,
@@ -13953,7 +11169,7 @@ class AgentRuntime:
             return result
 
         if local_descriptor.enabled and local_descriptor.configured:
-            return local_target.deliver(payload, trusted_invocation_context=local_context, plan_fingerprint=plan_fingerprint)
+            return local_target.deliver(payload)
 
         return DeliveryResult(
             ok=False,
@@ -14063,15 +11279,6 @@ class AgentRuntime:
         outbound_message, _fixit_prompt_state = self._autopilot_notification_message_and_fixit(raw_message)
         return outbound_message
 
-    @staticmethod
-    def _notification_failure_message(action_label: str, rollback_ok: bool, rollback_summary: str) -> str:
-        restored = "Previous local notification state was restored." if rollback_ok else "Previous local notification state may still need attention."
-        remaining = str(rollback_summary or "check notification history and delivery configuration").strip()
-        return (
-            f"The {action_label} did not finish. {restored} "
-            f"Attention: {remaining}. Safe next step: check notification policy/status and retry once."
-        )
-
     def _process_scheduler_notification_cycle(
         self,
         *,
@@ -14170,7 +11377,7 @@ class AgentRuntime:
                 and last_subject_sent_ts > 0
                 and (now_epoch - last_subject_sent_ts) < _SAFE_MODE_BLOCKED_DEDUPE_SECONDS
             ):
-                self._notification_store.append_verified(
+                self._notification_store.append(
                     ts=now_epoch,
                     message=message,
                     dedupe_hash=dedupe_hash,
@@ -14231,7 +11438,7 @@ class AgentRuntime:
                 and last_paused_health_sent_ts > 0
                 and (now_epoch - last_paused_health_sent_ts) < _SAFE_MODE_PAUSED_HEALTH_NOTIFY_SECONDS
             ):
-                self._notification_store.append_verified(
+                self._notification_store.append(
                     ts=now_epoch,
                     message=message,
                     dedupe_hash=dedupe_hash,
@@ -14330,25 +11537,10 @@ class AgentRuntime:
             else:
                 reason = "disabled"
         else:
-            delivery_operation_id = f"scheduled-notification:{dedupe_hash}"
-            delivery_reserved = self._notification_store.reserve_delivery(
-                operation_id=delivery_operation_id,
-                transport="telegram_or_local",
-                target_fingerprint=stable_fingerprint({"telegram_enabled": bool(self.config.telegram_enabled), "allow_remote": remote_send_allowed}),
-                content_fingerprint=dedupe_hash,
+            delivery_result = self._deliver_autopilot_notification(
+                message=message,
+                allow_remote=remote_send_allowed,
             )
-            if delivery_reserved and self._notification_store.mark_delivery_executing(delivery_operation_id):
-                delivery_result = self._deliver_autopilot_notification(
-                    message=message,
-                    allow_remote=remote_send_allowed,
-                )
-                self._notification_store.finish_delivery(
-                    delivery_operation_id,
-                    state="succeeded" if delivery_result.ok else "failed",
-                    receipt={"delivered_to": delivery_result.delivered_to, "reason": delivery_result.reason, "error_kind": delivery_result.error_kind},
-                )
-            else:
-                delivery_result = DeliveryResult(ok=False, delivered_to="none", reason="delivery_identity_already_used", error_kind="delivery_replay_blocked")
             delivered_to = str(delivery_result.delivered_to or "none")
             error_kind = delivery_result.error_kind
             if delivery_result.ok:
@@ -14368,37 +11560,7 @@ class AgentRuntime:
                     reason = "permission_required"
                     error_kind = "permission_required"
 
-        before_count = int((self._notification_store.status() or {}).get("stored_count") or 0)
-        journal = ManagedActionJournal(action_type="llm.notifications.send", target="autopilot_notifications")
-        journal.plan_step("preflight_notification_target", resource="autopilot_notifications")
-        journal.plan_step("deliver_notification", resource="autopilot_notifications")
-        journal.plan_step("record_notification_history", resource="autopilot_notifications")
-        journal.plan_step("verify_notification_history", resource="autopilot_notifications")
-        journal.record_step(
-            "preflight_notification_target",
-            ok=True,
-            resource="autopilot_notifications",
-            trigger=trigger,
-            before_count=before_count,
-            message_hash=dedupe_hash,
-            policy_allow=remote_send_allowed,
-        )
-        journal.record_step(
-            "deliver_notification",
-            ok=outcome == "sent" or not bool(send_gate.get("send")),
-            resource="autopilot_notifications",
-            delivered_to=delivered_to,
-            outcome=outcome,
-            reason=sanitize_notification_text(reason),
-            error_kind=error_kind,
-        )
-        internal_delivery_bookkeeping = str(trigger or "").strip().lower() == "scheduler"
-        append_delivery = (
-            self._notification_store.append_verified_internal
-            if internal_delivery_bookkeeping
-            else self._notification_store.append_verified
-        )
-        delivery_kwargs = dict(
+        self._notification_store.append(
             ts=now_epoch,
             message=message,
             dedupe_hash=dedupe_hash,
@@ -14409,32 +11571,6 @@ class AgentRuntime:
             modified_ids=modified_ids,
             mark_sent=mark_sent,
         )
-        if internal_delivery_bookkeeping:
-            _saved_state, append_verified = append_delivery(
-                operation_id=f"notification-delivery:{dedupe_hash}:{now_epoch}:{outcome}:{reason}:{before_count}",
-                trigger="scheduler",
-                **delivery_kwargs,
-            )
-        else:
-            _saved_state, append_verified = append_delivery(**delivery_kwargs)
-        after_count = int((self._notification_store.status() or {}).get("stored_count") or 0)
-        journal.record_step(
-            "record_notification_history",
-            ok=append_verified,
-            resource="autopilot_notifications",
-            before_count=before_count,
-            after_count=after_count,
-            outcome=outcome,
-        )
-        journal.record_changed_resource(
-            "notification_history",
-            "autopilot_notifications",
-            rollback_supported=False,
-            before_count=before_count,
-            after_count=after_count,
-        )
-        journal.mark_verification(ok=append_verified, stored_count=after_count, dedupe_hash=dedupe_hash)
-        journal.mark_rollback(ok=True, attempted=False, summary="Notification delivery is not rolled back; local history append is append-only.")
         if safe_mode_key and outcome == "sent":
             self._notification_store.mark_reason_subject_sent(safe_mode_key, now_epoch)
         if should_track_paused_health_send and outcome == "sent":
@@ -14487,7 +11623,6 @@ class AgentRuntime:
                 "models": changed_models,
             },
             "delivered_to": delivered_to,
-            "managed_action_journal": journal.to_dict(),
         }
 
     def _record_autopilot_notification(
@@ -14500,13 +11635,6 @@ class AgentRuntime:
         forced: bool = False,
     ) -> dict[str, Any]:
         now_epoch = int(time.time())
-        before_snapshot = self._notification_store.snapshot()
-        before_count = int((self._notification_store.status() or {}).get("stored_count") or 0)
-        journal = ManagedActionJournal(action_type="llm.notifications.send", target="autopilot_notifications")
-        journal.plan_step("preflight_notification_target", resource="autopilot_notifications")
-        journal.plan_step("deliver_notification", resource="autopilot_notifications")
-        journal.plan_step("record_notification_history", resource="autopilot_notifications")
-        journal.plan_step("verify_notification_history", resource="autopilot_notifications")
         decision = should_send(
             now_epoch=now_epoch,
             last_sent_ts=self._notification_store.state.get("last_sent_ts"),
@@ -14521,16 +11649,6 @@ class AgentRuntime:
         )
         if forced:
             decision = {"send": True, "deferred": False, "reason": "forced_test"}
-        journal.record_step(
-            "preflight_notification_target",
-            ok=True,
-            resource="autopilot_notifications",
-            forced=bool(forced),
-            trigger=str(trigger or ""),
-            before_count=before_count,
-            message_hash=str(dedupe_hash or "").strip(),
-            modified_count=len([item for item in (modified_ids or []) if str(item).strip()]),
-        )
 
         delivered_to = "none"
         deferred = bool(decision.get("deferred"))
@@ -14540,22 +11658,7 @@ class AgentRuntime:
         error_kind: str | None = None
 
         if bool(decision.get("send")):
-            delivery_operation_id = f"notification:{str(trigger or 'manual')}:{dedupe_hash}"
-            delivery_reserved = self._notification_store.reserve_delivery(
-                operation_id=delivery_operation_id,
-                transport="telegram_or_local",
-                target_fingerprint=stable_fingerprint({"telegram_enabled": bool(self.config.telegram_enabled), "trigger": str(trigger or "")}),
-                content_fingerprint=dedupe_hash,
-            )
-            if delivery_reserved and self._notification_store.mark_delivery_executing(delivery_operation_id):
-                delivery_result = self._deliver_autopilot_notification(message=message, allow_remote=True)
-                self._notification_store.finish_delivery(
-                    delivery_operation_id,
-                    state="succeeded" if delivery_result.ok else "failed",
-                    receipt={"delivered_to": delivery_result.delivered_to, "reason": delivery_result.reason, "error_kind": delivery_result.error_kind},
-                )
-            else:
-                delivery_result = DeliveryResult(ok=False, delivered_to="none", reason="delivery_identity_already_used", error_kind="delivery_replay_blocked")
+            delivery_result = self._deliver_autopilot_notification(message=message, allow_remote=True)
             delivered_to = str(delivery_result.delivered_to or "none")
             error_kind = delivery_result.error_kind
             if delivery_result.ok:
@@ -14570,23 +11673,8 @@ class AgentRuntime:
             outcome = "skipped"
             reason = "quiet_hours_deferred"
             mark_sent = True
-        journal.record_step(
-            "deliver_notification",
-            ok=outcome == "sent" or not bool(decision.get("send")),
-            resource="autopilot_notifications",
-            delivered_to=delivered_to,
-            deferred=deferred,
-            outcome=outcome,
-            reason=sanitize_notification_text(reason),
-            error_kind=error_kind,
-        )
 
-        append_delivery = (
-            self._notification_store.append_verified_internal
-            if str(trigger or "").strip().lower() == "scheduler"
-            else self._notification_store.append_verified
-        )
-        delivery_kwargs = dict(
+        self._notification_store.append(
             ts=now_epoch,
             message=message,
             dedupe_hash=dedupe_hash,
@@ -14597,50 +11685,6 @@ class AgentRuntime:
             modified_ids=modified_ids,
             mark_sent=mark_sent,
         )
-        if str(trigger or "").strip().lower() == "scheduler":
-            _saved_state, append_verified = append_delivery(
-                operation_id=f"notification-delivery:{dedupe_hash}:{now_epoch}:{outcome}:{reason}:{before_count}",
-                trigger="scheduler",
-                **delivery_kwargs,
-            )
-        else:
-            _saved_state, append_verified = append_delivery(**delivery_kwargs)
-        after_status = self._notification_store.status()
-        after_count = int((after_status or {}).get("stored_count") or 0)
-        journal.record_step(
-            "record_notification_history",
-            ok=append_verified,
-            resource="autopilot_notifications",
-            before_count=before_count,
-            after_count=after_count,
-            outcome=outcome,
-        )
-        journal.record_changed_resource(
-            "notification_history",
-            "autopilot_notifications",
-            rollback_supported=True,
-            before_count=before_count,
-            after_count=after_count,
-        )
-        journal.mark_verification(ok=append_verified, stored_count=after_count, dedupe_hash=dedupe_hash)
-        if append_verified:
-            journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
-        else:
-            rollback_ok = False
-            rollback_summary = "could not restore notification history"
-            try:
-                self._notification_store.restore_snapshot(before_snapshot)
-                rollback_ok = True
-                rollback_summary = "restored previous notification history"
-            except Exception:
-                rollback_ok = False
-            journal.record_rollback_step(
-                "restore_notification_history",
-                ok=rollback_ok,
-                resource="autopilot_notifications",
-                summary=rollback_summary,
-            )
-            journal.mark_rollback(ok=rollback_ok, attempted=True, summary=rollback_summary)
 
         self.audit_log.append(
             actor="system" if trigger == "scheduler" else "user",
@@ -14660,25 +11704,12 @@ class AgentRuntime:
             duration_ms=0,
         )
         return {
-            "ok": bool(append_verified),
+            "ok": True,
             "outcome": outcome,
             "reason": reason,
             "delivered_to": delivered_to,
             "deferred": deferred,
             "dedupe_hash": dedupe_hash,
-            "managed_action_journal": journal.to_dict(),
-            **(
-                {}
-                if append_verified
-                else {
-                    "error": "notification_history_verification_failed",
-                    "message": self._notification_failure_message(
-                        "notification send",
-                        bool(journal.rollback_result.get("ok")),
-                        str(journal.rollback_result.get("summary") or ""),
-                    ),
-                }
-            ),
         }
 
     def _notify_autopilot_changes(
@@ -15298,10 +12329,6 @@ class AgentRuntime:
     def llm_notifications_prune(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         actor = str(payload.get("actor") or "user")
         start = time.monotonic()
-        journal = ManagedActionJournal(action_type="llm.notifications.prune", target="autopilot_notifications")
-        journal.plan_step("read_notification_state", resource="autopilot_notifications")
-        journal.plan_step("prune_notification_history", resource="autopilot_notifications")
-        journal.plan_step("verify_notification_state", resource="autopilot_notifications")
         decision = self._modelops_permission_decision(
             "llm.notifications.prune",
             params={},
@@ -15339,81 +12366,7 @@ class AgentRuntime:
             )
             return False, {"ok": False, "error": "confirmation_required"}
 
-        before_snapshot = self._notification_store.snapshot()
-        before_hash = self._notification_store.state_hash(before_snapshot)
-        before_count = int((self._notification_store.status() or {}).get("stored_count") or 0)
-        journal.record_step(
-            "read_notification_state",
-            ok=True,
-            resource="autopilot_notifications",
-            stored_count=before_count,
-            previous_state_hash=before_hash,
-            retention=self._notification_store.status().get("retention"),
-        )
-        try:
-            result = self._notification_store.prune_now()
-        except Exception as exc:
-            journal.record_step(
-                "prune_notification_history",
-                ok=False,
-                resource="autopilot_notifications",
-                error=exc.__class__.__name__,
-            )
-            journal.mark_verification(ok=False, error=exc.__class__.__name__)
-            journal.mark_rollback(ok=True, attempted=False, summary="No notification history mutation was verified.")
-            return False, {
-                "ok": False,
-                "error": "notification_prune_failed",
-                "message": self._notification_failure_message("notification prune", True, "no verified history mutation"),
-                "managed_action_journal": journal.to_dict(),
-            }
-        after_status = self._notification_store.status()
-        after_count = int((after_status or {}).get("stored_count") or 0)
-        expected_after_count = max(0, before_count - int(result.get("removed_total") or 0))
-        journal.record_step(
-            "prune_notification_history",
-            ok=True,
-            resource="autopilot_notifications",
-            removed_total=int(result.get("removed_total") or 0),
-        )
-        journal.record_changed_resource(
-            "notification_history",
-            "autopilot_notifications",
-            rollback_supported=False,
-            before_count=before_count,
-            after_count=after_count,
-        )
-        verification_ok = after_count == int(result.get("stored_count") or after_count) and after_count == expected_after_count
-        journal.mark_verification(
-            ok=verification_ok,
-            stored_count=after_count,
-            expected_count=expected_after_count,
-            removed_total=int(result.get("removed_total") or 0),
-            resulting_state_hash=self._notification_store.state_hash(),
-        )
-        if not verification_ok:
-            rollback_ok = False
-            rollback_summary = "could not restore notification history"
-            try:
-                self._notification_store.restore_snapshot(before_snapshot)
-                rollback_ok = True
-                rollback_summary = "restored previous notification history"
-            except Exception:
-                rollback_ok = False
-            journal.record_rollback_step(
-                "restore_notification_history",
-                ok=rollback_ok,
-                resource="autopilot_notifications",
-                summary=rollback_summary,
-            )
-            journal.mark_rollback(ok=rollback_ok, attempted=True, summary=rollback_summary)
-            return False, {
-                "ok": False,
-                "error": "notification_prune_verification_failed",
-                "message": self._notification_failure_message("notification prune", rollback_ok, rollback_summary),
-                "managed_action_journal": journal.to_dict(),
-            }
-        journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+        result = self._notification_store.prune_now()
         duration_ms = int((time.monotonic() - start) * 1000)
         self.audit_log.append(
             actor=actor,
@@ -15426,7 +12379,7 @@ class AgentRuntime:
             error_kind=None,
             duration_ms=duration_ms,
         )
-        return True, {"ok": True, "result": result, "managed_action_journal": journal.to_dict()}
+        return True, {"ok": True, "result": result}
 
     def llm_notifications_test(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         actor = str(payload.get("actor") or "user")
@@ -15509,36 +12462,6 @@ class AgentRuntime:
             return False, {"ok": False, "error": "notification_test_failed"}
 
         duration_ms = int((time.monotonic() - start) * 1000)
-        if not bool(record.get("ok", True)):
-            self.audit_log.append(
-                actor=actor,
-                action="llm.notifications.test",
-                params={
-                    **base_params,
-                    "delivered_to": str(record.get("delivered_to") or "none"),
-                    "deferred": bool(record.get("deferred", False)),
-                },
-                decision="allow",
-                reason=policy_reason,
-                dry_run=False,
-                outcome="failed",
-                error_kind=str(record.get("error") or "notification_history_verification_failed"),
-                duration_ms=duration_ms,
-            )
-            return False, {
-                "ok": False,
-                "error": str(record.get("error") or "notification_test_failed"),
-                "message": self._notification_failure_message(
-                    "notification test",
-                    bool((record.get("managed_action_journal") or {}).get("rollback_result", {}).get("ok"))
-                    if isinstance(record.get("managed_action_journal"), dict)
-                    else False,
-                    str((record.get("managed_action_journal") or {}).get("rollback_result", {}).get("summary") or "")
-                    if isinstance(record.get("managed_action_journal"), dict)
-                    else "",
-                ),
-                "managed_action_journal": record.get("managed_action_journal"),
-            }
         self.audit_log.append(
             actor=actor,
             action="llm.notifications.test",
@@ -15554,7 +12477,7 @@ class AgentRuntime:
             error_kind=None,
             duration_ms=duration_ms,
         )
-        return True, {"ok": True, "result": record, "managed_action_journal": record.get("managed_action_journal")}
+        return True, {"ok": True, "result": record}
 
     def llm_health_summary(
         self,
@@ -18421,10 +15344,7 @@ class AgentRuntime:
             }
 
         saved, txn_meta = self._persist_registry_document_transactional(
-            lambda current: apply_autoconfig_plan(current, plan),
-            action_type="llm.autoconfig.apply",
-            target="llm_registry",
-            modified_ids=modified_ids,
+            lambda current: apply_autoconfig_plan(current, plan)
         )
         if not saved:
             error = txn_meta
@@ -18504,7 +15424,6 @@ class AgentRuntime:
             "snapshot_id": snapshot_id,
             "snapshot_id_after": snapshot_id_after,
             "resulting_registry_hash": resulting_registry_hash,
-            "managed_action_journal": txn_meta.get("managed_action_journal") if isinstance(txn_meta.get("managed_action_journal"), dict) else {},
             "safe_mode_blocked": bool(safe_mode_blocked),
             "safe_mode_blocked_reason": (safe_mode_blocked[0] if safe_mode_blocked else None),
             "safe_mode_blocked_changes": safe_mode_blocked,
@@ -18701,10 +15620,7 @@ class AgentRuntime:
             }
 
         saved, txn_meta = self._persist_registry_document_transactional(
-            lambda current: apply_hygiene_plan(current, plan),
-            action_type="llm.hygiene.apply",
-            target="llm_registry",
-            modified_ids=modified_ids,
+            lambda current: apply_hygiene_plan(current, plan)
         )
         if not saved:
             error = txn_meta
@@ -18783,7 +15699,6 @@ class AgentRuntime:
             "snapshot_id": snapshot_id,
             "snapshot_id_after": snapshot_id_after,
             "resulting_registry_hash": resulting_registry_hash,
-            "managed_action_journal": txn_meta.get("managed_action_journal") if isinstance(txn_meta.get("managed_action_journal"), dict) else {},
             "safe_mode_blocked": bool(safe_mode_blocked),
             "safe_mode_blocked_reason": (safe_mode_blocked[0] if safe_mode_blocked else None),
             "safe_mode_blocked_changes": safe_mode_blocked,
@@ -18859,6 +15774,11 @@ class AgentRuntime:
             disable_failing_provider=disable_failing_provider,
             provider_failure_streak=provider_failure_streak,
             apply_prune=False,
+            now_epoch=int(time.time()),
+            local_catalog_freshness_seconds=max(
+                60,
+                int(payload.get("local_catalog_freshness_seconds") or self.config.llm_catalog_refresh_interval_seconds),
+            ),
         )
         preview_plan, _preview_blocked = self._apply_safe_mode_to_plan(action="llm.cleanup.apply", plan=raw_preview_plan)
         modified_ids = self._plan_modified_ids(preview_plan)
@@ -18965,6 +15885,11 @@ class AgentRuntime:
             disable_failing_provider=disable_failing_provider,
             provider_failure_streak=provider_failure_streak,
             apply_prune=True,
+            now_epoch=int(time.time()),
+            local_catalog_freshness_seconds=max(
+                60,
+                int(payload.get("local_catalog_freshness_seconds") or self.config.llm_catalog_refresh_interval_seconds),
+            ),
         )
         plan, safe_mode_blocked = self._apply_safe_mode_to_plan(action="llm.cleanup.apply", plan=raw_plan)
         modified_ids = self._plan_modified_ids(plan)
@@ -19013,10 +15938,7 @@ class AgentRuntime:
             }
 
         saved, txn_meta = self._persist_registry_document_transactional(
-            lambda current: apply_registry_cleanup_plan(current, plan),
-            action_type="llm.cleanup.apply",
-            target="llm_registry",
-            modified_ids=modified_ids,
+            lambda current: apply_registry_cleanup_plan(current, plan)
         )
         if not saved:
             error = txn_meta
@@ -19099,7 +16021,6 @@ class AgentRuntime:
             "snapshot_id": snapshot_id,
             "snapshot_id_after": snapshot_id_after,
             "resulting_registry_hash": resulting_registry_hash,
-            "managed_action_journal": txn_meta.get("managed_action_journal") if isinstance(txn_meta.get("managed_action_journal"), dict) else {},
             "safe_mode_blocked": bool(safe_mode_blocked),
             "safe_mode_blocked_reason": (safe_mode_blocked[0] if safe_mode_blocked else None),
             "safe_mode_blocked_changes": safe_mode_blocked,
@@ -19302,10 +16223,7 @@ class AgentRuntime:
             }
 
         saved, txn_meta = self._persist_registry_document_transactional(
-            lambda current: apply_self_heal_plan(current, plan),
-            action_type="llm.self_heal.apply",
-            target="llm_registry",
-            modified_ids=modified_ids,
+            lambda current: apply_self_heal_plan(current, plan)
         )
         if not saved:
             error = txn_meta
@@ -19397,7 +16315,6 @@ class AgentRuntime:
             "snapshot_id": snapshot_id,
             "snapshot_id_after": snapshot_id_after,
             "resulting_registry_hash": resulting_registry_hash,
-            "managed_action_journal": txn_meta.get("managed_action_journal") if isinstance(txn_meta.get("managed_action_journal"), dict) else {},
             "safe_mode_blocked": bool(safe_mode_blocked),
             "safe_mode_blocked_reason": (safe_mode_blocked[0] if safe_mode_blocked else None),
             "safe_mode_blocked_changes": safe_mode_blocked,
@@ -20174,7 +17091,7 @@ class AgentRuntime:
         persist_proposal: bool = True,
     ) -> tuple[bool, dict[str, Any]]:
         actor = "system" if trigger == "scheduler" else "user"
-        scan_payload = scan_hf_watch(self, trigger=trigger)
+        scan_payload = scan_hf_watch(self)
         self._set_model_watch_hf_status_cache(model_watch_hf_status(self))
         scan_ok = bool(scan_payload.get("ok", False))
         discovered_count = int(scan_payload.get("discovered_count") or 0)
@@ -21308,10 +18225,7 @@ class AgentRuntime:
             }
 
         saved, txn_meta = self._persist_registry_document_transactional(
-            lambda current: self._apply_bootstrap_plan(current, plan),
-            action_type="llm.autopilot.bootstrap.apply",
-            target="llm_registry",
-            modified_ids=modified_ids,
+            lambda current: self._apply_bootstrap_plan(current, plan)
         )
         if not saved:
             error = txn_meta
@@ -21395,7 +18309,6 @@ class AgentRuntime:
             "snapshot_id": snapshot_id,
             "snapshot_id_after": snapshot_id_after,
             "resulting_registry_hash": resulting_registry_hash,
-            "managed_action_journal": txn_meta.get("managed_action_journal") if isinstance(txn_meta.get("managed_action_journal"), dict) else {},
             "safe_mode_blocked": bool(safe_mode_blocked),
             "safe_mode_blocked_reason": (safe_mode_blocked[0] if safe_mode_blocked else None),
             "safe_mode_blocked_changes": safe_mode_blocked,
@@ -21411,10 +18324,6 @@ class AgentRuntime:
         snapshot_id = str(payload.get("snapshot_id") or "").strip()
         if not snapshot_id:
             return False, {"ok": False, "error": "snapshot_id is required"}
-        journal = ManagedActionJournal(action_type="llm.registry.rollback", target=snapshot_id)
-        journal.plan_step("snapshot_current_registry_before_rollback", resource="llm_registry")
-        journal.plan_step("restore_requested_registry_snapshot", resource=snapshot_id)
-        journal.plan_step("verify_registry_rollback", resource="llm_registry")
 
         decision = self._modelops_permission_decision(
             "llm.registry.rollback",
@@ -21483,32 +18392,12 @@ class AgentRuntime:
             )
             return False, {"ok": False, "error": "confirmation_required"}
 
-        previous_snapshot_id: str | None = None
-        try:
-            previous_snapshot = self._registry_snapshot_store.create_snapshot(
-                self.registry_store.path,
-                self.registry_document if isinstance(self.registry_document, dict) else {},
-            )
-            previous_snapshot_id = str(previous_snapshot.get("snapshot_id") or "").strip() or None
-            if previous_snapshot_id:
-                journal.record_created_resource("registry_snapshot", previous_snapshot_id, rollback_supported=False)
-                journal.record_step("snapshot_current_registry_before_rollback", ok=True, resource=previous_snapshot_id)
-        except Exception as exc:
-            journal.record_step(
-                "snapshot_current_registry_before_rollback",
-                ok=False,
-                resource="llm_registry",
-                error=exc.__class__.__name__,
-            )
         restore_result = self._registry_snapshot_store.restore_snapshot(
             snapshot_id=snapshot_id,
             registry_path=self.registry_store.path,
         )
         if not bool(restore_result.get("ok")):
             error_kind = str(restore_result.get("error_kind") or "rollback_failed")
-            journal.record_step("restore_requested_registry_snapshot", ok=False, resource=snapshot_id, error_kind=error_kind)
-            journal.mark_verification(ok=False, error_kind=error_kind)
-            journal.mark_rollback(ok=True, attempted=False, summary="The requested snapshot was not restored.")
             duration_ms = int((time.monotonic() - start) * 1000)
             self.audit_log.append(
                 actor=actor,
@@ -21532,90 +18421,10 @@ class AgentRuntime:
                 resulting_registry_hash=None,
                 changed_ids=[],
             )
-            return False, {
-                "ok": False,
-                "error": error_kind,
-                "snapshot_id": snapshot_id,
-                "managed_action_journal": journal.to_dict(),
-            }
+            return False, {"ok": False, "error": error_kind, "snapshot_id": snapshot_id}
 
         self._reload_router()
         resulting_registry_hash = str(restore_result.get("resulting_registry_hash") or "").strip() or None
-        actual_registry_hash = self._registry_hash(self.registry_document if isinstance(self.registry_document, dict) else {})
-        verification_ok = bool(resulting_registry_hash and actual_registry_hash == resulting_registry_hash)
-        journal.record_step("restore_requested_registry_snapshot", ok=True, resource=snapshot_id)
-        if not verification_ok:
-            rollback_ok = False
-            rollback_error_kind = None
-            if previous_snapshot_id:
-                rollback_result = self._registry_snapshot_store.restore_snapshot(
-                    snapshot_id=previous_snapshot_id,
-                    registry_path=self.registry_store.path,
-                )
-                rollback_ok = bool(rollback_result.get("ok"))
-                rollback_error_kind = str(rollback_result.get("error_kind") or "").strip() or None
-                if rollback_ok:
-                    self._reload_router()
-                journal.record_rollback_step(
-                    "restore_pre_rollback_registry_snapshot",
-                    ok=rollback_ok,
-                    resource=previous_snapshot_id,
-                    error_kind=rollback_error_kind,
-                )
-            journal.mark_verification(
-                ok=False,
-                error_kind="registry_rollback_verification_failed",
-                expected_hash=resulting_registry_hash,
-                actual_hash=actual_registry_hash,
-            )
-            journal.mark_rollback(
-                ok=rollback_ok,
-                attempted=bool(previous_snapshot_id),
-                summary=(
-                    "restored the registry state from before the failed rollback"
-                    if rollback_ok
-                    else "could not automatically restore the registry state from before the failed rollback"
-                ),
-            )
-            duration_ms = int((time.monotonic() - start) * 1000)
-            self.audit_log.append(
-                actor=actor,
-                action="llm.registry.rollback",
-                params={"snapshot_id": snapshot_id, "rollback_policy": rollback_policy},
-                decision="allow",
-                reason="registry_rollback_verification_failed",
-                dry_run=False,
-                outcome="failed",
-                error_kind="registry_rollback_verification_failed",
-                duration_ms=duration_ms,
-            )
-            self._record_action_ledger(
-                action="llm.registry.rollback",
-                actor=actor,
-                decision="allow",
-                outcome="failed",
-                reason="registry_rollback_verification_failed",
-                trigger="manual",
-                snapshot_id=snapshot_id,
-                resulting_registry_hash=None,
-                changed_ids=[],
-            )
-            return False, {
-                "ok": False,
-                "error": "registry_rollback_verification_failed",
-                "snapshot_id": snapshot_id,
-                "rollback_ok": rollback_ok,
-                "rollback_attempted": bool(previous_snapshot_id),
-                "managed_action_journal": journal.to_dict(),
-            }
-        journal.record_changed_resource(
-            "llm_registry",
-            "registry",
-            rollback_supported=bool(previous_snapshot_id),
-            snapshot_id=snapshot_id,
-        )
-        journal.mark_verification(ok=True, resulting_registry_hash=resulting_registry_hash)
-        journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
         duration_ms = int((time.monotonic() - start) * 1000)
         self.audit_log.append(
             actor=actor,
@@ -21647,7 +18456,6 @@ class AgentRuntime:
             "ok": True,
             "snapshot_id": snapshot_id,
             "resulting_registry_hash": resulting_registry_hash,
-            "managed_action_journal": journal.to_dict(),
         }
 
     def _modelops_apply_defaults(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
@@ -22401,6 +19209,24 @@ class AgentRuntime:
         }
 
     @staticmethod
+    def _safe_mode_model_mutation_response(model_id: str) -> dict[str, Any]:
+        blocked_model = str(model_id or "").strip() or "that model"
+        why = "SAFE MODE blocks model switch and default mutations, including local targets."
+        next_action = "Switch to Controlled Mode explicitly before retrying a model change."
+        return {
+            "ok": False,
+            "error": "safe_mode_blocked",
+            "error_kind": "safe_mode_blocked",
+            "message": compose_actionable_message(
+                what_happened=f"SAFE MODE is active, so I did not change chat to {blocked_model}",
+                why=why,
+                next_action=next_action,
+            ),
+            "why": why,
+            "next_action": next_action,
+        }
+
+    @staticmethod
     def _safe_mode_provider_mutation_response(action: str) -> dict[str, Any]:
         blocked_action = str(action or "provider/model mutation").strip()
         why = "SAFE MODE blocks provider and model configuration changes."
@@ -22428,7 +19254,8 @@ class AgentRuntime:
         if bool(policy.get("allow_remote_switch", True)):
             return True, None
         if bool((resolved_body or {}).get("local", False)):
-            return True, None
+            blocked_model = str((resolved_body or {}).get("model_id") or requested_model).strip()
+            return False, self._safe_mode_model_mutation_response(blocked_model)
         blocked_model = str((resolved_body or {}).get("model_id") or requested_model).strip()
         return False, self._safe_mode_remote_switch_response(blocked_model)
 
@@ -23182,7 +20009,11 @@ class AgentRuntime:
             }
 
         canonical_model = f"{provider}:{model_id}"
-        switch_action = "runtime.set_confirmed_chat_model_target"
+        switch_action = (
+            "runtime.configure_local_chat_model"
+            if provider == "ollama"
+            else "runtime.set_confirmed_chat_model_target"
+        )
         if not confirm:
             return True, {
                 "ok": True,
@@ -23209,7 +20040,10 @@ class AgentRuntime:
                 },
             }
 
-        ok, body = self.set_confirmed_chat_model_target(canonical_model, provider_id=provider)
+        if provider == "ollama":
+            ok, body = self.configure_local_chat_model(canonical_model)
+        else:
+            ok, body = self.set_confirmed_chat_model_target(canonical_model, provider_id=provider)
         message = str((body if isinstance(body, dict) else {}).get("message") or "Model switch failed.")
         if not ok:
             failure_error_kind = str(
@@ -23244,7 +20078,6 @@ class AgentRuntime:
 
         applied_model = str((body if isinstance(body, dict) else {}).get("model_id") or canonical_model).strip() or canonical_model
         applied_provider = str((body if isinstance(body, dict) else {}).get("provider") or provider).strip().lower() or provider
-        previous_model = str((body if isinstance(body, dict) else {}).get("previous_model_id") or "").strip() or "none"
         self._record_memory_event(
             text=f"Switched default model to {applied_model} for {purpose}.",
             tags={
@@ -23262,10 +20095,7 @@ class AgentRuntime:
             "confidence": 1.0,
             "did_work": True,
             "error_kind": None,
-            "message": (
-                f"Default chat model updated from {previous_model} to {applied_model}. "
-                f"Previous default: {previous_model}. New default: {applied_model}."
-            ),
+            "message": f"Switched to {applied_model} for {purpose}.",
             "next_question": None,
             "actions": [],
             "errors": [],
@@ -23381,10 +20211,7 @@ class AgentRuntime:
             "confidence": 1.0,
             "did_work": True,
             "error_kind": None,
-            "message": (
-                f"Temporary chat model switched to {applied_model}. "
-                "This does not change your default model."
-            ),
+            "message": f"Temporarily switched to {applied_model} for {purpose}.",
             "next_question": None,
             "actions": [],
             "errors": [],
@@ -23514,37 +20341,6 @@ class APIServerHandler(BaseHTTPRequestHandler):
             return False
 
     def _send_json(self, status: int, payload: dict[str, Any]) -> None:
-        pending_chat_payload = getattr(self, "_chat_transcript_request_payload", None)
-        transcript_recorded = bool(getattr(self, "_chat_transcript_recorded", False))
-        if isinstance(pending_chat_payload, dict) and not transcript_recorded:
-            # Some deterministic /chat responses (for example a concise
-            # clarification) return before AgentRuntime.chat is entered. Keep
-            # those visible turns in the same durable UI history as normal chat.
-            self._chat_transcript_recorded = True
-            try:
-                messages = self.runtime._normalize_messages(pending_chat_payload)
-                user_content = str(messages[-1].get("content") or "").strip() if messages else ""
-                assistant_payload = payload.get("assistant") if isinstance(payload.get("assistant"), dict) else {}
-                assistant_content = str(
-                    (assistant_payload or {}).get("content")
-                    or payload.get("message")
-                    or payload.get("error")
-                    or ""
-                ).strip()
-                if user_content and assistant_content:
-                    user_id = self.runtime._chat_user_id(pending_chat_payload)
-                    self.runtime._record_chat_transcript(
-                        user_id=user_id,
-                        thread_id=self.runtime._chat_thread_id(pending_chat_payload, user_id=user_id),
-                        user_content=user_content,
-                        assistant_content=assistant_content,
-                        source_surface=str(pending_chat_payload.get("source_surface") or "api").strip().lower() or "api",
-                        request_id=str(pending_chat_payload.get("request_id") or pending_chat_payload.get("trace_id") or uuid.uuid4().hex),
-                    )
-            except Exception:
-                # Transcript persistence is best effort and must never replace
-                # the actual assistant response.
-                pass
         body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
         self.send_response(status)
         self.close_connection = True
@@ -24248,43 +21044,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         try:
             path, parts = self._path_parts()
-            if path in {
-                "/chat",
-                "/ask",
-                "/done",
-                "/search/query",
-                "/search/setup/plan",
-                "/search/setup/apply",
-                "/search/setup/prerequisite/plan",
-                "/search/setup/prerequisite/apply",
-            }:
-                self._send_method_not_allowed(method="GET", path=path, allowed_methods=["POST"])
-                return
-            if path == "/chat/threads":
-                query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-                payload = {
-                    "limit": query.get("limit", [50])[0],
-                    "session_id": query.get("session_id", [None])[0],
-                    "source_surface": query.get("source_surface", ["webui"])[0],
-                }
-                self._send_json(200, self.runtime.chat_threads(payload))
-                return
-            if len(parts) == 3 and parts[:2] == ["chat", "threads"]:
-                query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-                payload = {
-                    "session_id": query.get("session_id", [None])[0],
-                    "source_surface": query.get("source_surface", ["webui"])[0],
-                }
-                ok, body = self.runtime.chat_thread(urllib.parse.unquote(parts[2]), payload)
-                self._send_json(200 if ok else 404, body)
-                return
             if path == "/ready":
-                self._send_json(200, self.runtime.ready_status())
-                return
-            if path == "/status":
-                # Compatibility for installed/older CLI clients.  New clients use
-                # /ready plus /runtime, but /status historically exposed the
-                # readiness payload and must remain a useful runtime-health route.
                 self._send_json(200, self.runtime.ready_status())
                 return
             if path == "/state":
@@ -24319,12 +21079,6 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 return
             if path == "/telegram/status":
                 self._send_json(200, self.runtime.telegram_status())
-                return
-            if path == "/search/status":
-                self._send_json(200, self.runtime.search_status())
-                return
-            if path == "/services/status":
-                self._send_json(200, self.runtime.managed_services_status())
                 return
             if path in {"/model", "/llm/model"}:
                 self._send_json(200, self.runtime.model_status())
@@ -24603,9 +21357,6 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 self._send_method_not_allowed(method="POST", path=path, allowed_methods=["GET"])
                 return
             payload = self._read_json()
-            if path == "/chat":
-                self._chat_transcript_request_payload = dict(payload)
-                self._chat_transcript_recorded = False
             intent_assessment: IntentAssessment | None = None
             memory_debug_payload: dict[str, Any] | None = None
             authoritative_runtime_route = False
@@ -24613,82 +21364,6 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if json_error is not None:
                 status_code, response = self._json_request_error_response(path=path, payload=payload, json_error=json_error)
                 self._send_json(status_code, response)
-                return
-            internal_claim = reject_public_internal_authority_claim(payload)
-            if internal_claim:
-                self._send_json(400, {"ok": False, "error": "internal_writer_authority_claim_rejected"})
-                return
-            # Provider/model/configuration/setup mutation compatibility routes are
-            # aliases to one durable Plan/confirmation/executor boundary. A bare
-            # `confirm: true` is deliberately insufficient.
-            domain_operation = {
-                "/providers": "provider.add",
-                "/bootstrap/run": "setup.bootstrap",
-                "/models/refresh": "model.refresh",
-                "/defaults/rollback": "defaults.rollback",
-                "/telegram/secret": "telegram.secret.set",
-                "/model_watch/run": "model_watch.run",
-                "/model_watch/refresh": "model_watch.refresh",
-                "/model_watch/hf/scan": "model_watch.hf_scan",
-                "/llm/models/policy": "model.policy",
-                "/llm/models/switch": "model.switch",
-                "/llm/models/switch_temporary": "model.switch_temporary",
-                "/llm/control_mode": "runtime.control_mode",
-                "/llm/capabilities/reconcile/apply": "llm.reconcile",
-                "/llm/autoconfig/apply": "llm.autoconfig",
-                "/llm/hygiene/apply": "llm.hygiene",
-                "/llm/cleanup/apply": "llm.cleanup",
-                "/llm/self_heal/apply": "llm.self_heal",
-                "/llm/support/remediate/execute": "llm.support.remediate",
-                "/llm/registry/rollback": "llm.registry.rollback",
-                "/llm/autopilot/undo": "llm.autopilot.undo",
-                "/llm/autopilot/unpause": "llm.autopilot.unpause",
-                "/llm/autopilot/bootstrap": "llm.autopilot.bootstrap",
-                "/modelops/execute": "modelops.execute",
-                "/providers/ollama/pull": "model.acquire",
-            }.get(path)
-            if path in {"/authorized/provider-model/preview", "/authorized/provider-model/apply"}:
-                domain_operation = str(payload.get("operation") or "").strip().lower()
-            elif path == "/llm/fixit" and (
-                payload.get("confirm") is True
-                or isinstance(payload.get("mutation_plan"), dict)
-                or isinstance(payload.get("confirmation"), dict)
-            ):
-                domain_operation = "llm.fix"
-            if len(parts) == 3 and parts[0] == "providers" and parts[2] == "secret":
-                domain_operation = "provider.secret.set"
-                payload = {**payload, "provider_id": parts[1]}
-            elif len(parts) == 3 and parts[0] == "providers" and parts[2] == "models":
-                domain_operation = "provider.model.add"
-                payload = {**payload, "provider_id": parts[1]}
-            elif len(parts) == 4 and parts[0] == "providers" and parts[2:] == ["models", "refresh"]:
-                domain_operation = "model.refresh"
-                payload = {**payload, "provider": parts[1]}
-            if domain_operation:
-                if self._reject_non_loopback_operator_surface(path=path):
-                    return
-                ok, body = self.runtime.route_provider_model_mutation(domain_operation, payload)
-                self._send_json(200 if ok else 400, body)
-                return
-            if path == "/search/query":
-                ok, body = self.runtime.search_query(payload)
-                self._send_json(200 if ok else 400, body)
-                return
-            if path == "/search/setup/plan":
-                body = self.runtime.search_setup_plan(payload)
-                self._send_json(200 if bool(body.get("ok")) else 400, body)
-                return
-            if path == "/search/setup/apply":
-                body = self.runtime.apply_search_setup(payload)
-                self._send_json(200 if bool(body.get("ok")) else 400, body)
-                return
-            if path == "/search/setup/prerequisite/plan":
-                ok, body = self.runtime.route_pack_search_mutation("search.prerequisite", payload)
-                self._send_json(200 if ok else 400, body)
-                return
-            if path == "/search/setup/prerequisite/apply":
-                ok, body = self.runtime.route_pack_search_mutation("search.prerequisite", payload)
-                self._send_json(200 if ok else 400, body)
                 return
             if path in {"/chat", "/ask"}:
                 trace_id = self._request_trace_id(payload)
@@ -24720,7 +21395,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
                     try:
                         orchestrator = self.runtime.orchestrator()
                         request_thread_id = None
-                        if not authoritative_runtime_route and callable(getattr(self.runtime, "_chat_thread_id", None)):
+                        if callable(getattr(self.runtime, "_chat_thread_id", None)):
                             try:
                                 request_thread_id = self.runtime._chat_thread_id(payload, user_id=chat_user_id)
                             except Exception:
@@ -24731,10 +21406,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
                                 str(input_text or ""),
                                 thread_id=request_thread_id,
                             )
-                            if (
-                                not authoritative_runtime_route
-                                and callable(getattr(orchestrator, "assistant_followup_hint", None))
-                            )
+                            if callable(getattr(orchestrator, "assistant_followup_hint", None))
                             else {}
                         )
                     except Exception:
@@ -24763,7 +21435,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
                         text=input_text,
                     )
                     if handled_choice and isinstance(choice_payload, dict):
-                        message = str(choice_payload.get("message") or "").strip() or "I handled that choice. Send the next request when ready."
+                        message = str(choice_payload.get("message") or "").strip() or "Done."
                         response = {
                             "ok": bool(choice_payload.get("ok", True)),
                             "intent": str(choice_payload.get("intent") or intent_name),
@@ -24813,7 +21485,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
                         text=input_text,
                     )
                     if handled_binary_choice and isinstance(binary_choice_payload, dict):
-                        message = str(binary_choice_payload.get("message") or "").strip() or "I handled that choice. Send the next request when ready."
+                        message = str(binary_choice_payload.get("message") or "").strip() or "Done."
                         response = {
                             "ok": bool(binary_choice_payload.get("ok", True)),
                             "intent": str(binary_choice_payload.get("intent") or intent_name),
@@ -24863,7 +21535,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
                         text=input_text,
                     )
                     if handled_intent_choice and isinstance(intent_choice_payload, dict):
-                        message = str(intent_choice_payload.get("message") or "").strip() or "I handled that choice. Send the next request when ready."
+                        message = str(intent_choice_payload.get("message") or "").strip() or "Done."
                         response = {
                             "ok": bool(intent_choice_payload.get("ok", True)),
                             "intent": str(intent_choice_payload.get("intent") or intent_name),
@@ -24962,7 +21634,6 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 if (
                     low_confidence.is_low_confidence
                     and not self._has_explicit_user_message(payload)
-                    and not (path == "/chat" and authoritative_runtime_route)
                     and not (assistant_frontdoor_generic and str(input_text or "").strip())
                     and not (path == "/chat" and assistant_followup_kind)
                 ):
@@ -25342,7 +22013,6 @@ class APIServerHandler(BaseHTTPRequestHandler):
                     envelope_payload = dict(envelope_payload)
                     envelope_payload["memory"] = memory_debug_payload
                     body["envelope"] = envelope_payload
-                self._chat_transcript_recorded = True
                 self._send_json(200 if ok else 400, body)
                 return
 
@@ -25482,117 +22152,19 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if path == "/packs/install":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                ok, body = self.runtime.route_pack_search_mutation("external_pack.install", payload)
-                self._send_json(200 if ok else 400, body)
-                return
-            if path == "/packs/install/plan":
-                if self._reject_non_loopback_operator_surface(path=path):
-                    return
-                ok, body = self.runtime.route_pack_search_mutation("external_pack.install", payload)
-                self._send_json(200 if ok else 400, body)
-                return
-            if path == "/packs/install/apply":
-                if self._reject_non_loopback_operator_surface(path=path):
-                    return
-                ok, body = self.runtime.route_pack_search_mutation("external_pack.install", payload)
+                ok, body = self.runtime.packs_install(payload)
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/packs/approve":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                ok, body = self.runtime.route_pack_search_mutation("external_pack.approve", payload)
-                self._send_json(200 if ok else 400, body)
-                return
-            if path == "/packs/approve/plan":
-                if self._reject_non_loopback_operator_surface(path=path):
-                    return
-                ok, body = self.runtime.route_pack_search_mutation("external_pack.approve", payload)
-                self._send_json(200 if ok else 400, body)
-                return
-            if path == "/packs/approve/apply":
-                if self._reject_non_loopback_operator_surface(path=path):
-                    return
-                ok, body = self.runtime.route_pack_search_mutation("external_pack.approve", payload)
+                ok, body = self.runtime.packs_approve(payload)
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/packs/enable":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                if "enabled" in payload and not isinstance(payload.get("enabled"), bool):
-                    self._send_json(
-                        400,
-                        {
-                            "ok": False,
-                            "error": "bad_request",
-                            "error_kind": "bad_request",
-                            "message": "enabled must be a boolean",
-                            "next_question": 'Include {"enabled": true} or {"enabled": false}.',
-                        },
-                    )
-                    return
-                ok, body = self.runtime.route_pack_search_mutation("external_pack.enable", payload)
-                self._send_json(200 if ok else 400, body)
-                return
-            if path == "/packs/enable/plan":
-                if self._reject_non_loopback_operator_surface(path=path):
-                    return
-                ok, body = self.runtime.route_pack_search_mutation("external_pack.enable", payload)
-                self._send_json(200 if ok else 400, body)
-                return
-            if path == "/packs/enable/apply":
-                if self._reject_non_loopback_operator_surface(path=path):
-                    return
-                ok, body = self.runtime.route_pack_search_mutation("external_pack.enable", payload)
-                self._send_json(200 if ok else 400, body)
-                return
-            if path == "/packs/grant":
-                if self._reject_non_loopback_operator_surface(path=path):
-                    return
-                ok, body = self.runtime.route_pack_search_mutation("external_pack.grant", payload)
-                self._send_json(200 if ok else 400, body)
-                return
-            if path == "/packs/grant/plan":
-                if self._reject_non_loopback_operator_surface(path=path):
-                    return
-                ok, body = self.runtime.route_pack_search_mutation("external_pack.grant", payload)
-                self._send_json(200 if ok else 400, body)
-                return
-            if path == "/packs/grant/apply":
-                if self._reject_non_loopback_operator_surface(path=path):
-                    return
-                ok, body = self.runtime.route_pack_search_mutation("external_pack.grant", payload)
-                self._send_json(200 if ok else 400, body)
-                return
-            if path == "/packs/remove":
-                if self._reject_non_loopback_operator_surface(path=path):
-                    return
-                ok, body = self.runtime.route_pack_search_mutation("external_pack.remove", payload)
-                self._send_json(200 if ok else 400, body)
-                return
-            if path == "/packs/remove/plan":
-                if self._reject_non_loopback_operator_surface(path=path):
-                    return
-                ok, body = self.runtime.route_pack_search_mutation("external_pack.remove", payload)
-                self._send_json(200 if ok else 400, body)
-                return
-            if path == "/packs/remove/apply":
-                if self._reject_non_loopback_operator_surface(path=path):
-                    return
-                ok, body = self.runtime.route_pack_search_mutation("external_pack.remove", payload)
-                self._send_json(200 if ok else 400, body)
-                return
-            if len(parts) == 4 and parts[0] == "packs" and parts[2] == "remove" and parts[3] == "plan":
-                if self._reject_non_loopback_operator_surface(path=path):
-                    return
-                planned_payload = dict(payload)
-                planned_payload["pack_id"] = parts[1]
-                ok, body = self.runtime.route_pack_search_mutation("external_pack.remove", planned_payload)
-                self._send_json(200 if ok else 400, body)
-                return
-            if len(parts) == 4 and parts[0] == "packs" and parts[2] == "remove" and parts[3] == "apply":
-                if self._reject_non_loopback_operator_surface(path=path):
-                    return
-                ok, body = self.runtime.route_pack_search_mutation("external_pack.remove", {**payload, "pack_id": parts[1]})
+                ok, body = self.runtime.packs_enable(payload)
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/bootstrap/run":
@@ -25715,7 +22287,10 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if path == "/pack_sources/catalog":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                ok, body = self.runtime.route_pack_search_mutation("pack_source.catalog.create", payload)
+                ok, body = self.runtime.create_pack_source_catalog(
+                    payload,
+                    changed_by=self._request_client_host() or "loopback_operator",
+                )
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/llm/models/recommend":
@@ -25817,47 +22392,35 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/llm/notifications/test":
-                ok, body = self.runtime.route_organization_memory_mutation("notification.test", payload)
+                ok, body = self.runtime.llm_notifications_test(payload)
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/llm/notifications/mark_read":
-                ok, body = self.runtime.route_organization_memory_mutation("notification.mark_read", payload)
+                ok, body = self.runtime.llm_notifications_mark_read(payload)
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/llm/notifications/prune":
-                ok, body = self.runtime.route_organization_memory_mutation("notification.prune", payload)
+                ok, body = self.runtime.llm_notifications_prune(payload)
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/semantic/documents/ingest":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                ok, body = self.runtime.route_organization_memory_mutation("semantic.ingest", payload)
+                ok, body = self.runtime.semantic_memory_ingest(payload)
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/semantic/rebuild":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                ok, body = self.runtime.route_organization_memory_mutation("semantic.rebuild", payload)
-                self._send_json(200 if ok else 400, body)
-                return
-            if path == "/semantic/doctor":
-                if self._reject_non_loopback_operator_surface(path=path):
-                    return
-                ok, body = self.runtime.semantic_memory_doctor(payload)
-                self._send_json(200 if ok else 400, body)
-                return
-            if path == "/semantic/repair":
-                if self._reject_non_loopback_operator_surface(path=path):
-                    return
-                ok, body = self.runtime.route_organization_memory_mutation("semantic.repair", payload)
+                ok, body = self.runtime.semantic_memory_rebuild(payload)
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/memory/reset":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                ok, body = self.runtime.route_organization_memory_mutation(
-                    "memory.reset",
-                    {**payload, "actor_id": self._request_client_host() or "loopback_operator"},
+                ok, body = self.runtime.memory_reset(
+                    payload,
+                    changed_by=self._request_client_host() or "loopback_operator",
                 )
                 self._send_json(200 if ok else 400, body)
                 return
@@ -25957,34 +22520,24 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 status_code, response = self._json_request_error_response(path=path, payload=payload, json_error=json_error)
                 self._send_json(status_code, response)
                 return
-            internal_claim = reject_public_internal_authority_claim(payload)
-            if internal_claim:
-                self._send_json(400, {"ok": False, "error": "internal_writer_authority_claim_rejected"})
-                return
-
-            put_domain_operation = {"/config": "config.update", "/defaults": "defaults.update"}.get(path)
-            if len(parts) == 2 and parts[0] == "providers":
-                put_domain_operation = "provider.update"
-                payload = {**payload, "provider_id": parts[1]}
-            if put_domain_operation:
-                if self._reject_non_loopback_operator_surface(path=path):
-                    return
-                ok, body = self.runtime.route_provider_model_mutation(put_domain_operation, payload)
-                self._send_json(200 if ok else 400, body)
-                return
 
             if path == "/pack_sources/policy":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                ok, body = self.runtime.route_pack_search_mutation("pack_source.policy.update", payload)
+                ok, body = self.runtime.update_pack_sources_policy(
+                    payload,
+                    changed_by=self._request_client_host() or "loopback_operator",
+                )
                 self._send_json(200 if ok else 400, body)
                 return
 
             if len(parts) == 3 and parts[0] == "pack_sources" and parts[2] == "policy":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                ok, body = self.runtime.route_pack_search_mutation(
-                    "pack_source.scoped_policy.update", {**payload, "source_id": parts[1]}
+                ok, body = self.runtime.update_pack_source_policy(
+                    parts[1],
+                    payload,
+                    changed_by=self._request_client_host() or "loopback_operator",
                 )
                 self._send_json(200 if ok else 400, body)
                 return
@@ -25992,8 +22545,10 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if len(parts) == 3 and parts[0] == "pack_sources" and parts[1] == "catalog":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                ok, body = self.runtime.route_pack_search_mutation(
-                    "pack_source.catalog.update", {**payload, "source_id": parts[2]}
+                ok, body = self.runtime.update_pack_source_catalog(
+                    parts[2],
+                    payload,
+                    changed_by=self._request_client_host() or "loopback_operator",
                 )
                 self._send_json(200 if ok else 400, body)
                 return
@@ -26008,7 +22563,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/permissions":
-                ok, body = self.runtime.route_pack_search_mutation("permission.policy.update", payload)
+                ok, body = self.runtime.update_permissions(payload)
                 self._send_json(200 if ok else 400, body)
                 return
 
@@ -26035,34 +22590,21 @@ class APIServerHandler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:  # noqa: N802
         try:
             path, parts = self._path_parts()
-            if len(parts) == 2 and parts[0] == "providers":
-                payload = self._read_json()
-                internal_claim = reject_public_internal_authority_claim(payload)
-                if internal_claim:
-                    self._send_json(400, {"ok": False, "error": "internal_writer_authority_claim_rejected"})
-                    return
-                if self._reject_non_loopback_operator_surface(path=path):
-                    return
-                ok, body = self.runtime.route_provider_model_mutation(
-                    "provider.delete", {**payload, "provider_id": parts[1]}
-                )
-                self._send_json(200 if ok else 400, body)
-                return
             if len(parts) == 3 and parts[0] == "pack_sources" and parts[1] == "catalog":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                payload = self._read_json()
-                ok, body = self.runtime.route_pack_search_mutation(
-                    "pack_source.catalog.delete", {**payload, "source_id": parts[2]}
+                ok, body = self.runtime.delete_pack_source_catalog(
+                    parts[2],
+                    changed_by=self._request_client_host() or "loopback_operator",
                 )
                 self._send_json(200 if ok else 400, body)
                 return
             if len(parts) == 2 and parts[0] == "packs":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                payload = self._read_json()
-                ok, body = self.runtime.route_pack_search_mutation(
-                    "external_pack.remove", {**payload, "pack_id": parts[1]}
+                ok, body = self.runtime.delete_external_pack(
+                    parts[1],
+                    changed_by=self._request_client_host() or "loopback_operator",
                 )
                 self._send_json(200 if ok else 400, body)
                 return
