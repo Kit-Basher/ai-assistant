@@ -135,12 +135,13 @@ const loadStoredChatId = (storageKey, prefix) => {
     return createChatId(prefix);
   }
   try {
-    const existing = window.sessionStorage.getItem(storageKey);
+    const existing = window.localStorage.getItem(storageKey) || window.sessionStorage.getItem(storageKey);
     if (existing) {
+      window.localStorage.setItem(storageKey, existing);
       return existing;
     }
     const created = createChatId(prefix);
-    window.sessionStorage.setItem(storageKey, created);
+    window.localStorage.setItem(storageKey, created);
     return created;
   } catch (_error) {
     return createChatId(prefix);
@@ -152,7 +153,7 @@ const saveStoredChatId = (storageKey, value) => {
     return;
   }
   try {
-    window.sessionStorage.setItem(storageKey, value);
+    window.localStorage.setItem(storageKey, value);
   } catch (_error) {
     // Ignore storage write failures and keep using the in-memory id.
   }
@@ -383,6 +384,9 @@ export default function App() {
   const [chatPlaceholderVisible, setChatPlaceholderVisible] = useState(false);
   const [chatSessionId] = useState(() => loadStoredChatId(CHAT_SESSION_STORAGE_KEY, "chat-session"));
   const [chatThreadId, setChatThreadId] = useState(() => loadStoredChatId(CHAT_THREAD_STORAGE_KEY, "chat-thread"));
+  const [chatThreads, setChatThreads] = useState([]);
+  const [chatHistoryLoading, setChatHistoryLoading] = useState(true);
+  const [chatHistoryError, setChatHistoryError] = useState("");
 
   const [logs, setLogs] = useState([]);
   const autopilotLastHashRef = useRef("");
@@ -612,6 +616,10 @@ export default function App() {
   useEffect(() => {
     refreshRuntimeState({ includeAdmin: false });
   }, []);
+
+  useEffect(() => {
+    void restoreConversationHistory();
+  }, [chatSessionId]);
 
   useEffect(() => {
     if (!adminOpen || adminLoaded) return;
@@ -1111,6 +1119,73 @@ export default function App() {
     }
   };
 
+  const chatHistoryQuery = () => {
+    const query = new URLSearchParams({
+      session_id: chatSessionId,
+      source_surface: "webui"
+    });
+    return query.toString();
+  };
+
+  const loadChatThread = async (threadId, { quiet = false } = {}) => {
+    const normalizedThreadId = String(threadId || "").trim();
+    if (!normalizedThreadId || chatBusy) return false;
+    if (!quiet) setChatHistoryLoading(true);
+    setChatHistoryError("");
+    try {
+      const payload = await request(
+        "GET",
+        `/chat/threads/${encodeURIComponent(normalizedThreadId)}?${chatHistoryQuery()}`
+      );
+      const thread = payload?.thread && typeof payload.thread === "object" ? payload.thread : {};
+      const storedMessages = Array.isArray(thread.messages) ? thread.messages : [];
+      setChatThreadId(normalizedThreadId);
+      saveStoredChatId(CHAT_THREAD_STORAGE_KEY, normalizedThreadId);
+      setMessages(
+        storedMessages
+          .filter((message) => message?.role === "user" || message?.role === "assistant")
+          .map((message) => ({
+            role: message.role,
+            content: String(message.content || ""),
+            ui: { confirmation: null, clarification: null }
+          }))
+      );
+      appendLog({ endpoint: `/chat/threads/${normalizedThreadId}`, ok: true, detail: "Conversation restored" });
+      return true;
+    } catch (error) {
+      setChatHistoryError("I couldn't load that conversation. Your other chats are still available.");
+      appendLog({ endpoint: `/chat/threads/${normalizedThreadId}`, ok: false, detail: asErrorText(error) });
+      return false;
+    } finally {
+      if (!quiet) setChatHistoryLoading(false);
+    }
+  };
+
+  const refreshChatThreads = async () => {
+    try {
+      const payload = await request("GET", `/chat/threads?limit=50&${chatHistoryQuery()}`);
+      const threads = Array.isArray(payload?.threads) ? payload.threads : [];
+      setChatThreads(threads);
+      setChatHistoryError("");
+      return threads;
+    } catch (error) {
+      setChatHistoryError("Conversation history is temporarily unavailable.");
+      appendLog({ endpoint: "/chat/threads", ok: false, detail: asErrorText(error) });
+      return [];
+    }
+  };
+
+  const restoreConversationHistory = async () => {
+    setChatHistoryLoading(true);
+    const threads = await refreshChatThreads();
+    const currentExists = threads.some((thread) => thread?.thread_id === chatThreadId);
+    const threadToRestore = currentExists ? chatThreadId : String(threads[0]?.thread_id || "");
+    if (threadToRestore) {
+      await loadChatThread(threadToRestore, { quiet: true });
+    }
+    setChatHistoryLoading(false);
+  };
+
   const sendMessage = async (overrideText) => {
     const content = String(typeof overrideText === "string" ? overrideText : draft).trim();
     if (!content || chatBusy || chatRequestPendingRef.current) return;
@@ -1184,6 +1259,7 @@ export default function App() {
           detail: `route=${responseRoute} placeholder=${placeholderShown ? "shown" : "skipped"} local_api_request_ms=${localApiRequestMs} visible_total_ms=${visibleTotalMs} grace_ms=${graceMs}`
         });
       });
+      void refreshChatThreads();
     } catch (error) {
       const detail = asErrorText(error);
       setMessages((prev) => [
@@ -1215,6 +1291,7 @@ export default function App() {
     setChatThreadId(nextThreadId);
     saveStoredChatId(CHAT_THREAD_STORAGE_KEY, nextThreadId);
     setMessages([]);
+    setChatHistoryError("");
     appendLog({ endpoint: "chat/reset", ok: true, detail: "Conversation reset" });
   };
 
@@ -2094,7 +2171,11 @@ export default function App() {
     <>
       <ChatExperience
         chatBusy={chatBusy}
+        chatHistoryError={chatHistoryError}
+        chatHistoryLoading={chatHistoryLoading}
         chatPlaceholderVisible={chatPlaceholderVisible}
+        chatThreadId={chatThreadId}
+        chatThreads={chatThreads}
         composerPlaceholder={composerPlaceholder}
         draft={draft}
         messages={messages}
@@ -2102,6 +2183,7 @@ export default function App() {
         onExportConversation={exportConversation}
         onOpenAdmin={() => setAdminOpen(true)}
         onResetConversation={resetConversation}
+        onSelectThread={loadChatThread}
         onSendMessage={sendMessage}
         onStarterPrompt={sendMessage}
         onToggleTheme={toggleTheme}

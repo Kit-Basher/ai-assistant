@@ -244,6 +244,26 @@ class BrowserHarness:
         if not textarea.is_enabled(timeout=2000):
             raise SmokeFailure("chat textarea is not enabled")
 
+    def assert_latest_response_visible(self) -> dict[str, float]:
+        self.page.wait_for_timeout(100)
+        transcript = self.page.locator(".chat-transcript")
+        latest = self.page.locator(".chat-message-assistant .chat-bubble").last
+        transcript_box = transcript.bounding_box()
+        latest_box = latest.bounding_box()
+        if not transcript_box or not latest_box:
+            raise SmokeFailure("could not measure the latest assistant response")
+        transcript_bottom = float(transcript_box["y"] + transcript_box["height"])
+        latest_bottom = float(latest_box["y"] + latest_box["height"])
+        if latest_bottom > transcript_bottom + 2:
+            raise SmokeFailure(
+                f"latest assistant response is below the visible transcript: latest_bottom={latest_bottom} transcript_bottom={transcript_bottom}"
+            )
+        return {
+            "latest_bottom": latest_bottom,
+            "transcript_bottom": transcript_bottom,
+            "viewport_width": float(self.page.viewport_size["width"]),
+        }
+
     def assert_no_fatal_browser_errors(self, *, ignore_expected_network: bool = False) -> None:
         fatal_console = []
         for row in self.console_errors:
@@ -322,7 +342,9 @@ def _run_browser_journey(args: argparse.Namespace) -> list[Check]:
             if _contains_any(hello, ("traceback", "{", "\"ok\"", "runtime_mode")):
                 raise SmokeFailure(f"hello response looked like raw/debug output: {_safe_excerpt(hello)}")
             ui.assert_interactive()
+            desktop_visibility = ui.assert_latest_response_visible()
             checks.append(_pass("ordinary greeting", _safe_excerpt(hello), 'UI send "hello"'))
+            checks.append(_pass("desktop latest response stays visible", str(desktop_visibility), 'UI send "hello" at 1366px'))
 
             ram = ui.send("can you do a quick system check and see if anything is eating ram?", timeout=60.0)
             if not _contains_any(ram, ("ram is not under pressure", "under pressure", "you're fine", "used:")):
@@ -334,6 +356,12 @@ def _run_browser_journey(args: argparse.Namespace) -> list[Check]:
             if not _contains_any(ram, ("baseline", "usual")):
                 raise SmokeFailure(f"RAM answer lacks baseline create/compare language: {_safe_excerpt(ram)}")
             checks.append(_pass("normal-user RAM check renders concise answer", _safe_excerpt(ram), "UI RAM check"))
+
+            page.set_viewport_size({"width": 390, "height": 844})
+            mobile_reply = ui.send("are you here?", timeout=30.0)
+            mobile_visibility = ui.assert_latest_response_visible()
+            checks.append(_pass("mobile latest response stays visible", f"{mobile_visibility} reply={_safe_excerpt(mobile_reply, 120)}", 'UI send "are you here?" at 390px'))
+            page.set_viewport_size({"width": 1366, "height": 900})
 
             details = ui.send("show top memory and CPU processes", timeout=60.0)
             if not _contains_any(details, ("top memory", "top cpu", "process")):
@@ -350,17 +378,36 @@ def _run_browser_journey(args: argparse.Namespace) -> list[Check]:
             before_refresh_assistants = len(ui.assistant_rows())
             page.reload(wait_until="domcontentloaded", timeout=20000)
             page.locator("textarea").wait_for(state="visible", timeout=15000)
+            page.wait_for_function(
+                "([users, assistants]) => document.querySelectorAll('.chat-message-user .chat-bubble').length === users && document.querySelectorAll('.chat-message-assistant .chat-bubble').length === assistants",
+                arg=[before_refresh_users, before_refresh_assistants],
+                timeout=15000,
+            )
             after_refresh_body = ui.body_text()
             after_refresh_users = len(ui.user_rows())
             after_refresh_assistants = len(ui.assistant_rows())
             if "Working on it" in after_refresh_body:
                 raise SmokeFailure("refresh left stale loading state visible")
-            if after_refresh_users or after_refresh_assistants:
-                refresh_evidence = f"transcript persisted users={after_refresh_users} assistants={after_refresh_assistants}"
-            else:
-                refresh_evidence = f"transient transcript cleared coherently; previous users={before_refresh_users} assistants={before_refresh_assistants}"
+            if after_refresh_users != before_refresh_users or after_refresh_assistants != before_refresh_assistants:
+                raise SmokeFailure(
+                    f"reload did not restore transcript: before={before_refresh_users}/{before_refresh_assistants} after={after_refresh_users}/{after_refresh_assistants}"
+                )
+            refresh_evidence = f"transcript restored users={after_refresh_users} assistants={after_refresh_assistants}"
             ui.assert_interactive()
             checks.append(_pass("page refresh survival", refresh_evidence, "browser reload"))
+
+            page.locator(".conversation-history .new-chat-button").click(timeout=5000)
+            if ui.user_rows() or ui.assistant_rows():
+                raise SmokeFailure("New chat did not clear only the active transcript")
+            prior_thread = page.locator(".conversation-history-item").filter(has_text="hello").first
+            prior_thread.wait_for(state="visible", timeout=10000)
+            prior_thread.click(timeout=5000)
+            page.wait_for_function(
+                "([users, assistants]) => document.querySelectorAll('.chat-message-user .chat-bubble').length === users && document.querySelectorAll('.chat-message-assistant .chat-bubble').length === assistants",
+                arg=[before_refresh_users, before_refresh_assistants],
+                timeout=15000,
+            )
+            checks.append(_pass("new chat preserves selectable history", f"restored users={len(ui.user_rows())} assistants={len(ui.assistant_rows())}", "New chat; select prior conversation"))
 
             _run_systemctl(["stop", SERVICE_NAME], timeout=20.0)
             api_was_stopped = True

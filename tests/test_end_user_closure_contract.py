@@ -71,7 +71,10 @@ class TestEndUserClosureContract(unittest.TestCase):
         self.assertIn('"node_modules/@esbuild/win32-x64"', lockfile)
 
     def test_webui_live_smoke_requires_chat_first_asset_markers(self) -> None:
-        good = "chat-product-shell Ask for help naturally. What can I help you with? Advanced"
+        good = (
+            "chat-product-shell Ask for help naturally. What can I help you with? Advanced "
+            "conversation-history Jump to latest /chat/threads"
+        )
         self.assertEqual([], webui_smoke._chat_first_warnings(good))
         warnings = webui_smoke._chat_first_warnings("AdminPanel DebugTab")
         self.assertTrue(any("chat-first marker" in warning for warning in warnings))

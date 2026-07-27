@@ -10235,6 +10235,59 @@ class AgentRuntime:
             return explicit_thread_id
         return f"{user_id}:thread"
 
+    def _record_chat_transcript(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+        user_content: str,
+        assistant_content: str,
+        source_surface: str,
+        request_id: str,
+    ) -> None:
+        """Persist display history without making chat availability depend on history writes."""
+        try:
+            with self._orchestrator_lock:
+                self._ensure_memory_db().record_chat_turn(
+                    user_id=user_id,
+                    thread_id=thread_id,
+                    user_content=user_content,
+                    assistant_content=assistant_content,
+                    source_surface=source_surface,
+                    request_id=request_id,
+                )
+        except Exception as exc:
+            self._safe_log_event(
+                "chat.transcript_write_failed",
+                {
+                    "error": exc.__class__.__name__,
+                    "source_surface": source_surface,
+                },
+            )
+
+    def chat_threads(self, payload: dict[str, Any]) -> dict[str, Any]:
+        user_id = self._chat_user_id(payload)
+        try:
+            limit = min(50, max(1, int(payload.get("limit") or 50)))
+        except (TypeError, ValueError):
+            limit = 50
+        with self._orchestrator_lock:
+            threads = self._ensure_memory_db().list_chat_threads(user_id=user_id, limit=limit)
+        return {"ok": True, "threads": threads, "count": len(threads), "limit": limit}
+
+    def chat_thread(self, thread_id: str, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        user_id = self._chat_user_id(payload)
+        with self._orchestrator_lock:
+            thread = self._ensure_memory_db().get_chat_thread(user_id=user_id, thread_id=thread_id)
+        if thread is None:
+            return False, {
+                "ok": False,
+                "error": "chat_thread_not_found",
+                "error_kind": "not_found",
+                "message": "That conversation was not found for this browser session.",
+            }
+        return True, {"ok": True, "thread": thread}
+
     @staticmethod
     def _payload_setup_state_hint(payload: dict[str, Any]) -> dict[str, Any]:
         hint = payload.get("setup_state_hint")
@@ -11630,6 +11683,14 @@ class AgentRuntime:
                 generic_fallback_allowed=serialized.generic_fallback_allowed,
                 generic_fallback_reason=serialized.generic_fallback_reason,
             )
+            self._record_chat_transcript(
+                user_id=user_id,
+                thread_id=thread_id,
+                user_content=last_user_text,
+                assistant_content=str(serialized.body.get("message") or social_turn_text),
+                source_surface=source_surface,
+                request_id=request_id,
+            )
             return bool(serialized.ok), serialized.body
         previous_chat_scope = self._set_active_chat_scope(user_id=user_id, thread_id=thread_id)
         try:
@@ -11727,6 +11788,17 @@ class AgentRuntime:
             generic_fallback_allowed=serialized.generic_fallback_allowed,
             generic_fallback_reason=serialized.generic_fallback_reason,
         )
+        assistant_payload = serialized.body.get("assistant") if isinstance(serialized.body.get("assistant"), dict) else {}
+        assistant_content = str((assistant_payload or {}).get("content") or serialized.body.get("message") or "").strip()
+        if assistant_content:
+            self._record_chat_transcript(
+                user_id=user_id,
+                thread_id=thread_id,
+                user_content=last_user_text,
+                assistant_content=assistant_content,
+                source_surface=source_surface,
+                request_id=request_id,
+            )
         self._log_request("/chat", serialized.ok, meta)
         return serialized.ok, serialized.body
 
@@ -23442,6 +23514,37 @@ class APIServerHandler(BaseHTTPRequestHandler):
             return False
 
     def _send_json(self, status: int, payload: dict[str, Any]) -> None:
+        pending_chat_payload = getattr(self, "_chat_transcript_request_payload", None)
+        transcript_recorded = bool(getattr(self, "_chat_transcript_recorded", False))
+        if isinstance(pending_chat_payload, dict) and not transcript_recorded:
+            # Some deterministic /chat responses (for example a concise
+            # clarification) return before AgentRuntime.chat is entered. Keep
+            # those visible turns in the same durable UI history as normal chat.
+            self._chat_transcript_recorded = True
+            try:
+                messages = self.runtime._normalize_messages(pending_chat_payload)
+                user_content = str(messages[-1].get("content") or "").strip() if messages else ""
+                assistant_payload = payload.get("assistant") if isinstance(payload.get("assistant"), dict) else {}
+                assistant_content = str(
+                    (assistant_payload or {}).get("content")
+                    or payload.get("message")
+                    or payload.get("error")
+                    or ""
+                ).strip()
+                if user_content and assistant_content:
+                    user_id = self.runtime._chat_user_id(pending_chat_payload)
+                    self.runtime._record_chat_transcript(
+                        user_id=user_id,
+                        thread_id=self.runtime._chat_thread_id(pending_chat_payload, user_id=user_id),
+                        user_content=user_content,
+                        assistant_content=assistant_content,
+                        source_surface=str(pending_chat_payload.get("source_surface") or "api").strip().lower() or "api",
+                        request_id=str(pending_chat_payload.get("request_id") or pending_chat_payload.get("trace_id") or uuid.uuid4().hex),
+                    )
+            except Exception:
+                # Transcript persistence is best effort and must never replace
+                # the actual assistant response.
+                pass
         body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
         self.send_response(status)
         self.close_connection = True
@@ -24157,6 +24260,24 @@ class APIServerHandler(BaseHTTPRequestHandler):
             }:
                 self._send_method_not_allowed(method="GET", path=path, allowed_methods=["POST"])
                 return
+            if path == "/chat/threads":
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                payload = {
+                    "limit": query.get("limit", [50])[0],
+                    "session_id": query.get("session_id", [None])[0],
+                    "source_surface": query.get("source_surface", ["webui"])[0],
+                }
+                self._send_json(200, self.runtime.chat_threads(payload))
+                return
+            if len(parts) == 3 and parts[:2] == ["chat", "threads"]:
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                payload = {
+                    "session_id": query.get("session_id", [None])[0],
+                    "source_surface": query.get("source_surface", ["webui"])[0],
+                }
+                ok, body = self.runtime.chat_thread(urllib.parse.unquote(parts[2]), payload)
+                self._send_json(200 if ok else 404, body)
+                return
             if path == "/ready":
                 self._send_json(200, self.runtime.ready_status())
                 return
@@ -24482,6 +24603,9 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 self._send_method_not_allowed(method="POST", path=path, allowed_methods=["GET"])
                 return
             payload = self._read_json()
+            if path == "/chat":
+                self._chat_transcript_request_payload = dict(payload)
+                self._chat_transcript_recorded = False
             intent_assessment: IntentAssessment | None = None
             memory_debug_payload: dict[str, Any] | None = None
             authoritative_runtime_route = False
@@ -25218,6 +25342,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
                     envelope_payload = dict(envelope_payload)
                     envelope_payload["memory"] = memory_debug_payload
                     body["envelope"] = envelope_payload
+                self._chat_transcript_recorded = True
                 self._send_json(200 if ok else 400, body)
                 return
 

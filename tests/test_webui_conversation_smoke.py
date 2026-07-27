@@ -320,7 +320,6 @@ class TestWebuiConversationSmoke(unittest.TestCase):
                     "messages": [{"role": "user", "content": "What should I do first?"}],
                     "session_id": "webui-smoke-session",
                     "thread_id": "webui-smoke-thread",
-                    "user_id": "webui-smoke-user",
                     "source_surface": "webui",
                     "purpose": "chat",
                     "task_type": "chat",
@@ -345,7 +344,6 @@ class TestWebuiConversationSmoke(unittest.TestCase):
                     "messages": [{"role": "user", "content": "What should I do first?"}],
                     "session_id": "webui-smoke-session",
                     "thread_id": "webui-smoke-thread",
-                    "user_id": "webui-smoke-user",
                     "source_surface": "webui",
                     "purpose": "chat",
                     "task_type": "chat",
@@ -370,14 +368,46 @@ class TestWebuiConversationSmoke(unittest.TestCase):
                 self.assertEqual(2, len(orchestrator.calls))
                 first_call = orchestrator.calls[0]
                 second_call = orchestrator.calls[1]
-                self.assertEqual("webui-smoke-user", first_call["user_id"])
-                self.assertEqual("webui-smoke-user", second_call["user_id"])
+                self.assertEqual("webui:webui-smoke-session", first_call["user_id"])
+                self.assertEqual("webui:webui-smoke-session", second_call["user_id"])
                 self.assertEqual("webui-smoke-thread", str(first_call["chat_context"].get("thread_id") or ""))
                 self.assertEqual("webui-smoke-thread", str(second_call["chat_context"].get("thread_id") or ""))
                 self.assertEqual("webui", str(first_call["chat_context"].get("source_surface") or ""))
                 self.assertEqual("webui", str(second_call["chat_context"].get("source_surface") or ""))
                 self.assertEqual("What should I do first?", str(first_call["chat_context"].get("messages")[-1]["content"]))
                 self.assertEqual("What should I do first?", str(second_call["chat_context"].get("messages")[-1]["content"]))
+
+                history_path = "/chat/threads?limit=50&session_id=webui-smoke-session&source_surface=webui"
+                history_status, history_body, _history_raw = (
+                    request_json(request_base, "GET", history_path)
+                    if use_network
+                    else request_json(runtime, "GET", history_path)
+                )
+                self.assertEqual(200, history_status)
+                self.assertEqual(1, history_body.get("count"))
+                self.assertEqual("webui-smoke-thread", history_body["threads"][0]["thread_id"])
+                self.assertEqual(4, history_body["threads"][0]["message_count"])
+                self.assertEqual("What should I do first?", history_body["threads"][0]["title"])
+
+                thread_path = "/chat/threads/webui-smoke-thread?session_id=webui-smoke-session&source_surface=webui"
+                thread_status, thread_body, _thread_raw = (
+                    request_json(request_base, "GET", thread_path)
+                    if use_network
+                    else request_json(runtime, "GET", thread_path)
+                )
+                self.assertEqual(200, thread_status)
+                stored_messages = thread_body["thread"]["messages"]
+                self.assertEqual(["user", "assistant", "user", "assistant"], [row["role"] for row in stored_messages])
+                self.assertEqual("Start with the smallest next step.", stored_messages[-1]["content"])
+
+                missing_path = "/chat/threads/webui-smoke-thread?session_id=another-session&source_surface=webui"
+                missing_status, missing_body, _missing_raw = (
+                    request_json(request_base, "GET", missing_path)
+                    if use_network
+                    else request_json(runtime, "GET", missing_path)
+                )
+                self.assertEqual(404, missing_status)
+                self.assertEqual("chat_thread_not_found", missing_body.get("error"))
             finally:
                 if server is not None and thread is not None:
                     server.shutdown()

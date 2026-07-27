@@ -2887,6 +2887,145 @@ class MemoryDB:
         records.sort(key=lambda row: str(row.get("last_ts") or ""), reverse=True)
         return records[:max_rows]
 
+    @staticmethod
+    def _chat_preview(value: str, *, limit: int = 160) -> str:
+        compact = " ".join(str(value or "").split())
+        if len(compact) <= limit:
+            return compact
+        return compact[: max(1, limit - 1)].rstrip() + "…"
+
+    def record_chat_turn(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+        user_content: str,
+        assistant_content: str,
+        source_surface: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        normalized_user_id = str(user_id or "").strip()
+        normalized_thread_id = str(thread_id or "").strip()
+        normalized_user_content = str(user_content or "").strip()
+        normalized_assistant_content = str(assistant_content or "").strip()
+        normalized_surface = str(source_surface or "api").strip().lower() or "api"
+        normalized_request_id = str(request_id or "").strip()
+        if not normalized_user_id or not normalized_thread_id or not normalized_user_content or not normalized_assistant_content:
+            raise ValueError("chat_turn_requires_user_thread_and_messages")
+
+        created_at = self._now_iso()
+        title = self._chat_preview(normalized_user_content, limit=72) or "New conversation"
+        preview = self._chat_preview(normalized_assistant_content)
+        with self.transaction():
+            existing = self._conn.execute(
+                "SELECT title, created_at FROM chat_threads WHERE user_id = ? AND thread_id = ?",
+                (normalized_user_id, normalized_thread_id),
+            ).fetchone()
+            self._conn.execute(
+                """
+                INSERT INTO chat_threads (
+                    user_id, thread_id, title, preview, source_surface, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, thread_id) DO UPDATE SET
+                    preview = excluded.preview,
+                    source_surface = excluded.source_surface,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    normalized_user_id,
+                    normalized_thread_id,
+                    str(existing["title"] if existing is not None else title),
+                    preview,
+                    normalized_surface,
+                    str(existing["created_at"] if existing is not None else created_at),
+                    created_at,
+                ),
+            )
+            self._conn.executemany(
+                """
+                INSERT INTO chat_messages (
+                    user_id, thread_id, role, content, source_surface, request_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    (
+                        normalized_user_id,
+                        normalized_thread_id,
+                        "user",
+                        normalized_user_content,
+                        normalized_surface,
+                        normalized_request_id,
+                        created_at,
+                    ),
+                    (
+                        normalized_user_id,
+                        normalized_thread_id,
+                        "assistant",
+                        normalized_assistant_content,
+                        normalized_surface,
+                        normalized_request_id,
+                        created_at,
+                    ),
+                ),
+            )
+        return self.get_chat_thread(user_id=normalized_user_id, thread_id=normalized_thread_id) or {}
+
+    def list_chat_threads(self, *, user_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        normalized_user_id = str(user_id or "").strip()
+        max_rows = min(50, max(1, int(limit)))
+        if not normalized_user_id:
+            return []
+        rows = self._conn.execute(
+            """
+            SELECT
+                t.thread_id,
+                t.title,
+                t.preview,
+                t.source_surface,
+                t.created_at,
+                t.updated_at,
+                COUNT(m.id) AS message_count
+            FROM chat_threads AS t
+            LEFT JOIN chat_messages AS m
+              ON m.user_id = t.user_id AND m.thread_id = t.thread_id
+            WHERE t.user_id = ?
+            GROUP BY t.user_id, t.thread_id
+            ORDER BY t.updated_at DESC
+            LIMIT ?
+            """,
+            (normalized_user_id, max_rows),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_chat_thread(self, *, user_id: str, thread_id: str) -> dict[str, Any] | None:
+        normalized_user_id = str(user_id or "").strip()
+        normalized_thread_id = str(thread_id or "").strip()
+        if not normalized_user_id or not normalized_thread_id:
+            return None
+        thread = self._conn.execute(
+            """
+            SELECT thread_id, title, preview, source_surface, created_at, updated_at
+            FROM chat_threads
+            WHERE user_id = ? AND thread_id = ?
+            """,
+            (normalized_user_id, normalized_thread_id),
+        ).fetchone()
+        if thread is None:
+            return None
+        messages = self._conn.execute(
+            """
+            SELECT id, role, content, source_surface, request_id, created_at
+            FROM chat_messages
+            WHERE user_id = ? AND thread_id = ?
+            ORDER BY id ASC
+            """,
+            (normalized_user_id, normalized_thread_id),
+        ).fetchall()
+        payload = dict(thread)
+        payload["messages"] = [dict(row) for row in messages]
+        payload["message_count"] = len(messages)
+        return payload
+
     def clear_thread_anchors(self, thread_id: str) -> None:
         self._conn.execute("DELETE FROM thread_anchors WHERE thread_id = ?", (thread_id,))
         self._commit_if_needed()

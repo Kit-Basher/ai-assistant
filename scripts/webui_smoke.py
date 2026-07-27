@@ -68,10 +68,25 @@ def _chat_first_warnings(asset_body: str) -> list[str]:
         "chat-product-shell",
         "Ask for help naturally.",
         "What can I help you with?",
+        "conversation-history",
+        "Jump to latest",
+        "/chat/threads",
     )
     warnings = [f"missing chat-first marker: {marker}" for marker in required if marker not in asset_body]
     if "onOpenAdmin" not in asset_body and "Advanced" not in asset_body:
         warnings.append("advanced controls are not represented as a secondary entry")
+    return warnings
+
+
+def _chat_history_warnings(payload: dict[str, Any]) -> list[str]:
+    warnings: list[str] = []
+    if not bool(payload.get("ok", False)):
+        warnings.append("chat thread history endpoint not ok")
+    if not isinstance(payload.get("threads"), list):
+        warnings.append("chat thread history did not return a thread list")
+    limit = int(payload.get("limit") or 0)
+    if limit < 1 or limit > 50:
+        warnings.append("chat thread history limit is outside the supported range")
     return warnings
 
 
@@ -137,6 +152,10 @@ def main(argv: list[str] | None = None) -> int:
         ready_status, ready_payload, ready_body = _fetch_json(str(args.base_url), "/ready")
         state_status, state_payload, state_body = _fetch_json(str(args.base_url), "/state")
         packs_state_status, packs_state_payload, packs_state_body = _fetch_json(str(args.base_url), "/packs/state")
+        chat_threads_status, chat_threads_payload, chat_threads_body = _fetch_json(
+            str(args.base_url),
+            "/chat/threads?limit=50&source_surface=webui",
+        )
     except urllib.error.URLError as exc:
         print(f"FAIL: could not reach web UI at {args.base_url}: {exc}")
         return 1
@@ -156,12 +175,15 @@ def main(argv: list[str] | None = None) -> int:
     packs_summary = _packs_state_summary(packs_state_payload) or _first_line(packs_state_body)
     print(f"route: /packs/state status={packs_state_status}")
     print(f"first_line: {packs_summary}")
+    print(f"route: /chat/threads status={chat_threads_status}")
+    print(f"first_line: {int(chat_threads_payload.get('count') or 0)} saved conversation(s)")
 
     warnings = (
         _failure_warnings(root_html, ready_payload)
         + (["missing built chat asset"] if not asset_path or asset_status != 200 else _chat_first_warnings(asset_body))
         + _state_warnings(state_payload)
         + _packs_state_warnings(packs_state_payload)
+        + (["chat thread history route failed"] if chat_threads_status != 200 else _chat_history_warnings(chat_threads_payload))
     )
     print(f"dead_end_warnings: {', '.join(warnings) if warnings else 'none'}")
     return 1 if warnings else 0

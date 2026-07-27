@@ -13,6 +13,7 @@ from scripts.release_smoke import EXTENDED_TEST_NODES, MAIN_TEST_NODES
 
 PY_COMPILE_TARGETS: tuple[str, ...] = (
     "agent/api_server.py",
+    "memory/db.py",
     "agent/orchestrator.py",
     "agent/setup_chat_flow.py",
     "agent/filesystem_skill.py",
@@ -36,6 +37,7 @@ PY_COMPILE_TARGETS: tuple[str, ...] = (
     "scripts/split_smoke.py",
     "scripts/reference_pack_workflow_smoke.py",
     "scripts/webui_smoke.py",
+    "scripts/browser_ui_survival_smoke.py",
     "scripts/executor_registry_smoke.py",
     "scripts/support_bundle_v2_smoke.py",
     "scripts/backup_v1_smoke.py",
@@ -53,6 +55,7 @@ def _pytest_command(test_nodes: tuple[str, ...]) -> tuple[str, ...]:
 
 RELEASE_GATE_COMMANDS: tuple[tuple[str, ...], ...] = (
     (sys.executable, "-m", "py_compile", *PY_COMPILE_TARGETS),
+    ("bash", "scripts/build_webui.sh"),
     _pytest_command(MAIN_TEST_NODES),
     _pytest_command(EXTENDED_TEST_NODES),
     ("git", "diff", "--check"),

@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useRef } from "react";
+import { useCallback, useLayoutEffect, useRef, useState } from "react";
 
 const BOTTOM_STICKINESS_PX = 96;
 
@@ -175,7 +175,11 @@ function ThinkingBubble() {
 
 export default function ChatExperience({
   chatBusy,
+  chatHistoryError,
+  chatHistoryLoading,
   chatPlaceholderVisible,
+  chatThreadId,
+  chatThreads,
   composerPlaceholder,
   draft,
   messages,
@@ -183,6 +187,7 @@ export default function ChatExperience({
   onExportConversation,
   onOpenAdmin,
   onResetConversation,
+  onSelectThread,
   onSendMessage,
   onStarterPrompt,
   onToggleTheme,
@@ -190,12 +195,12 @@ export default function ChatExperience({
   starterPrompts,
   theme
 }) {
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const transcriptRef = useRef(null);
   const shouldStickToBottomRef = useRef(true);
   const forceNextScrollRef = useRef(false);
-  const userTurnInProgressRef = useRef(false);
   const previousMessageCountRef = useRef(messages.length);
-  const previousBusyRef = useRef(chatBusy);
   const scrollFrameRef = useRef(null);
   const settleFrameRef = useRef(null);
 
@@ -215,6 +220,7 @@ export default function ChatExperience({
       settleFrameRef.current = window.requestAnimationFrame(() => {
         scrollToBottom(transcript);
         shouldStickToBottomRef.current = true;
+        setShowJumpToLatest(false);
         settleFrameRef.current = null;
       });
       scrollFrameRef.current = null;
@@ -225,13 +231,14 @@ export default function ChatExperience({
     const transcript = transcriptRef.current;
     if (!transcript) return;
     shouldStickToBottomRef.current = isNearBottom(transcript);
+    setShowJumpToLatest(!shouldStickToBottomRef.current);
   }, []);
 
   const handleSendMessage = useCallback(
     (message) => {
       forceNextScrollRef.current = true;
-      userTurnInProgressRef.current = true;
       shouldStickToBottomRef.current = true;
+      setShowJumpToLatest(false);
       onSendMessage(message);
       maybeScrollToBottom({ force: true });
     },
@@ -241,17 +248,12 @@ export default function ChatExperience({
   useLayoutEffect(() => {
     const messageCountChanged = previousMessageCountRef.current !== messages.length;
     previousMessageCountRef.current = messages.length;
-
-    const assistantCompleted = previousBusyRef.current && !chatBusy;
-    previousBusyRef.current = chatBusy;
-
-    const forceScroll =
-      forceNextScrollRef.current ||
-      (userTurnInProgressRef.current && (messageCountChanged || assistantCompleted));
+    const forceScroll = forceNextScrollRef.current;
     forceNextScrollRef.current = false;
-    if (assistantCompleted) userTurnInProgressRef.current = false;
-
     maybeScrollToBottom({ force: forceScroll });
+    if (messageCountChanged && !forceScroll && !shouldStickToBottomRef.current) {
+      setShowJumpToLatest(true);
+    }
   }, [chatBusy, chatPlaceholderVisible, maybeScrollToBottom, messages]);
 
   useLayoutEffect(() => {
@@ -270,6 +272,9 @@ export default function ChatExperience({
         </div>
         <div className="product-topbar-actions">
           <span className={`status-pill status-pill-${status.tone}`}>{status.label}</span>
+          <button className="history-entry" onClick={() => setHistoryOpen((current) => !current)} type="button">
+            Conversations
+          </button>
           <button
             aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
             className="theme-toggle"
@@ -285,7 +290,50 @@ export default function ChatExperience({
         </div>
       </header>
 
-      <main className="chat-product-main">
+      <main className="chat-product-main chat-with-history">
+        <aside aria-label="Conversation history" className={`conversation-history ${historyOpen ? "conversation-history-open" : ""}`}>
+          <div className="conversation-history-header">
+            <div>
+              <p className="product-kicker">Conversations</p>
+              <h2>Your recent chats</h2>
+            </div>
+            <button aria-label="Close conversation history" className="history-close" onClick={() => setHistoryOpen(false)} type="button">Close</button>
+          </div>
+          <button
+            className="button-primary new-chat-button"
+            disabled={chatBusy}
+            onClick={() => {
+              onResetConversation();
+              setHistoryOpen(false);
+            }}
+            type="button"
+          >
+            New chat
+          </button>
+          {chatHistoryLoading ? <p className="conversation-history-note">Loading conversations…</p> : null}
+          {chatHistoryError ? <p className="conversation-history-note conversation-history-error">{chatHistoryError}</p> : null}
+          {!chatHistoryLoading && chatThreads.length === 0 ? (
+            <p className="conversation-history-note">Your completed conversations will appear here.</p>
+          ) : null}
+          <div className="conversation-history-list">
+            {chatThreads.map((thread) => (
+              <button
+                aria-current={thread.thread_id === chatThreadId ? "page" : undefined}
+                className={thread.thread_id === chatThreadId ? "conversation-history-item conversation-history-item-active" : "conversation-history-item"}
+                disabled={chatBusy}
+                key={thread.thread_id}
+                onClick={() => {
+                  onSelectThread(thread.thread_id);
+                  setHistoryOpen(false);
+                }}
+                type="button"
+              >
+                <strong>{thread.title || "Conversation"}</strong>
+                <span>{thread.preview || `${thread.message_count || 0} messages`}</span>
+              </button>
+            ))}
+          </div>
+        </aside>
         <section className="chat-surface">
           {messages.length === 0 ? (
             <div className="chat-empty-state">
@@ -309,6 +357,19 @@ export default function ChatExperience({
               {chatPlaceholderVisible ? <ThinkingBubble /> : null}
             </div>
           )}
+
+          {showJumpToLatest && messages.length > 0 ? (
+            <button
+              className="jump-to-latest"
+              onClick={() => {
+                shouldStickToBottomRef.current = true;
+                maybeScrollToBottom({ force: true });
+              }}
+              type="button"
+            >
+              Jump to latest
+            </button>
+          ) : null}
 
           {messages.length > 0 ? (
             <div className="conversation-tools">

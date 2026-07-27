@@ -22,6 +22,7 @@ MAIN_TEST_NODES: tuple[str, ...] = (
     "tests/test_desktop_launcher.py",
     "tests/test_first_run_release_smoke.py",
     "tests/test_webui_conversation_smoke.py",
+    "tests/test_webui_history_contract.py",
     "tests/test_adversarial_chat_routing.py",
     "tests/test_assistant_behavior_release_gate.py",
     "tests/test_install_first_run_hardening.py::TestInstallFirstRunHardening::test_resolved_default_paths_use_canonical_location_for_fresh_install",

@@ -90,6 +90,37 @@ CREATE TABLE IF NOT EXISTS thread_labels (
     updated_at TEXT NOT NULL
 );
 
+-- Durable, user-facing chat transcripts.  These are intentionally separate
+-- from semantic memory: displaying a conversation must not depend on whether
+-- long-term memory ingestion or retrieval is enabled.
+CREATE TABLE IF NOT EXISTS chat_threads (
+    user_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    preview TEXT NOT NULL,
+    source_surface TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, thread_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_threads_user_updated
+    ON chat_threads(user_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+    content TEXT NOT NULL,
+    source_surface TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_messages_thread
+    ON chat_messages(user_id, thread_id, id);
+
 CREATE TABLE IF NOT EXISTS graph_nodes (
     thread_id TEXT NOT NULL,
     node_id TEXT NOT NULL,
