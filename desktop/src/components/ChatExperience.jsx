@@ -393,6 +393,7 @@ export default function ChatExperience({
               +
             </button>
             <textarea
+              disabled={chatHistoryLoading}
               onChange={(event) => onDraftChange(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Enter" && !event.shiftKey) {
@@ -404,7 +405,7 @@ export default function ChatExperience({
               rows={1}
               value={draft}
             />
-            <button className="button-primary" disabled={chatBusy || !draft.trim()} type="submit">
+            <button className="button-primary" disabled={chatBusy || chatHistoryLoading || !draft.trim()} type="submit">
               Send
             </button>
           </form>

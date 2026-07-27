@@ -1188,7 +1188,7 @@ export default function App() {
 
   const sendMessage = async (overrideText) => {
     const content = String(typeof overrideText === "string" ? overrideText : draft).trim();
-    if (!content || chatBusy || chatRequestPendingRef.current) return;
+    if (!content || chatBusy || chatHistoryLoading || chatRequestPendingRef.current) return;
 
     const nowMs = () => (typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now());
     const scheduleVisibleRender =

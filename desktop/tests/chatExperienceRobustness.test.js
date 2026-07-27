@@ -25,7 +25,8 @@ test("ChatExperience force-scrolls after user send and preserves passive reading
 
 test("ChatExperience exposes busy and approval states without enabling duplicate sends", () => {
   assert.match(chatExperience, /function ThinkingBubble\(\)/);
-  assert.match(chatExperience, /disabled=\{chatBusy \|\| !draft\.trim\(\)\}/);
+  assert.match(chatExperience, /disabled=\{chatBusy \|\| chatHistoryLoading \|\| !draft\.trim\(\)\}/);
+  assert.match(chatExperience, /disabled=\{chatHistoryLoading\}/);
   assert.match(chatExperience, /disabled=\{disabled\} onClick=\{\(\) => onReply\(confirmation\.approveCommand\)\}/);
   assert.match(chatExperience, /disabled=\{disabled\} onClick=\{\(\) => onReply\(confirmation\.cancelCommand\)\}/);
 });
