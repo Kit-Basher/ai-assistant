@@ -177,6 +177,26 @@ def test_false_runtime_claim_from_model_is_replaced_by_grounded_contract() -> No
     assert "local personal agent" in message
 
 
+def test_ordinary_change_explanation_reaches_generic_chat_not_model_capability() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        runtime = AgentRuntime(_config(str(root / "registry.json"), str(root / "agent.db")))
+        fake = {
+            "ok": True,
+            "text": "Leaves change colour as chlorophyll breaks down and other pigments become visible.",
+            "provider": "ollama",
+            "model": "Gemma:latest",
+            "duration_ms": 4,
+            "data": {},
+        }
+        with patch("agent.orchestrator.route_inference", return_value=fake):
+            response = _chat(runtime, "In one sentence, explain why leaves change colour in autumn.")
+    meta = response.get("meta") if isinstance(response.get("meta"), dict) else {}
+    assert meta.get("route") == "generic_chat"
+    assert meta.get("used_llm") is True
+    assert _understanding(response).get("selected_capability_id") is None
+
+
 def test_live_capability_answer_is_registry_snapshot_not_static_prose() -> None:
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)

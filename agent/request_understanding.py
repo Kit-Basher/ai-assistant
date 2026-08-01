@@ -286,6 +286,14 @@ class RequestUnderstandingService:
                 score *= 0.15
             if definition.capability_id == "packs.use" and boost == 0.0:
                 score *= 0.15
+            if definition.capability_id.startswith("models.") and not (
+                semantic_tokens
+                & {"model", "models", "ollama", "gemma", "qwen", "llama", "provider", "engine"}
+            ):
+                # Words such as "change", "current", and "which" occur in
+                # ordinary questions too. A model action needs an actual model
+                # domain concept before example-vector similarity can select it.
+                score *= 0.12
             if boost == 0.0 and overlap_count < 2:
                 score *= 0.55
             score = min(1.0, score + boost)
