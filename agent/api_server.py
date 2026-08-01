@@ -11589,6 +11589,7 @@ class AgentRuntime:
         }
 
         user_id = self._chat_user_id(payload)
+        thread_id = self._chat_thread_id(payload, user_id=user_id)
         request_understanding_preview = None
         unified_bootstrap_skip = False
         if not bootstrap_social_hint:
@@ -11596,6 +11597,7 @@ class AgentRuntime:
                 request_understanding_preview = self.orchestrator().preview_conversation_request(
                     user_id,
                     last_user_text,
+                    thread_id=thread_id,
                 )
                 unified_bootstrap_skip = bool(
                     request_understanding_preview.selected_capability_id
@@ -11615,7 +11617,6 @@ class AgentRuntime:
             _ = self._auto_bootstrap_local_chat_model()
             bootstrap_ms = int(max(0.0, time.monotonic() - bootstrap_started) * 1000)
             timings_ms["bootstrap_ms"] = bootstrap_ms
-        thread_id = self._chat_thread_id(payload, user_id=user_id)
         chat_context = {
             "payload": dict(payload),
             "messages": messages,
@@ -24833,6 +24834,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
                             unified_understanding_preview = orchestrator.preview_conversation_request(
                                 chat_user_id,
                                 str(input_text or ""),
+                                thread_id=request_thread_id,
                             )
                     except Exception:
                         assistant_followup_hint = {}

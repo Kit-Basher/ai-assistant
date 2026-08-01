@@ -245,3 +245,35 @@ def test_same_thread_again_reuses_last_capability_without_forging_approval() -> 
     understanding = _understanding(second)
     assert understanding.get("selected_capability_id") == "system.status"
     assert "same_thread_capability_reference" in understanding.get("context_used", [])
+
+
+def test_result_reference_never_crosses_chat_threads_for_same_user() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        runtime = AgentRuntime(_config(str(root / "registry.json"), str(root / "agent.db")))
+        model = _chat(
+            runtime,
+            "which local model is answering now?",
+            user="thread-bound",
+            thread="thread-bound:model",
+        )
+        assert (model.get("meta") or {}).get("route") == "model_status"  # type: ignore[union-attr]
+        fake = {
+            "ok": True,
+            "text": "Leaves change colour as chlorophyll breaks down.",
+            "provider": "ollama",
+            "model": "Gemma:latest",
+            "duration_ms": 4,
+            "data": {},
+        }
+        with patch("agent.orchestrator.route_inference", return_value=fake):
+            unrelated = _chat(
+                runtime,
+                "In one sentence, explain why leaves change colour in autumn.",
+                user="thread-bound",
+                thread="thread-bound:science",
+            )
+    assert (unrelated.get("meta") or {}).get("route") == "generic_chat"  # type: ignore[union-attr]
+    understanding = _understanding(unrelated)
+    assert understanding.get("selected_capability_id") is None
+    assert "same_thread_capability_reference" not in understanding.get("context_used", [])

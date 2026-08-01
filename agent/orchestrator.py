@@ -1259,8 +1259,14 @@ class Orchestrator:
             return self._assistant_memory_overview_response(user_id, query_text=text)
         return self._runtime_state_unavailable_response(route="assistant_clarification", reason="unknown_registered_capability")
 
-    def _understand_conversation_request(self, user_id: str, text: str) -> RequestUnderstanding:
-        previous = self._current_interpretable_result(user_id)
+    def _understand_conversation_request(
+        self,
+        user_id: str,
+        text: str,
+        *,
+        thread_id: str | None = None,
+    ) -> RequestUnderstanding:
+        previous = self._current_interpretable_result(user_id, thread_id=thread_id)
         previous_data = previous.get("payload") if isinstance(previous.get("payload"), dict) else {}
         previous_understanding = previous_data.get("request_understanding") if isinstance(previous_data.get("request_understanding"), dict) else {}
         referenced_id = str(previous_understanding.get("selected_capability_id") or "").strip().lower() or None
@@ -1277,9 +1283,15 @@ class Orchestrator:
             extracted_inputs=inputs,
         )
 
-    def preview_conversation_request(self, user_id: str, text: str) -> RequestUnderstanding:
+    def preview_conversation_request(
+        self,
+        user_id: str,
+        text: str,
+        *,
+        thread_id: str | None = None,
+    ) -> RequestUnderstanding:
         """Read-only API preflight using the same production understanding owner."""
-        return self._understand_conversation_request(user_id, text)
+        return self._understand_conversation_request(user_id, text, thread_id=thread_id)
 
     @staticmethod
     def _with_request_understanding(response: OrchestratorResponse, understanding: RequestUnderstanding) -> OrchestratorResponse:
@@ -6057,9 +6069,20 @@ class Orchestrator:
                 return kind
         return None
 
-    def _current_interpretable_result(self, user_id: str) -> dict[str, Any]:
+    def _current_interpretable_result(
+        self,
+        user_id: str,
+        *,
+        thread_id: str | None = None,
+    ) -> dict[str, Any]:
         state = self._last_interpretable_result.get(user_id)
         if not isinstance(state, dict):
+            return {}
+        expected_thread_id = str(
+            thread_id or self._active_thread_id_for_user(user_id) or ""
+        ).strip()
+        state_thread_id = str(state.get("thread_id") or "").strip()
+        if expected_thread_id and state_thread_id and state_thread_id != expected_thread_id:
             return {}
         created_ts = int(state.get("created_ts") or 0)
         if created_ts and int(time.time()) - created_ts > _INTERPRETABLE_RESULT_TTL_SECONDS:
@@ -6104,6 +6127,7 @@ class Orchestrator:
             return
         self._last_interpretable_result[user_id] = {
             "created_ts": int(time.time()),
+            "thread_id": self._active_thread_id_for_user(user_id),
             "route": route,
             "kind": str(payload.get("kind") or payload.get("type") or "").strip() or None,
             "user_text": str(user_text or "").strip(),
