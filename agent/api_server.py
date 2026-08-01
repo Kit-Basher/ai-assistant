@@ -11570,8 +11570,11 @@ class AgentRuntime:
         source_surface = str(payload.get("source_surface") or "api").strip().lower() or "api"
         last_user_text = str(messages[-1].get("content") or "").strip()
         route_decision_started = time.monotonic()
-        social_turn_kind = classify_trivial_social_turn(last_user_text)
-        route_decision = self.chat_route_decision(payload, last_user_text) if not social_turn_kind else {"route": "generic_chat"}
+        # The orchestrator's unified understanding layer owns every ordinary
+        # chat turn, including greetings and presence checks.
+        social_turn_kind = None
+        bootstrap_social_hint = classify_trivial_social_turn(last_user_text)
+        route_decision = self.chat_route_decision(payload, last_user_text)
         route_decision_ms = int(max(0.0, time.monotonic() - route_decision_started) * 1000)
         bootstrap_ms = 0
         llm_request_ms = 0
@@ -11585,12 +11588,33 @@ class AgentRuntime:
             "serialization_ms": serialization_ms,
         }
 
-        if not social_turn_kind and not self._skip_bootstrap_for_chat_route(route_decision):
+        user_id = self._chat_user_id(payload)
+        request_understanding_preview = None
+        unified_bootstrap_skip = False
+        if not bootstrap_social_hint and not self._skip_bootstrap_for_chat_route(route_decision):
+            try:
+                request_understanding_preview = self.orchestrator().preview_conversation_request(
+                    user_id,
+                    last_user_text,
+                )
+                unified_bootstrap_skip = bool(
+                    request_understanding_preview.selected_capability_id
+                    or request_understanding_preview.clarification
+                    or request_understanding_preview.fallback_category.value
+                    in {"grounded_casual", "unavailable_capability"}
+                )
+            except Exception:
+                request_understanding_preview = None
+                unified_bootstrap_skip = False
+        if (
+            not bootstrap_social_hint
+            and not unified_bootstrap_skip
+            and not self._skip_bootstrap_for_chat_route(route_decision)
+        ):
             bootstrap_started = time.monotonic()
             _ = self._auto_bootstrap_local_chat_model()
             bootstrap_ms = int(max(0.0, time.monotonic() - bootstrap_started) * 1000)
             timings_ms["bootstrap_ms"] = bootstrap_ms
-        user_id = self._chat_user_id(payload)
         thread_id = self._chat_thread_id(payload, user_id=user_id)
         chat_context = {
             "payload": dict(payload),
@@ -11604,6 +11628,7 @@ class AgentRuntime:
             "request_started_epoch": request_started_epoch,
             "memory_context_text": str(payload.get("memory_context_text") or "").strip(),
             "thread_id": thread_id,
+            "request_understanding_preview": request_understanding_preview,
         }
         chat_started = time.monotonic()
         self._runtime_events.log_chat_request_start(
@@ -24765,6 +24790,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 assistant_frontdoor_active = False
                 assistant_frontdoor_generic = False
                 assistant_followup_hint: dict[str, Any] = {}
+                unified_understanding_preview = None
                 legacy_clarification_allowed = True
                 suppress_thread_integrity_prompt = False
                 suppress_intent_choice_prompt = False
@@ -24801,8 +24827,16 @@ class APIServerHandler(BaseHTTPRequestHandler):
                             )
                             else {}
                         )
+                        if not authoritative_runtime_route and callable(
+                            getattr(orchestrator, "preview_conversation_request", None)
+                        ):
+                            unified_understanding_preview = orchestrator.preview_conversation_request(
+                                chat_user_id,
+                                str(input_text or ""),
+                            )
                     except Exception:
                         assistant_followup_hint = {}
+                        unified_understanding_preview = None
                     assistant_followup_kind = str(assistant_followup_hint.get("kind") or "").strip().lower() if isinstance(assistant_followup_hint, dict) else ""
                     # Pending assistant follow-ups should bypass the legacy
                     # clarify / chooser consumers so "yes please" can resume
@@ -25198,9 +25232,19 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if path == "/chat":
                 trace_id = self._request_trace_id(payload)
                 # Deterministic runtime/setup routes do not need memory retrieval.
-                # Keep selection at the HTTP boundary only for ordinary chat where
-                # the caller still expects memory debug details.
-                if not authoritative_runtime_route:
+                # Registry-selected turns already resolve their bounded context
+                # in the orchestrator. Avoid the broad semantic-memory retrieval
+                # for those turns; conversation/history requests deliberately
+                # retain it. This is a performance hint from the same unified
+                # understanding owner, not a second routing decision.
+                unified_capability_id = str(
+                    getattr(unified_understanding_preview, "selected_capability_id", None) or ""
+                ).strip().lower()
+                skip_general_memory_retrieval = bool(
+                    unified_capability_id
+                    and unified_capability_id != "conversation.history"
+                )
+                if not authoritative_runtime_route and not skip_general_memory_retrieval:
                     memory_context_payload = self.runtime.build_memory_context_for_payload(
                         payload,
                         intent=str(original_path).lstrip("/") or "chat",

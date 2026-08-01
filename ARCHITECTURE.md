@@ -16,7 +16,8 @@ Short orientation only. This is the system shape that matters for day-to-day wor
 ## Core Roles
 
 - Orchestrator: `agent/orchestrator.py`
-  - Classifies the turn.
+  - Runs deterministic approval/cancellation state before ordinary understanding.
+  - Uses `RequestUnderstandingService` and the live `CapabilityRegistry` to classify ordinary turns once.
   - Chooses deterministic runtime-truth handling vs LLM-backed chat.
   - Owns memory/continuity/clarification/confirmation behavior.
   - Skips expensive post-response guard work on safe read-only fast paths.
@@ -25,6 +26,10 @@ Short orientation only. This is the system shape that matters for day-to-day wor
 - Router/provider layer: `agent/llm/router.py` and provider adapters
   - Handles model/provider selection and provider transport.
   - Should not own assistant policy or turn classification.
+- Conversation capability registry: `agent/capability_registry.py`
+  - Declares stable IDs, contracts, availability/health, approval policy, invocation, verification, and provenance.
+- Request understanding: `agent/request_understanding.py`
+  - Preserves original text while producing normalized meaning, ranked candidates, ambiguity, validated inputs, approval classification, fallback category, and concise audit metadata.
 
 ## Boundary Rules
 
@@ -36,10 +41,11 @@ Short orientation only. This is the system shape that matters for day-to-day wor
 
 1. User sends a message from API, Web UI, or Telegram.
 2. Transport forwards the message into the API chat surface.
-3. API/orchestrator classifies the turn.
-4. If the turn is deterministic runtime truth, the orchestrator reads `RuntimeTruthService` and returns a grounded answer.
-5. If the turn is generic assistant work, the orchestrator routes through the LLM/controller path.
-6. The response is serialized with timing/meta fields and rendered back to the surface.
+3. Deterministic approval, denial, cancellation, expiry, and thread-binding checks run first.
+4. The unified understanding layer selects only a healthy registered capability, asks one clarification, or chooses a grounded fallback.
+5. Registered capabilities invoke the existing native runtime/files/model/pack/memory implementations through their hooks.
+6. Generic assistant work receives authoritative live runtime context before the single LLM generation, and its response is checked for contradictory runtime/access claims.
+7. The response is serialized with timing/meta fields and rendered back to the surface. Registered turns expose non-sensitive understanding diagnostics in the existing setup/runtime payload for UI debugging.
 
 ## What Not To Assume
 

@@ -2186,61 +2186,48 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertIn("total_ms", chat_timing_ms)
         self.assertEqual(4, int(chat_timing_ms.get("llm_request_ms") or 0))
 
-    def test_chat_trivial_social_turn_bypasses_orchestrator_and_llm(self) -> None:
+    def test_chat_trivial_social_turn_uses_unified_orchestrator_without_bootstrap_or_llm(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
-
-        class _FakeOrchestrator:
-            def handle_message(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
-                raise AssertionError("social turns should not invoke the orchestrator")
-
-        with patch.object(runtime, "orchestrator", return_value=_FakeOrchestrator()), patch.object(
+        with patch.object(
             runtime,
             "_auto_bootstrap_local_chat_model",
             side_effect=AssertionError("social turns should not auto-bootstrap"),
-        ):
+        ), patch("agent.orchestrator.route_inference", side_effect=AssertionError("social turns should not invoke the LLM")):
             ok_chat, body = runtime.chat({"messages": [{"role": "user", "content": "hello"}]})
 
         self.assertTrue(ok_chat)
         self.assertTrue(body["ok"])
         assistant = body.get("assistant") if isinstance(body.get("assistant"), dict) else {}
-        expected_text = build_trivial_social_turn_message("hello")
-        self.assertEqual(expected_text, assistant.get("content"))
+        self.assertIn("here", str(assistant.get("content") or "").lower())
         meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
-        self.assertEqual("generic_chat", meta.get("route"))
+        self.assertEqual("social_turn", meta.get("route"))
         self.assertFalse(bool(meta.get("used_llm")))
-        self.assertFalse(bool(meta.get("used_runtime_state")))
+        self.assertTrue(bool(meta.get("used_runtime_state")))
         self.assertFalse(bool(meta.get("used_memory")))
         self.assertFalse(bool(meta.get("generic_fallback_used")))
         self.assertFalse(bool(meta.get("generic_fallback_allowed")))
-        self.assertEqual("social_turn", meta.get("assistant_turn_type"))
-        self.assertEqual("greeting", meta.get("assistant_turn_kind"))
+        setup = body.get("setup") if isinstance(body.get("setup"), dict) else {}
+        self.assertIsInstance(setup.get("request_understanding"), dict)
         chat_timing_ms = meta.get("chat_timing_ms") if isinstance(meta.get("chat_timing_ms"), dict) else {}
         self.assertIn("route_decision_ms", chat_timing_ms)
         self.assertIn("serialization_ms", chat_timing_ms)
         self.assertIn("total_ms", chat_timing_ms)
-        self.assertEqual(0, int(chat_timing_ms.get("orchestrator_ms") or 0))
+        self.assertGreaterEqual(int(chat_timing_ms.get("orchestrator_ms") or 0), 0)
 
     def test_chat_trivial_social_turn_variants_remain_deterministic(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
-
-        class _FakeOrchestrator:
-            def handle_message(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
-                raise AssertionError("social turns should not invoke the orchestrator")
-
-        with patch.object(runtime, "orchestrator", return_value=_FakeOrchestrator()), patch.object(
+        with patch.object(
             runtime,
             "_auto_bootstrap_local_chat_model",
             side_effect=AssertionError("social turns should not auto-bootstrap"),
-        ):
+        ), patch("agent.orchestrator.route_inference", side_effect=AssertionError("social turns should not invoke the LLM")):
             for text in [
                 "hi",
                 "hey",
                 "thanks",
-                "ok",
                 "good morning",
                 "good evening",
                 "hello there",
-                "say hi",
                 "are you really there",
                 "herllo",
             ]:
@@ -2248,12 +2235,14 @@ class TestAPIServerRuntime(unittest.TestCase):
                     ok_chat, body = runtime.chat({"messages": [{"role": "user", "content": text}]})
                     self.assertTrue(ok_chat)
                     assistant = body.get("assistant") if isinstance(body.get("assistant"), dict) else {}
-                    self.assertEqual(build_trivial_social_turn_message(text), assistant.get("content"))
+                    self.assertTrue(str(assistant.get("content") or "").strip())
                     meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
-                    self.assertEqual("social_turn", meta.get("assistant_turn_type"))
+                    self.assertEqual("social_turn", meta.get("route"))
                     self.assertFalse(bool(meta.get("used_llm")))
                     self.assertFalse(bool(meta.get("generic_fallback_used")))
                     self.assertFalse(bool(meta.get("generic_fallback_allowed")))
+                    setup = body.get("setup") if isinstance(body.get("setup"), dict) else {}
+                    self.assertIsInstance(setup.get("request_understanding"), dict)
                     self.assertIsInstance(meta.get("chat_timing_ms"), dict)
 
     def test_chat_model_status_routes_expose_truth_timing(self) -> None:

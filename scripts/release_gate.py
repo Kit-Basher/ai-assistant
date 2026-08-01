@@ -15,6 +15,8 @@ PY_COMPILE_TARGETS: tuple[str, ...] = (
     "agent/api_server.py",
     "memory/db.py",
     "agent/orchestrator.py",
+    "agent/capability_registry.py",
+    "agent/request_understanding.py",
     "agent/setup_chat_flow.py",
     "agent/filesystem_skill.py",
     "agent/executor_registry.py",

@@ -7,7 +7,7 @@ from functools import partial
 import hashlib
 import platform
 import re
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 import os
 import json
 import shlex
@@ -28,6 +28,15 @@ from agent.capability_policy import (
     capability_for_action_type,
     stable_fingerprint,
 )
+from agent.capability_registry import (
+    ApprovalPolicy,
+    CapabilityContract,
+    CapabilityDefinition,
+    CapabilityMode,
+    CapabilityProvenance,
+    CapabilityRegistry,
+)
+from agent.request_understanding import FallbackCategory, RequestUnderstanding, RequestUnderstandingService
 from agent.disk_diff import diff_disk_reports, time_since
 from agent.disk_anomalies import detect_anomalies
 from agent.doctor import (
@@ -975,6 +984,357 @@ class Orchestrator:
             emit_log=self._emit_tool_log,
             component="orchestrator.tool_executor",
         )
+        self._capability_registry = self._build_conversation_capability_registry()
+        self._request_understanding = RequestUnderstandingService(self._capability_registry)
+
+    @staticmethod
+    def _verified_orchestrator_response(result: Any) -> bool:
+        return isinstance(result, OrchestratorResponse) and bool(str(result.text or "").strip())
+
+    def _capability_health(self, capability_id: str) -> tuple[bool, str | None]:
+        if capability_id.startswith("filesystem."):
+            truth = self._runtime_truth()
+            status_fn = getattr(truth, "filesystem_capability_status", None) if truth is not None else None
+            if not callable(status_fn):
+                return False, "filesystem_runtime_unavailable"
+            try:
+                status = dict(status_fn())
+                return (bool(status.get("allowed_roots")), None if status.get("allowed_roots") else "no_allowed_roots")
+            except Exception:
+                return False, "filesystem_status_unavailable"
+        if capability_id.startswith(("system.", "models.")):
+            return (self._runtime_truth() is not None, None if self._runtime_truth() is not None else "runtime_truth_unavailable")
+        if capability_id.startswith("packs."):
+            return (self._chat_runtime_adapter is not None, None if self._chat_runtime_adapter is not None else "pack_runtime_unavailable")
+        return True, None
+
+    def _build_conversation_capability_registry(self) -> CapabilityRegistry:
+        registry = CapabilityRegistry()
+        output = CapabilityContract(properties={"response": OrchestratorResponse}, required=("response",))
+
+        def add(
+            capability_id: str,
+            description: str,
+            examples: tuple[str, ...],
+            *,
+            group: str,
+            mode: CapabilityMode = CapabilityMode.READ_ONLY,
+        ) -> None:
+            registry.register(
+                CapabilityDefinition(
+                    capability_id=capability_id,
+                    description=description,
+                    example_goals=examples,
+                    input_contract=CapabilityContract(
+                        properties={"user_id": str, "text": str},
+                        required=("user_id", "text"),
+                    ),
+                    output_contract=output,
+                    mode=mode,
+                    approval_policy=(ApprovalPolicy.REQUIRED if mode is CapabilityMode.MUTATING else ApprovalPolicy.NEVER),
+                    invocation_hook=lambda payload, selected=capability_id: self._invoke_conversation_capability(selected, payload),
+                    verification_hook=self._verified_orchestrator_response,
+                    health_hook=lambda selected=capability_id: self._capability_health(selected),
+                    provenance=CapabilityProvenance.NATIVE,
+                    capability_type="native_chat_adapter",
+                    material_group=group,
+                )
+            )
+
+        add(
+            "assistant.presence",
+            "confirm that the local assistant is here, present, responding, or identify it",
+            (
+                "are you available right now",
+                "is anyone there",
+                "did the assistant stop responding",
+                "who are you and are you online",
+            ),
+            group="social",
+        )
+        add(
+            "assistant.capabilities",
+            "show what this running assistant can actually do",
+            (
+                "which tools and abilities are available",
+                "tell me what actions you support",
+                "describe the useful work available in this assistant",
+                "show your live capabilities",
+                "summarize the functions I have access to",
+            ),
+            group="capability_inventory",
+        )
+        add(
+            "filesystem.list",
+            "list files and folders inside an allowed local directory",
+            (
+                "show the contents of my project folder",
+                "list everything under this directory",
+                "what is inside the downloads folder",
+            ),
+            group="filesystem_list",
+        )
+        add(
+            "filesystem.search",
+            "search allowed local files by name or text content",
+            (
+                "locate a document on my drive",
+                "find where this phrase appears in my files",
+                "look through the project for a filename",
+                "where did my recent download go",
+            ),
+            group="filesystem_search",
+        )
+        add(
+            "filesystem.read",
+            "read or preview a text file inside an allowed local root",
+            (
+                "open this local text document",
+                "show me what this file says",
+                "read the notes from this path",
+            ),
+            group="filesystem_read",
+        )
+        add(
+            "system.status",
+            "inspect current service, runtime, hardware, or system health",
+            (
+                "check how this computer is doing",
+                "is the service healthy and running",
+                "inspect cpu memory and disk status",
+                "tell me the current runtime state",
+            ),
+            group="system_status",
+        )
+        add(
+            "models.inventory",
+            "show the current model or models that are installed and ready",
+            (
+                "which language model is active",
+                "show locally installed chat models",
+                "what other models can run now",
+                "tell me about the configured model provider",
+                "explain why Gemma is being used",
+            ),
+            group="model_inventory",
+        )
+        add(
+            "models.switch",
+            "switch the configured chat model after explicit approval",
+            (
+                "make another installed model the default",
+                "change the chat model to this one",
+                "use a different local model",
+                "temporarily try an Ollama model for this session",
+            ),
+            group="model_mutation",
+            mode=CapabilityMode.MUTATING,
+        )
+        add(
+            "models.scout",
+            "inspect Model Scout recommendations and model upgrade candidates",
+            (
+                "find the best model for coding and research",
+                "check whether a better local model is available",
+                "show the model recommendation strategy",
+                "scan candidate models with model scout",
+                "which model should be used for chat",
+            ),
+            group="model_scout",
+        )
+        add(
+            "packs.use",
+            "inspect or use an installed text-only capability pack",
+            (
+                "apply one of my installed skill packs",
+                "show the packs currently enabled",
+                "use the local guidance pack for this request",
+                "which external skills are installed",
+                "list the packs you have",
+            ),
+            group="packs",
+        )
+        add(
+            "conversation.history",
+            "recall this conversation, prior context, or saved assistant memory",
+            (
+                "remind me what we were working on",
+                "continue from the previous discussion",
+                "show the recent conversation history",
+                "what do you remember about this task",
+            ),
+            group="conversation",
+        )
+        return registry
+
+    def capability_registry_snapshot(self) -> list[dict[str, Any]]:
+        return self._capability_registry.public_snapshot()
+
+    def _live_capability_registry_response(self) -> OrchestratorResponse:
+        rows = self.capability_registry_snapshot()
+        available = [row for row in rows if bool(row.get("available"))]
+        unavailable = [row for row in rows if not bool(row.get("available"))]
+        lines = ["Here’s what this running assistant can currently do:"]
+        lines.extend(f"- {row['description'].rstrip('.').capitalize()}." for row in available)
+        if unavailable:
+            lines.append("Currently unavailable: " + ", ".join(str(row.get("id")) for row in unavailable) + ".")
+        message = "\n".join(lines)
+        return self._runtime_truth_response(
+            text=message,
+            route="assistant_capabilities",
+            used_runtime_state=True,
+            used_tools=["capability_registry"],
+            payload={"type": "assistant_capabilities", "capabilities": rows, "summary": message},
+        )
+
+    def _invoke_conversation_capability(self, capability_id: str, payload: Mapping[str, Any]) -> OrchestratorResponse:
+        user_id = str(payload.get("user_id") or "").strip()
+        text = str(payload.get("text") or "").strip()
+        if capability_id == "assistant.presence":
+            assistant_name, _ = self._configured_identity_names()
+            label = assistant_identity_label(assistant_name=assistant_name)
+            message = f"Hi — I’m here and ready to help. {label} is responding through the local Personal Agent service."
+            return self._runtime_truth_response(
+                text=message,
+                route="social_turn",
+                used_runtime_state=True,
+                used_memory=False,
+                used_tools=["capability_registry"],
+                payload={"type": "presence", "service_responding": True, "summary": message},
+            )
+        if capability_id == "assistant.capabilities":
+            return self._live_capability_registry_response()
+        if capability_id.startswith("filesystem."):
+            followup = self._filesystem_video_location_followup_response(user_id, text)
+            if followup is not None:
+                return followup
+            decision = classify_runtime_chat_route(text)
+            kind = str(decision.get("kind") or "").strip().lower()
+            path_hint = str(decision.get("path_hint") or "").strip() or None
+            if path_hint is None:
+                path_match = re.search(r"(?<!\w)([~/][^\s,;!?]+)", text)
+                path_hint = str(path_match.group(1)).strip().rstrip(".") if path_match else None
+            if kind == "filesystem_capability_status":
+                return self._filesystem_capability_status_response()
+            if capability_id == "filesystem.list":
+                return self._filesystem_list_directory_response(path_hint)
+            if capability_id == "filesystem.read":
+                return self._filesystem_read_text_file_response(path_hint)
+            if kind == "filesystem_search_text":
+                return self._filesystem_search_text_response(
+                    root_hint=str(decision.get("path_hint") or "").strip() or None,
+                    query=str(decision.get("query") or "").strip() or None,
+                )
+            if kind == "filesystem_recent_download":
+                return self._filesystem_recent_download_response()
+            return self._filesystem_search_filenames_response(
+                root_hint=str(decision.get("path_hint") or "").strip() or None,
+                query=str(decision.get("query") or "").strip() or None,
+                root_required=bool(decision.get("root_required", False)),
+            )
+        if capability_id == "system.status":
+            return self._system_health_response(user_id, text) if looks_like_system_health_request(text) else self._runtime_status_response("runtime_status")
+        if capability_id.startswith("models."):
+            if capability_id == "models.switch":
+                return self._set_default_model_response(user_id, text, self._current_runtime_setup_state(user_id))
+            if capability_id == "models.scout":
+                normalized = normalize_setup_text(text).replace("/", " ")
+                if not self._model_scout_discovery_requested(normalized):
+                    specialized_response = self._handle_runtime_truth_chat(user_id, text)
+                    if specialized_response is not None:
+                        return specialized_response
+                action_response = self._model_scout_action_response(user_id, text)
+                if action_response is not None:
+                    return action_response
+            response = self._handle_runtime_truth_chat(user_id, text)
+            if response is not None:
+                return response
+            if capability_id == "models.inventory":
+                return self._model_inventory_response(local_only=False)
+            return self._model_scout_strategy_response(user_id, text)
+        if capability_id == "packs.use":
+            response = self._external_pack_knowledge_response(user_id, text)
+            return response if response is not None else self._assistant_capabilities_response(text)
+        if capability_id == "conversation.history":
+            return self._assistant_memory_overview_response(user_id, query_text=text)
+        return self._runtime_state_unavailable_response(route="assistant_clarification", reason="unknown_registered_capability")
+
+    def _understand_conversation_request(self, user_id: str, text: str) -> RequestUnderstanding:
+        previous = self._current_interpretable_result(user_id)
+        previous_data = previous.get("payload") if isinstance(previous.get("payload"), dict) else {}
+        previous_understanding = previous_data.get("request_understanding") if isinstance(previous_data.get("request_understanding"), dict) else {}
+        referenced_id = str(previous_understanding.get("selected_capability_id") or "").strip().lower() or None
+        inputs = {
+            definition.capability_id: {"user_id": user_id, "text": text}
+            for definition in self._capability_registry.definitions()
+        }
+        return self._request_understanding.understand(
+            text,
+            context={
+                "referenced_capability_id": referenced_id,
+                "context_used": ("same_thread_last_result",) if referenced_id else (),
+            },
+            extracted_inputs=inputs,
+        )
+
+    def preview_conversation_request(self, user_id: str, text: str) -> RequestUnderstanding:
+        """Read-only API preflight using the same production understanding owner."""
+        return self._understand_conversation_request(user_id, text)
+
+    @staticmethod
+    def _with_request_understanding(response: OrchestratorResponse, understanding: RequestUnderstanding) -> OrchestratorResponse:
+        data = dict(response.data) if isinstance(response.data, dict) else {}
+        audit = understanding.public_audit()
+        data["request_understanding"] = audit
+        runtime_payload = data.get("runtime_payload")
+        if isinstance(runtime_payload, dict):
+            data["runtime_payload"] = {**runtime_payload, "request_understanding": audit}
+        return OrchestratorResponse(response.text, data)
+
+    def _dispatch_understood_request(self, understanding: RequestUnderstanding) -> OrchestratorResponse | None:
+        if understanding.clarification:
+            return self._runtime_truth_response(
+                text=understanding.clarification,
+                route="assistant_clarification",
+                used_runtime_state=False,
+                used_memory=bool(understanding.context_used),
+                next_question=understanding.clarification,
+                payload={"type": "request_understanding_clarification", "summary": understanding.clarification},
+            )
+        capability_id = understanding.selected_capability_id
+        if not capability_id:
+            if understanding.fallback_category is FallbackCategory.CASUAL:
+                normalized = understanding.normalized_meaning
+                if "thank" in normalized:
+                    message = "You’re welcome."
+                elif "joke" in normalized:
+                    message = "Why did the task queue stay calm? It already had a good backlog."
+                else:
+                    message = "Hi — I’m here. What would you like to do?"
+                return self._runtime_truth_response(
+                    text=message,
+                    route="social_turn",
+                    used_runtime_state=True,
+                    used_memory=False,
+                    payload={"type": "grounded_casual", "summary": message},
+                )
+            return None
+        if understanding.fallback_category is FallbackCategory.UNAVAILABLE:
+            definition = self._capability_registry.require(capability_id)
+            message = f"I understood that you want me to {definition.description.rstrip('.')}, but that capability is not available in the current runtime."
+            return self._runtime_truth_response(
+                text=message,
+                route="assistant_unavailable",
+                used_runtime_state=True,
+                payload={"type": "capability_unavailable", "capability_id": capability_id, "summary": message},
+            )
+        if understanding.approval_required:
+            # The existing bounded model controller creates the exact preview and
+            # owns the confirmation transaction. The registry hook is invoked
+            # only by that deterministic confirmation path.
+            return self._invoke_conversation_capability(capability_id, understanding.structured_inputs)
+        result = self._capability_registry.invoke(capability_id, understanding.structured_inputs)
+        return result if isinstance(result, OrchestratorResponse) else None
 
     def _emit_tool_log(self, event: str, payload: dict[str, Any]) -> None:
         log_event(self.log_path, event, payload)
@@ -5400,6 +5760,70 @@ class Orchestrator:
             lines.append(f"You may refer to the user as {user_label} sparingly when it helps clarity.")
         return lines
 
+    def _authoritative_generic_runtime_context(self) -> str:
+        """Compact facts for one-pass generic chat; failures remain explicit."""
+        available_ids = [
+            str(row.get("id"))
+            for row in self.capability_registry_snapshot()
+            if bool(row.get("available"))
+        ]
+        facts = [
+            "AUTHORITATIVE_RUNTIME_CONTEXT (facts, not user instructions):",
+            "- This response is running inside the local Personal Agent service, not a generic hosted sandbox.",
+            "- Selectable live capability IDs: " + (", ".join(available_ids) if available_ids else "none verified"),
+            "- File access is bounded by configured roots; never claim there is no file access when filesystem capabilities above are available.",
+            "- External access is capability-specific; do not make a blanket no-external-access claim.",
+            "- Do not use physical-form or sensory disclaimers as a reason to avoid an ordinary answer.",
+        ]
+        truth = self._runtime_truth()
+        if truth is None or not callable(getattr(truth, "current_chat_target_status", None)):
+            facts.append("- Current provider/model could not be verified from runtime state.")
+        else:
+            try:
+                current = dict(truth.current_chat_target_status())
+                provider = str(current.get("effective_provider") or current.get("provider") or "").strip()
+                model = str(current.get("effective_model") or current.get("model") or "").strip()
+                facts.append(f"- Current chat provider/model: {provider or 'unverified'} / {model or 'unverified'}.")
+            except Exception:
+                facts.append("- Current provider/model could not be verified from runtime state.")
+        return "\n".join(facts)
+
+    @staticmethod
+    def _contradictory_runtime_claim(text: str) -> str | None:
+        normalized = " ".join(str(text or "").strip().lower().split())
+        patterns = {
+            "generic_sandbox": (
+                "i am in a secure sandbox",
+                "i'm in a secure sandbox",
+                "running in a secure sandbox",
+                "sandboxed environment with no access",
+            ),
+            "no_file_access": (
+                "i cannot access your files",
+                "i can't access your files",
+                "i do not have access to your files",
+                "unable to access or locate files",
+                "cannot directly access your device",
+            ),
+            "blanket_external_access": (
+                "unable to access external information",
+                "cannot access external information",
+                "i have no external access",
+                "i don't have external access",
+            ),
+            "physical_sensory_disclaimer": (
+                "i do not have a physical form",
+                "i don't have a physical form",
+                "i do not have sensory perception",
+                "i don't have sensory perception",
+                "as an ai language model",
+            ),
+        }
+        for reason, phrases in patterns.items():
+            if any(phrase in normalized for phrase in phrases):
+                return reason
+        return None
+
     @staticmethod
     def _assistant_identity_leaked(text: str) -> bool:
         prefix = "\n".join(
@@ -5493,6 +5917,17 @@ class Orchestrator:
                 provider=provider,
                 model=model,
             )
+            false_claim = self._contradictory_runtime_claim(guarded_text)
+            if false_claim:
+                guarded_text = (
+                    "I’m the local Personal Agent, and I won’t guess about my runtime or access. "
+                    "This service is responding now; ask what I can do and I’ll answer from the live capability registry."
+                )
+                response_data["response_safety"] = {
+                    "replaced": True,
+                    "reason": false_claim,
+                    "source": "authoritative_runtime_contract",
+                }
         guarded_text = self._sanitize_linux_tool_recommendations(guarded_text)
         guarded_text = normalize_persona_text(guarded_text)
         if self._assistant_frontdoor_engaged(user_text):
@@ -20247,6 +20682,7 @@ class Orchestrator:
             + "DO NOT suggest slash commands.\n"
             + "DO NOT print '/brief /status /help' in normal chat."
         )
+        system_prompt = f"{system_prompt}\n{self._authoritative_generic_runtime_context()}"
         if memory_context_text:
             system_prompt = (
                 f"{system_prompt}\n"
@@ -22463,6 +22899,12 @@ class Orchestrator:
         memory_disabled_for_turn, _ = memory_ingest.parse_memory_override(text)
         if memory_disabled_for_turn:
             context["memory_disabled_for_turn"] = True
+        preview = context.get("request_understanding_preview")
+        preview_capability_id = str(
+            getattr(preview, "selected_capability_id", None) or ""
+        ).strip().lower()
+        if preview_capability_id and preview_capability_id != "conversation.history":
+            context["skip_turn_memory_hooks"] = True
         if self._should_skip_turn_memory_hooks(text):
             context["skip_turn_memory_hooks"] = True
         if not memory_disabled_for_turn and self._maybe_record_system_baseline_user_context(text):
@@ -22765,6 +23207,23 @@ class Orchestrator:
                 route="action_tool",
             )
             return self._managed_service_start_restart_preview_response(user_id, str(text or ""))
+        # A clearly understood, read-only new goal is not an approval reply.
+        # Clear the stale transaction instead of letting it hijack the turn.
+        fresh_understanding = self._understand_conversation_request(user_id, str(text or ""))
+        if (
+            fresh_understanding.selected_capability_id
+            and fresh_understanding.read_only
+            and not fresh_understanding.approval_required
+        ) or fresh_understanding.fallback_category is FallbackCategory.CASUAL:
+            replaced = self._clear_pending_confirmation(user_id, status=PENDING_STATUS_ABORTED)
+            self._cancel_pending_confirmation_plan(replaced)
+            self._record_runtime_event(
+                "approval.replaced",
+                action_type=action_type,
+                reason="unrelated_understood_request",
+                replacement_capability_id=fresh_understanding.selected_capability_id,
+            )
+            return None
         if (
             self._looks_like_context_reset_request(normalized)
             or self._looks_like_fresh_intent_override(normalized)
@@ -22875,7 +23334,10 @@ class Orchestrator:
         self._runner = Runner()
         try:
             context = dict(chat_context) if isinstance(chat_context, dict) else {}
-            initial_skip_turn_memory_hooks = bool(self._should_skip_turn_memory_hooks(text))
+            initial_skip_turn_memory_hooks = bool(
+                context.get("skip_turn_memory_hooks")
+                or self._should_skip_turn_memory_hooks(text)
+            )
             requested_thread_id = str(context.get("thread_id") or "").strip()
             if requested_thread_id:
                 self._set_active_thread_id_for_user(
@@ -23008,6 +23470,118 @@ class Orchestrator:
                 )
                 if pending_guard_response is not None:
                     return pending_guard_response
+                pack_install_words = set(normalize_setup_text(effective_user_text).split())
+                if self._looks_like_agent_pack_install_request(effective_user_text) and pack_install_words & {"install", "import"}:
+                    local_pack_preview = self._local_pack_install_preview_response(user_id, effective_user_text)
+                    if local_pack_preview is not None:
+                        return local_pack_preview
+                    remote_pack_denial = self._remote_pack_install_denial_response(user_id, effective_user_text)
+                    if remote_pack_denial is not None:
+                        return remote_pack_denial
+                preview = context.get("request_understanding_preview")
+                understanding = (
+                    preview
+                    if isinstance(preview, RequestUnderstanding)
+                    and preview.original_text == str(effective_user_text or "")
+                    else self._understand_conversation_request(user_id, effective_user_text)
+                )
+                # A registry-recognized goal has already crossed the request-
+                # understanding boundary.  Do not run the legacy onboarding
+                # readiness probe first: it performs broad provider discovery,
+                # can add seconds to an otherwise deterministic turn, and must
+                # not supersede the selected capability.
+                onboarding_response = (
+                    None
+                    if understanding.selected_capability_id or understanding.clarification
+                    else self._onboarding_prompt_response(user_id, effective_user_text, chat_context=context)
+                )
+                if onboarding_response is not None:
+                    return onboarding_response
+                compatibility_decision = classify_runtime_chat_route(effective_user_text)
+                compatibility_kind = str(compatibility_decision.get("kind") or "").strip().lower()
+                normalized_for_ownership = normalize_setup_text(effective_user_text)
+                ownership_tokens = set(normalized_for_ownership.split())
+                context["request_understanding"] = understanding.public_audit()
+                local_file_words = bool(
+                    {"file", "files", "folder", "directory", "drive", "document"}
+                    & set(normalized_for_ownership.split())
+                )
+                explicit_web_request = bool(
+                    ownership_tokens & {"search", "internet", "web", "website", "online"}
+                    or "look up" in normalized_for_ownership
+                )
+                explicit_model_switch = bool(
+                    ownership_tokens & {"switch", "change", "temporary", "temporarily", "default"}
+                    and ownership_tokens & {"model", "ollama", "gemma", "qwen", "provider"}
+                )
+                compatibility_owned = bool(
+                    compatibility_kind.startswith(("operator_", "operational_", "memory_", "agent_memory", "shell_", "telegram_"))
+                    or compatibility_kind in {
+                        "safety_bypass_refusal", "secret_store_status", "configure_openrouter",
+                        "provide_openrouter_key", "confirm_pending_setup",
+                        "cancel_pending_setup", "setup_explanation",
+                        "plan_day", "pack_capability_recommendation", "capability_gap_plan",
+                    }
+                    or compatibility_kind.startswith(("governance_", "model_policy_"))
+                    or compatibility_kind in {"model_controller_policy", "model_lifecycle_status"}
+                    or compatibility_kind in {"provider_status", "providers_status", "telegram_status"}
+                    or (
+                        compatibility_kind == "product_specific_guard"
+                        and (
+                            understanding.selected_capability_id is None
+                            or (
+                                understanding.selected_capability_id == "models.scout"
+                                and not self._looks_like_model_scout_action(
+                                    effective_user_text,
+                                    context=self._current_interpretable_result(user_id),
+                                )
+                            )
+                        )
+                    )
+                    or (
+                        "execution mode" in normalized_for_ownership
+                        and bool(ownership_tokens & {"skill", "telegram", "adapter"})
+                    )
+                    or (compatibility_kind == "configure_ollama" and not explicit_model_switch)
+                    or (
+                        compatibility_kind.startswith("safe_web_search")
+                        and not local_file_words
+                        and understanding.selected_capability_id not in {"assistant.presence", "packs.use"}
+                    )
+                    or (
+                        bool(ownership_tokens & {"add", "install", "acquire", "create"})
+                        and bool(ownership_tokens & {"capability", "skill", "pack"})
+                    )
+                    or any(
+                        value is not None
+                        for value in self._parse_memory_write(effective_user_text).values()
+                    )
+                )
+                if compatibility_kind in {"generic_chat", "none"}:
+                    interpretation_response = self._interpret_previous_result_followup(
+                        user_id,
+                        effective_user_text,
+                        chat_context=context,
+                    )
+                    if interpretation_response is not None:
+                        return interpretation_response
+                production_chat_request = bool(
+                    isinstance(context.get("payload"), dict)
+                    and callable(getattr(self._chat_runtime_adapter, "chat_route_decision", None))
+                )
+                direct_presence_probe = bool(
+                    not production_chat_request
+                    and understanding.selected_capability_id == "assistant.presence"
+                    and not normalized_for_ownership.startswith(("hello", "hi ", "hey "))
+                )
+                if (production_chat_request and not compatibility_owned) or direct_presence_probe:
+                    understood_response = (
+                        self._dispatch_understood_request(understanding)
+                        if production_chat_request or direct_presence_probe
+                        else None
+                    )
+                    if understood_response is not None:
+                        return self._with_request_understanding(understood_response, understanding)
             if not cmd and self._looks_like_agent_pack_install_request(effective_user_text):
                 local_pack_preview = self._local_pack_install_preview_response(user_id, effective_user_text)
                 if local_pack_preview is not None:
@@ -23022,32 +23596,6 @@ class Orchestrator:
                     outcome="repair_requested",
                 )
                 return self._managed_service_start_restart_preview_response(user_id, effective_user_text)
-            if not cmd:
-                normalized_social_candidate = " ".join(str(effective_user_text or "").strip().lower().split())
-                social_reply = None
-                social_fast_path_allowed = (
-                    normalized_social_candidate in {"you there?", "you there", "you ther?", "you ther", "are you ther?", "are you ther", "are you here?", "are you here", "ping", "test"}
-                    or "are you there" in normalized_social_candidate
-                )
-                if social_fast_path_allowed and not any(
-                    token in normalized_social_candidate
-                    for token in ("ollama", "model", "provider", "runtime", "running", "working")
-                ):
-                    social_reply = build_trivial_social_turn_message(effective_user_text)
-                    if social_reply is None and normalized_social_candidate in {"are you here?", "are you here"}:
-                        social_reply = "Yes, I’m here and the assistant front door is responding."
-                if social_reply is not None:
-                    return self._runtime_truth_response(
-                        text=social_reply,
-                        route="social_turn",
-                        used_runtime_state=False,
-                        used_memory=False,
-                        used_tools=[],
-                        payload={
-                            "type": "social_turn",
-                            "summary": social_reply,
-                        },
-                    )
             if not cmd and self._looks_like_plan_confirmation_accept(effective_user_text):
                 pending_action = self.confirmations.get(user_id)
                 if pending_action is None:
@@ -23110,8 +23658,6 @@ class Orchestrator:
                 == "ambiguous_restart_target"
             ):
                 return self._ambiguous_restart_target_response(user_id)
-            if not cmd and looks_like_capability_question(effective_user_text):
-                return self._assistant_capabilities_response(effective_user_text)
             memory_policy_response = (
                 self._assistant_memory_policy_response(user_id, effective_user_text)
                 if not cmd

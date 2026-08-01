@@ -22,6 +22,14 @@
 ## Backend/UI mismatches still worth follow-up
 
 - Chat approvals are currently inferred from backend confirmation text such as `Reply /confirm to proceed.` There is not yet a first-class structured approval-card contract on `/chat`.
+
+WP1 routing note: Web UI chat continues to use the same `POST /chat` contract.
+Ordinary messages now pass through the backend's unified request-understanding
+and live capability registry layer. The UI must treat capability and runtime
+claims from the response payload as authoritative and must not maintain a
+separate phrase router. Non-sensitive selection diagnostics may appear in the
+response setup/runtime payload as `request_understanding`; they are optional
+debug metadata, not text that the UI should render as assistant prose.
 - `/ready` already gives a user-facing status summary, but it still contains deeper operator detail in the raw payload. The main UI hides that, while the advanced area still depends on legacy admin endpoints.
 - The advanced drawer still renders the legacy admin components largely as-is. That was intentional for speed: normal-user UX was prioritized first, and operator UX polish can be a later pass.
 - `docs/design/UI_SURFACE_REPORT.md` now describes the pre-redesign admin-first UI and should be treated as historical until it is rewritten.

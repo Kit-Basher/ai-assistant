@@ -1,6 +1,6 @@
 {
   "schema": "personal-agent.mutation-file-classification.v2b",
-  "reviewed_count": 159,
+  "reviewed_count": 160,
   "required_fields": [
     "path",
     "disposition",
@@ -31,6 +31,21 @@
       "rollback_scope": "declared by plan/executor receipt",
       "audit_evidence": "manual review of api_server.py: implements or invokes the canonical authorization boundary",
       "contract_identity": "not_applicable"
+    },
+    {
+      "path": "agent/request_understanding.py",
+      "disposition": "internal_only",
+      "capability": "conversation.request_understanding",
+      "entry_point": "Orchestrator-owned request understanding service",
+      "actor": "current local chat request",
+      "target_resources": "ephemeral typed request-understanding result and in-memory capability metadata",
+      "mutation_type": "no durable mutation; registry lookup and schema validation only",
+      "policy_path": "deterministic approval state remains authoritative before semantic capability selection",
+      "executor": "none; selected capabilities invoke only registered capability hooks",
+      "confirmation_requirements": "cannot synthesize confirmation; mutating capabilities retain their declared approval policy",
+      "rollback_scope": "not applicable because request understanding is read-only",
+      "audit_evidence": "Work Package 1 request-understanding schema, registry validation, and approval-boundary tests",
+      "contract_identity": "request_understanding"
     },
     {
       "path": "agent/provider_model_authorization.py",
