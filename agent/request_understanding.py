@@ -294,6 +294,14 @@ class RequestUnderstandingService:
                 # ordinary questions too. A model action needs an actual model
                 # domain concept before example-vector similarity can select it.
                 score *= 0.12
+            if definition.capability_id == "models.switch" and not (
+                semantic_tokens
+                & {"switch", "change", "default", "temporary", "temporarily", "try", "use", "another", "different"}
+            ):
+                # Merely asking which model is active must not become a
+                # mutation ambiguity. Switching requires action language; the
+                # deterministic controller still owns approval afterward.
+                score *= 0.20
             if boost == 0.0 and overlap_count < 2:
                 score *= 0.55
             score = min(1.0, score + boost)

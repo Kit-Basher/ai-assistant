@@ -23354,8 +23354,14 @@ class Orchestrator:
                 text = cleaned_text
                 memory_disabled_for_turn = True
             effective_user_text = cleaned_text if memory_disabled_for_turn else text
-            if not str(effective_user_text or "").strip().startswith("/") and looks_like_system_health_request(
-                effective_user_text
+            preview = context.get("request_understanding_preview")
+            preview_capability_id = str(
+                getattr(preview, "selected_capability_id", None) or ""
+            ).strip().lower()
+            if (
+                not preview_capability_id
+                and not str(effective_user_text or "").strip().startswith("/")
+                and looks_like_system_health_request(effective_user_text)
             ):
                 return self._system_health_response(user_id, effective_user_text)
             command_needs_preview = bool(cmd and cmd.name in MUTATING_ASSISTANT_COMMANDS)

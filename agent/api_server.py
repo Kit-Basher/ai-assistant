@@ -11591,7 +11591,7 @@ class AgentRuntime:
         user_id = self._chat_user_id(payload)
         request_understanding_preview = None
         unified_bootstrap_skip = False
-        if not bootstrap_social_hint and not self._skip_bootstrap_for_chat_route(route_decision):
+        if not bootstrap_social_hint:
             try:
                 request_understanding_preview = self.orchestrator().preview_conversation_request(
                     user_id,

@@ -211,6 +211,17 @@ def test_live_capability_answer_is_registry_snapshot_not_static_prose() -> None:
     assert all("available" in row and "health_reason" in row for row in rows if isinstance(row, dict))
 
 
+def test_model_inventory_registry_selection_outranks_legacy_system_fast_path() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        runtime = AgentRuntime(_config(str(root / "registry.json"), str(root / "agent.db")))
+        response = _chat(runtime, "which local model is answering now?")
+    meta = response.get("meta") if isinstance(response.get("meta"), dict) else {}
+    assert meta.get("route") == "model_status"
+    assert meta.get("used_llm") is False
+    assert _understanding(response).get("selected_capability_id") == "models.inventory"
+
+
 def test_unrelated_new_goal_is_not_hijacked_by_pending_approval() -> None:
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
