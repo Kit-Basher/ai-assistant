@@ -72,17 +72,66 @@ different actions produce one clarification; no-capability turns become either
 grounded casual chat, ordinary model chat with authoritative runtime context, or
 an honest unavailable result.
 
-The migration proceeds at the orchestrator boundary: approval/cancellation and
-explicit slash-command handlers remain before understanding; unified selection
-then dispatches through registry hooks to the already-proven native response
-implementations. Legacy phrase classifiers remain temporarily callable only for
-public compatibility and out-of-scope capability families, but do not get a
-second vote for capabilities registered in WP1. Capability answers are rendered
-from the live registry. Generic model output receives verified runtime context
-and is checked for contradictory sandbox/access/identity assertions.
+The production migration now starts at the API boundary. `POST /chat` computes a
+unified preview before asking the setup classifier for compatibility hints. The
+preview controls bootstrap choice whenever it selects a capability, asks a
+clarification, or selects grounded casual/unavailable fallback. Inside the
+orchestrator, approval/cancellation and explicit slash-command handlers remain
+first; unified selection then dispatches immediately through registry hooks to
+the already-proven native implementations. A registry hook receives its
+validated structured inputs and cannot call the setup classifier to select,
+veto, or replace the chosen capability.
+
+The legacy setup classifier remains callable for deterministic safety/setup and
+capability families outside WP1. A denylist of its historical WP1 result kinds
+is enforced after unified understanding: if unified understanding declined to
+select a WP1 capability, one of those legacy results is discarded instead of
+becoming a second vote. Capability answers are rendered from the live registry.
+Generic model output receives verified runtime context and is checked for
+contradictory sandbox/access/identity assertions.
 
 WP1 migrates presence/identity, live capability listing, bounded filesystem
 list/search/read, system/runtime information, model inventory/current-model and
 switching, Model Scout, pack discovery/use, and conversation/history/memory
 orientation. A complete native capability census, executable packs, automated
 acquisition, and plan/act/verify automation remain WP2+ work.
+
+## Final ownership map
+
+| Decision | Sole production owner | Retained lower-level responsibility |
+| --- | --- | --- |
+| Ordinary meaning and WP1 capability ID | `RequestUnderstandingService` | none |
+| Capability existence, health, schemas, policy | `CapabilityRegistry` | native implementation performs the operation only |
+| Approval, denial, cancellation, expiry, thread binding | deterministic orchestrator state machine | executor rechecks authorization at the mutation boundary |
+| Structured path/query/model/pack/history arguments | post-selection schema-bound extractors | native implementation validates resolved resources |
+| Ambiguity | unified confidence/material-group decision | response envelope persists one concise question |
+| Casual/presence/runtime facts | unified fallback or registered capability plus `RuntimeTruthService` | response guard rejects contradictory generated claims |
+| Generic conversation | one local-model inference with authoritative runtime context | a second bounded generation is allowed only to repair a detected bad draft |
+| Serialization, transcript persistence, audit | `AgentRuntime.chat` | SQLite and event sinks preserve the public envelope |
+
+## Remaining compatibility-classifier calls
+
+`classify_runtime_chat_route` intentionally remains in production, but not in a
+WP1 registry invocation and not as an ordinary WP1 intent owner:
+
+- `AgentRuntime.chat_route_decision` supplies setup/bootstrap hints only after
+  the unified preview; it cannot override a selected capability, clarification,
+  grounded casual turn, or unavailable result.
+- The orchestrator uses it before unified dispatch only for deterministic
+  safety-bypass, shell containment, explicit setup, and pending-state guards.
+- After unified dispatch it serves non-WP1 compatibility families such as safe
+  web search, Telegram service control, operator lifecycle, managed adapters,
+  and setup flows. Historical WP1 kinds are explicitly rejected there.
+- Generic-chat preparation uses it only for containment of safe web search,
+  package/shell execution, and setup—not to invoke a registered capability.
+- Helper predicates for provided-text transforms, fresh-intent cancellation,
+  and deterministic-route detection use it to protect state boundaries. They
+  do not choose or invoke a WP1 capability.
+- `_handle_runtime_truth_chat` and old pack/capability-gap adapters remain for
+  non-WP1 callers and public compatibility. The production `/chat` path reaches
+  them only after unified understanding produced no WP1 selection; registry
+  hooks never call them to reclassify their input.
+
+The older classifier and response adapters can be physically removed only when
+their remaining non-WP1 families are migrated. That census is WP2+ scope; this
+package prevents them from silently owning or reclassifying WP1 traffic.

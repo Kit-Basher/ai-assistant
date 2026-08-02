@@ -193,6 +193,7 @@ from agent.executor_registry import (
     _snapshot_hash as executor_snapshot_hash,
 )
 from agent.runtime_truth_service import RuntimeTruthService
+from agent.llm.value_policy import detect_premium_escalation_triggers
 from agent.skill_governance import (
     ALLOWED_EXECUTION_MODES,
     DECLARABLE_CAPABILITIES,
@@ -229,6 +230,43 @@ from agent.memory_authority import (
     AUTHORITY_WORKING_MEMORY_HOT,
     AUTHORITY_WORKING_MEMORY_SUMMARY,
     MEMORY_AUTHORITY_LABELS,
+)
+
+
+# Compatibility routing still serves capability families not migrated in WP1.
+# If it recognizes one of these historical kinds after unified understanding
+# declined to select a capability, it is not allowed to cast a second vote.
+_WP1_LEGACY_ROUTE_KINDS = frozenset(
+    {
+        "agent_memory_inspect",
+        "agent_memory_open_loops",
+        "assistant_capabilities",
+        "describe_current_model",
+        "filesystem_capability_status",
+        "filesystem_list_directory",
+        "filesystem_read_text_file",
+        "filesystem_recent_download",
+        "filesystem_search_filenames",
+        "filesystem_search_text",
+        "filesystem_stat_path",
+        "find_ollama_models",
+        "local_model_inventory",
+        "model_availability",
+        "model_lifecycle_status",
+        "model_ready_now",
+        "model_scout_discovery",
+        "model_scout_strategy",
+        "model_switch_advisory",
+        "operational_agent_status",
+        "operational_doctor",
+        "operational_observe",
+        "provider_status",
+        "providers_status",
+        "recommend_local_model",
+        "runtime_status",
+        "set_default_model",
+        "switch_better_local_model",
+    }
 )
 from agent.memory_runtime import MemoryRuntime
 from agent.working_memory import (
@@ -1002,7 +1040,11 @@ class Orchestrator:
                 return (bool(status.get("allowed_roots")), None if status.get("allowed_roots") else "no_allowed_roots")
             except Exception:
                 return False, "filesystem_status_unavailable"
-        if capability_id.startswith(("system.", "models.")):
+        if capability_id == "system.status":
+            # The local doctor/system collectors still provide an honest
+            # response when the richer runtime-truth adapter is unavailable.
+            return True, None
+        if capability_id.startswith("models."):
             return (self._runtime_truth() is not None, None if self._runtime_truth() is not None else "runtime_truth_unavailable")
         if capability_id.startswith("packs."):
             return (self._chat_runtime_adapter is not None, None if self._chat_runtime_adapter is not None else "pack_runtime_unavailable")
@@ -1026,7 +1068,29 @@ class Orchestrator:
                     description=description,
                     example_goals=examples,
                     input_contract=CapabilityContract(
-                        properties={"user_id": str, "text": str},
+                        properties={
+                            "user_id": str,
+                            "text": str,
+                            "path_hint": str,
+                            "query": str,
+                            "search_mode": str,
+                            "filesystem_view": str,
+                            "status_scope": str,
+                            "model_view": str,
+                            "local_only": bool,
+                            "remote_only": bool,
+                            "provider_id": str,
+                            "model_target": str,
+                            "model_tier": str,
+                            "promote_default": bool,
+                            "scout_view": str,
+                            "scout_focus": list,
+                            "scout_task": str,
+                            "scout_role": str,
+                            "pack_operation": str,
+                            "pack_query": str,
+                            "history_focus": str,
+                        },
                         required=("user_id", "text"),
                     ),
                     output_contract=output,
@@ -1170,7 +1234,11 @@ class Orchestrator:
     def capability_registry_snapshot(self) -> list[dict[str, Any]]:
         return self._capability_registry.public_snapshot()
 
-    def _live_capability_registry_response(self) -> OrchestratorResponse:
+    @property
+    def wp1_legacy_route_kinds(self) -> frozenset[str]:
+        return _WP1_LEGACY_ROUTE_KINDS
+
+    def _live_capability_registry_response(self, query_text: str | None = None) -> OrchestratorResponse:
         rows = self.capability_registry_snapshot()
         available = [row for row in rows if bool(row.get("available"))]
         unavailable = [row for row in rows if not bool(row.get("available"))]
@@ -1179,12 +1247,26 @@ class Orchestrator:
         if unavailable:
             lines.append("Currently unavailable: " + ", ".join(str(row.get("id")) for row in unavailable) + ".")
         message = "\n".join(lines)
+        supplemental = self._assistant_capabilities_response(query_text)
+        supplemental_data = self._response_data(supplemental)
+        supplemental_payload = (
+            supplemental_data.get("runtime_payload")
+            if isinstance(supplemental_data.get("runtime_payload"), dict)
+            else {}
+        )
+        if str(supplemental.text or "").strip():
+            message = supplemental.text
         return self._runtime_truth_response(
             text=message,
             route="assistant_capabilities",
             used_runtime_state=True,
             used_tools=["capability_registry"],
-            payload={"type": "assistant_capabilities", "capabilities": rows, "summary": message},
+            payload={
+                **supplemental_payload,
+                "type": "assistant_capabilities",
+                "capabilities": rows,
+                "summary": message,
+            },
         )
 
     def _invoke_conversation_capability(self, capability_id: str, payload: Mapping[str, Any]) -> OrchestratorResponse:
@@ -1203,57 +1285,132 @@ class Orchestrator:
                 payload={"type": "presence", "service_responding": True, "summary": message},
             )
         if capability_id == "assistant.capabilities":
-            return self._live_capability_registry_response()
+            return self._live_capability_registry_response(text)
         if capability_id.startswith("filesystem."):
-            followup = self._filesystem_video_location_followup_response(user_id, text)
-            if followup is not None:
-                return followup
-            decision = classify_runtime_chat_route(text)
-            kind = str(decision.get("kind") or "").strip().lower()
-            path_hint = str(decision.get("path_hint") or "").strip() or None
-            if path_hint is None:
-                path_match = re.search(r"(?<!\w)([~/][^\s,;!?]+)", text)
-                path_hint = str(path_match.group(1)).strip().rstrip(".") if path_match else None
-            if kind == "filesystem_capability_status":
-                return self._filesystem_capability_status_response()
+            path_hint = str(payload.get("path_hint") or "").strip() or None
             if capability_id == "filesystem.list":
                 return self._filesystem_list_directory_response(path_hint)
             if capability_id == "filesystem.read":
                 return self._filesystem_read_text_file_response(path_hint)
-            if kind == "filesystem_search_text":
-                return self._filesystem_search_text_response(
-                    root_hint=str(decision.get("path_hint") or "").strip() or None,
-                    query=str(decision.get("query") or "").strip() or None,
-                )
-            if kind == "filesystem_recent_download":
+            filesystem_view = str(payload.get("filesystem_view") or "search").strip().lower()
+            if filesystem_view == "capability_status":
+                return self._filesystem_capability_status_response()
+            if filesystem_view == "recent_download":
                 return self._filesystem_recent_download_response()
+            if filesystem_view == "recent_videos":
+                return self._filesystem_recent_video_directory_response(
+                    Path(path_hint or (Path.home() / "Videos")),
+                    label="the Videos folder",
+                )
+            query = str(payload.get("query") or "").strip() or None
+            if str(payload.get("search_mode") or "filename").strip().lower() == "text":
+                return self._filesystem_search_text_response(
+                    root_hint=path_hint,
+                    query=query,
+                )
             return self._filesystem_search_filenames_response(
-                root_hint=str(decision.get("path_hint") or "").strip() or None,
-                query=str(decision.get("query") or "").strip() or None,
-                root_required=bool(decision.get("root_required", False)),
+                root_hint=path_hint,
+                query=query,
+                root_required=path_hint is None,
             )
         if capability_id == "system.status":
-            return self._system_health_response(user_id, text) if looks_like_system_health_request(text) else self._runtime_status_response("runtime_status")
+            status_scope = str(payload.get("status_scope") or "runtime").strip().lower()
+            if status_scope == "self_diagnostics":
+                return self._assistant_self_diagnostics_response(text)
+            if status_scope == "doctor":
+                return self._operational_status_response(user_id, text, "operational_doctor")
+            if status_scope == "observe":
+                return self._operational_status_response(user_id, text, "operational_observe")
+            return (
+                self._system_health_response(user_id, text)
+                if status_scope == "system"
+                else self._runtime_status_response("runtime_status")
+            )
         if capability_id.startswith("models."):
             if capability_id == "models.switch":
-                return self._set_default_model_response(user_id, text, self._current_runtime_setup_state(user_id))
+                target = str(payload.get("model_target") or "").strip()
+                if target == "__best_local__":
+                    return self._switch_better_local_model_response(user_id)
+                resolution = (
+                    self._resolve_runtime_model_target(target)
+                    if target
+                    else {"status": "none", "requested": None, "model_id": None, "matches": []}
+                )
+                return self._set_default_model_response(
+                    user_id,
+                    text,
+                    self._current_runtime_setup_state(user_id),
+                    resolution_override=resolution,
+                    promote_default_override=bool(payload.get("promote_default", False)),
+                )
             if capability_id == "models.scout":
-                normalized = normalize_setup_text(text).replace("/", " ")
-                if not self._model_scout_discovery_requested(normalized):
-                    specialized_response = self._handle_runtime_truth_chat(user_id, text)
-                    if specialized_response is not None:
-                        return specialized_response
-                action_response = self._model_scout_action_response(user_id, text)
-                if action_response is not None:
-                    return action_response
-            response = self._handle_runtime_truth_chat(user_id, text)
-            if response is not None:
-                return response
+                scout_view = str(payload.get("scout_view") or "recommendations").strip().lower()
+                if scout_view == "discovery":
+                    return self._model_scout_discovery_response(text)
+                if scout_view == "inventory":
+                    return self._model_scout_inventory_response(
+                        focus_terms=[str(item) for item in payload.get("scout_focus", []) if str(item).strip()]
+                    )
+                if scout_view == "strategy":
+                    scout_task = str(payload.get("scout_task") or "chat").strip().lower() or "chat"
+                    scout_requirements = ["chat", "long_context"] if scout_task == "reasoning" else ["chat"]
+                    return self._model_scout_strategy_response(
+                        user_id,
+                        text,
+                        requested_role_override=str(payload.get("scout_role") or "").strip().lower() or None,
+                        task_request_override={
+                            "task_type": scout_task,
+                            "requirements": scout_requirements,
+                            "preferred_local": True,
+                        },
+                    )
+                scout_task = str(payload.get("scout_task") or "chat").strip().lower() or "chat"
+                scout_requirements = ["chat", "long_context"] if scout_task == "reasoning" else ["chat"]
+                return self._model_scout_strategy_response(
+                    user_id,
+                    text,
+                    task_request_override={
+                        "task_type": scout_task,
+                        "requirements": scout_requirements,
+                        "preferred_local": True,
+                    },
+                )
             if capability_id == "models.inventory":
-                return self._model_inventory_response(local_only=False)
-            return self._model_scout_strategy_response(user_id, text)
+                model_view = str(payload.get("model_view") or "inventory").strip().lower()
+                if model_view == "lifecycle":
+                    return self._model_lifecycle_response(text)
+                if model_view == "provider_guidance":
+                    return self._local_model_provider_guidance_response()
+                if model_view == "providers":
+                    provider_id = str(payload.get("provider_id") or "").strip().lower()
+                    return self._provider_status_response(provider_id) if provider_id else self._providers_status_response()
+                if model_view == "switch_candidate":
+                    return self._model_policy_switch_candidate_response()
+                if model_view == "policy":
+                    return self._model_policy_status_response()
+                if model_view == "cost_cap":
+                    return self._model_policy_cap_response()
+                if model_view == "provider_explanation":
+                    return self._model_policy_provider_explanation_response(
+                        str(payload.get("provider_id") or "").strip().lower() or None
+                    )
+                if model_view == "tier_candidate":
+                    return self._model_policy_tier_candidate_response(
+                        str(payload.get("model_tier") or "").strip().lower() or None
+                    )
+                if model_view == "explanation":
+                    return self._model_policy_current_choice_response()
+                if model_view == "current":
+                    return self._current_model_response()
+                return self._model_inventory_response(
+                    local_only=bool(payload.get("local_only", False)),
+                    remote_only=bool(payload.get("remote_only", False)),
+                    provider_id=str(payload.get("provider_id") or "").strip().lower() or None,
+                )
         if capability_id == "packs.use":
-            response = self._external_pack_knowledge_response(user_id, text)
+            if str(payload.get("pack_operation") or "list").strip().lower() == "list":
+                return self._assistant_capabilities_response(text)
+            response = self._external_pack_knowledge_response(user_id, text, capability_selected=True)
             return response if response is not None else self._assistant_capabilities_response(text)
         if capability_id == "conversation.history":
             return self._assistant_memory_overview_response(user_id, query_text=text)
@@ -1274,10 +1431,43 @@ class Orchestrator:
             definition.capability_id: {"user_id": user_id, "text": text}
             for definition in self._capability_registry.definitions()
         }
+        continuation_capability_id = None
+        previous_type = str(previous_data.get("type") or "").strip().lower()
+        followup_tokens = set(normalize_setup_text(text).replace("/", " ").split())
+        setup_repair_followup = bool(
+            referenced_id
+            and referenced_id.startswith(("models.", "system."))
+            and self._recent_unhealthy_runtime_context(user_id)
+            and followup_tokens & {
+                "attention", "broken", "fix", "help", "needs", "repair", "setup", "working", "wrong",
+            }
+        )
+        if referenced_id == "models.scout" and followup_tokens & {"switch", "change", "try", "use"}:
+            recommendation = (
+                previous_data.get("task_recommendation")
+                if isinstance(previous_data.get("task_recommendation"), dict)
+                else previous_data.get("recommended_candidate")
+                if isinstance(previous_data.get("recommended_candidate"), dict)
+                else {}
+            )
+            recommended_model = str((recommendation or {}).get("model_id") or "").strip()
+            if recommended_model:
+                inputs["models.switch"]["model_target"] = recommended_model
+        if (
+            referenced_id == "filesystem.search"
+            and previous_type in {"filesystem_recent_downloaded_videos", "filesystem_recent_videos"}
+            and followup_tokens & {"video", "videos"}
+            and followup_tokens & {"folder", "directory", "there", "in"}
+        ):
+            continuation_capability_id = "filesystem.search"
+            inputs["filesystem.search"]["filesystem_view"] = "recent_videos"
+            inputs["filesystem.search"]["path_hint"] = str(Path.home() / "Videos")
         return self._request_understanding.understand(
             text,
             context={
                 "referenced_capability_id": referenced_id,
+                "continuation_capability_id": continuation_capability_id,
+                "setup_repair_followup": setup_repair_followup,
                 "context_used": ("same_thread_last_result",) if referenced_id else (),
             },
             extracted_inputs=inputs,
@@ -1322,7 +1512,7 @@ class Orchestrator:
                 elif "joke" in normalized:
                     message = "Why did the task queue stay calm? It already had a good backlog."
                 else:
-                    message = "Hi — I’m here. What would you like to do?"
+                    message = "Hi — I’m here and ready to help. What would you like to do?"
                 return self._runtime_truth_response(
                     text=message,
                     route="social_turn",
@@ -5800,8 +5990,7 @@ class Orchestrator:
                 facts.append("- Current provider/model could not be verified from runtime state.")
         return "\n".join(facts)
 
-    @staticmethod
-    def _contradictory_runtime_claim(text: str) -> str | None:
+    def _contradictory_runtime_claim(self, text: str) -> str | None:
         normalized = " ".join(str(text or "").strip().lower().split())
         patterns = {
             "generic_sandbox": (
@@ -5809,13 +5998,6 @@ class Orchestrator:
                 "i'm in a secure sandbox",
                 "running in a secure sandbox",
                 "sandboxed environment with no access",
-            ),
-            "no_file_access": (
-                "i cannot access your files",
-                "i can't access your files",
-                "i do not have access to your files",
-                "unable to access or locate files",
-                "cannot directly access your device",
             ),
             "blanket_external_access": (
                 "unable to access external information",
@@ -5831,6 +6013,42 @@ class Orchestrator:
                 "as an ai language model",
             ),
         }
+        available_ids = {
+            str(row.get("id") or "").strip()
+            for row in self.capability_registry_snapshot()
+            if bool(row.get("available"))
+        }
+        if any(capability_id.startswith("filesystem.") for capability_id in available_ids):
+            patterns["no_file_access"] = (
+                "i cannot access your files",
+                "i can't access your files",
+                "i do not have access to your files",
+                "unable to access or locate files",
+                "cannot directly access your device",
+            )
+        if available_ids:
+            patterns["no_capability_access"] = (
+                "i cannot use tools",
+                "i can't use tools",
+                "i do not have any skills",
+                "i have no capabilities",
+                "no tools are available to me",
+            )
+        truth = self._runtime_truth()
+        current_model = None
+        if truth is not None and callable(getattr(truth, "current_chat_target_status", None)):
+            try:
+                current = dict(truth.current_chat_target_status())
+                current_model = str(current.get("effective_model") or current.get("model") or "").strip() or None
+            except Exception:
+                current_model = None
+        if current_model:
+            patterns["false_model_state"] = (
+                "i am not connected to a model",
+                "no language model is available",
+                "i do not use a local model",
+                "i can't use any model",
+            )
         for reason, phrases in patterns.items():
             if any(phrase in normalized for phrase in phrases):
                 return reason
@@ -6116,6 +6334,10 @@ class Orchestrator:
                 "external_pack_knowledge",
                 "pack_capability_recommendation",
                 "capability_gap_plan",
+                "filesystem_list_directory",
+                "filesystem_read_text_file",
+                "filesystem_search_filenames",
+                "filesystem_search_text",
                 "filesystem_recent_downloaded_videos",
                 "filesystem_recent_videos",
             }
@@ -7223,11 +7445,17 @@ class Orchestrator:
         normalized = normalize_setup_text(text).replace("/", " ")
         if not normalized:
             return False
+        has_explicit_target = _DIRECT_MODEL_SWITCH_TOKEN_RE.search(normalized) is not None
+        if detect_premium_escalation_triggers(user_text=text) and not has_explicit_target and not any(
+            marker in normalized for marker in ("temporarily", "session only", "chat only")
+        ):
+            # Value-policy escalation is a per-request inference choice. It is
+            # not a request to mutate the configured chat target.
+            return False
         if "big model" in normalized and any(token in normalized for token in ("switch", "use", "try")):
             return True
         if any(phrase in normalized for phrase in _MODEL_CONTROLLER_TRIAL_SWITCH_PHRASES):
             return True
-        has_explicit_target = _DIRECT_MODEL_SWITCH_TOKEN_RE.search(normalized) is not None
         return bool(
             ("temporarily" in normalized or "session only" in normalized or "chat only" in normalized)
             and any(token in normalized for token in ("switch", "use", "try"))
@@ -8456,6 +8684,7 @@ class Orchestrator:
         text: str,
         *,
         requested_role_override: str | None = None,
+        task_request_override: dict[str, Any] | None = None,
     ) -> OrchestratorResponse:
         truth = self._runtime_truth()
         if truth is None:
@@ -8466,7 +8695,11 @@ class Orchestrator:
         payload_fn = getattr(truth, "model_scout_v2_status", None)
         if not callable(payload_fn):
             return self._model_scout_inventory_response(focus_terms=[])
-        task_request = self._model_scout_task_request(text)
+        task_request = (
+            dict(task_request_override)
+            if isinstance(task_request_override, dict)
+            else self._model_scout_task_request(text)
+        )
         requested_remote_role = str(requested_role_override or "").strip().lower() or self._model_scout_remote_role_requested(
             normalize_setup_text(text).replace("/", " ")
         )
@@ -9742,6 +9975,11 @@ class Orchestrator:
         text: str,
     ) -> OrchestratorResponse | None:
         if str(text or "").strip().startswith("/"):
+            return None
+        # Value-policy escalation is already a deterministic, bounded
+        # preflight in `_llm_chat`. It does not grant a model mutation and must
+        # not be reinterpreted by Safe Mode's broad grounded-model fallback.
+        if detect_premium_escalation_triggers(user_text=text):
             return None
         if not self._assistant_frontdoor_engaged(text):
             return None
@@ -11250,8 +11488,14 @@ class Orchestrator:
             },
         )
 
-    def _external_pack_knowledge_response(self, user_id: str, text: str) -> OrchestratorResponse | None:
-        if self._looks_like_pack_review_state_prompt(text):
+    def _external_pack_knowledge_response(
+        self,
+        user_id: str,
+        text: str,
+        *,
+        capability_selected: bool = False,
+    ) -> OrchestratorResponse | None:
+        if not capability_selected and self._looks_like_pack_review_state_prompt(text):
             response = self._pack_review_state_response(user_id)
             if response is not None:
                 return response
@@ -11282,7 +11526,7 @@ class Orchestrator:
             ).strip()
             if pack_name_raw:
                 pack_name_candidates.append(self._external_pack_display_name(pack_name_raw))
-        if not any(
+        if not capability_selected and not any(
             marker in normalized_query
             for marker in (
                 "pack",
@@ -19404,6 +19648,8 @@ class Orchestrator:
         state: dict[str, Any],
         *,
         confirmed: bool = False,
+        resolution_override: dict[str, Any] | None = None,
+        promote_default_override: bool | None = None,
     ) -> OrchestratorResponse:
         truth = self._runtime_truth()
         if truth is None:
@@ -19412,8 +19658,16 @@ class Orchestrator:
                 used_memory=bool(state),
                 reason="runtime_truth_service_unavailable",
             )
-        promote_default = self._model_controller_promote_requested(text)
-        resolution = self._resolve_controller_model_target(user_id, text)
+        promote_default = (
+            bool(promote_default_override)
+            if promote_default_override is not None
+            else self._model_controller_promote_requested(text)
+        )
+        resolution = (
+            dict(resolution_override)
+            if isinstance(resolution_override, dict)
+            else self._resolve_controller_model_target(user_id, text)
+        )
         if str(resolution.get("status") or "") == "ambiguous":
             matches = [
                 str(item).strip()
@@ -23385,6 +23639,12 @@ class Orchestrator:
             if (
                 not preview_capability_id
                 and not str(effective_user_text or "").strip().startswith("/")
+                # Premium/value escalation is a chat-generation policy, not
+                # a request for system health or a model-setting mutation.
+                # Keep this shared policy boundary ahead of the broad legacy
+                # health compatibility probe so the value-policy preflight
+                # remains authoritative.
+                and not detect_premium_escalation_triggers(user_text=effective_user_text)
                 and looks_like_system_health_request(effective_user_text)
             ):
                 return self._system_health_response(user_id, effective_user_text)
@@ -23500,6 +23760,10 @@ class Orchestrator:
                 )
                 if pending_guard_response is not None:
                     return pending_guard_response
+                safety_decision = classify_runtime_chat_route(effective_user_text)
+                safety_kind = str(safety_decision.get("kind") or "").strip().lower()
+                if safety_kind == "safety_bypass_refusal":
+                    return self._safety_bypass_refusal_response(user_id, effective_user_text)
                 pack_install_words = set(normalize_setup_text(effective_user_text).split())
                 if self._looks_like_agent_pack_install_request(effective_user_text) and pack_install_words & {"install", "import"}:
                     local_pack_preview = self._local_pack_install_preview_response(user_id, effective_user_text)
@@ -23508,13 +23772,27 @@ class Orchestrator:
                     remote_pack_denial = self._remote_pack_install_denial_response(user_id, effective_user_text)
                     if remote_pack_denial is not None:
                         return remote_pack_denial
+                if self._looks_like_email_access_request(effective_user_text):
+                    if self._looks_like_agent_pack_install_request(effective_user_text):
+                        return self._agent_pack_install_explanation_response(user_id, effective_user_text)
+                    return self._email_capability_unavailable_response(user_id, effective_user_text)
                 preview = context.get("request_understanding_preview")
+                unified_production_path = bool(
+                    isinstance(preview, RequestUnderstanding)
+                    and preview.original_text == str(effective_user_text or "")
+                )
                 understanding = (
                     preview
-                    if isinstance(preview, RequestUnderstanding)
-                    and preview.original_text == str(effective_user_text or "")
+                    if unified_production_path
                     else self._understand_conversation_request(user_id, effective_user_text)
                 )
+                if safety_kind == "shell_blocked_request" and (
+                    unified_production_path and not understanding.selected_capability_id
+                ):
+                    return self._shell_blocked_request_response(
+                        blocked_reason=str(safety_decision.get("blocked_reason") or "unsupported_command"),
+                        request_text=effective_user_text,
+                    )
                 # A registry-recognized goal has already crossed the request-
                 # understanding boundary.  Do not run the legacy onboarding
                 # readiness probe first: it performs broad provider discovery,
@@ -23527,66 +23805,35 @@ class Orchestrator:
                 )
                 if onboarding_response is not None:
                     return onboarding_response
-                compatibility_decision = classify_runtime_chat_route(effective_user_text)
-                compatibility_kind = str(compatibility_decision.get("kind") or "").strip().lower()
-                normalized_for_ownership = normalize_setup_text(effective_user_text)
-                ownership_tokens = set(normalized_for_ownership.split())
                 context["request_understanding"] = understanding.public_audit()
-                local_file_words = bool(
-                    {"file", "files", "folder", "directory", "drive", "document"}
-                    & set(normalized_for_ownership.split())
+                # Deterministic confirmation/cancellation and explicit command
+                # guards have already run above.  From this point a unified
+                # selection is final: compatibility classifiers may service an
+                # unregistered generic fallback, but cannot select, veto, or
+                # replace a registered capability or its clarification.
+                compatibility_decision = safety_decision
+                compatibility_kind = safety_kind
+                unified_internal_presence = bool(
+                    not unified_production_path
+                    and understanding.selected_capability_id == "assistant.presence"
                 )
-                explicit_web_request = bool(
-                    ownership_tokens & {"search", "internet", "web", "website", "online"}
-                    or "look up" in normalized_for_ownership
+                compatibility_owns_out_of_scope = bool(
+                    not unified_production_path and not unified_internal_presence
                 )
-                explicit_model_switch = bool(
-                    ownership_tokens & {"switch", "change", "temporary", "temporarily", "default"}
-                    and ownership_tokens & {"model", "ollama", "gemma", "qwen", "provider"}
+                understood_response = (
+                    None
+                    if compatibility_owns_out_of_scope
+                    else self._dispatch_understood_request(understanding)
                 )
-                compatibility_owned = bool(
-                    compatibility_kind.startswith(("operator_", "operational_", "memory_", "agent_memory", "shell_", "telegram_"))
-                    or compatibility_kind in {
-                        "safety_bypass_refusal", "secret_store_status", "configure_openrouter",
-                        "provide_openrouter_key", "confirm_pending_setup",
-                        "cancel_pending_setup", "setup_explanation",
-                        "plan_day", "pack_capability_recommendation", "capability_gap_plan",
-                    }
-                    or compatibility_kind.startswith(("governance_", "model_policy_"))
-                    or compatibility_kind in {"model_controller_policy", "model_lifecycle_status"}
-                    or compatibility_kind in {"provider_status", "providers_status", "telegram_status"}
-                    or (
-                        compatibility_kind == "product_specific_guard"
-                        and (
-                            understanding.selected_capability_id is None
-                            or (
-                                understanding.selected_capability_id == "models.scout"
-                                and not self._looks_like_model_scout_action(
-                                    effective_user_text,
-                                    context=self._current_interpretable_result(user_id),
-                                )
-                            )
-                        )
+                if understood_response is not None:
+                    return self._with_request_understanding(understood_response, understanding)
+                if unified_production_path and compatibility_kind in _WP1_LEGACY_ROUTE_KINDS:
+                    generic_response = (
+                        self._llm_chat(user_id, effective_user_text, chat_context=context)
+                        if self._llm_chat_available()
+                        else self._bootstrap_no_chat_response()
                     )
-                    or (
-                        "execution mode" in normalized_for_ownership
-                        and bool(ownership_tokens & {"skill", "telegram", "adapter"})
-                    )
-                    or (compatibility_kind == "configure_ollama" and not explicit_model_switch)
-                    or (
-                        compatibility_kind.startswith("safe_web_search")
-                        and not local_file_words
-                        and understanding.selected_capability_id not in {"assistant.presence", "packs.use"}
-                    )
-                    or (
-                        bool(ownership_tokens & {"add", "install", "acquire", "create"})
-                        and bool(ownership_tokens & {"capability", "skill", "pack"})
-                    )
-                    or any(
-                        value is not None
-                        for value in self._parse_memory_write(effective_user_text).values()
-                    )
-                )
+                    return self._with_request_understanding(generic_response, understanding)
                 if compatibility_kind in {"generic_chat", "none"}:
                     interpretation_response = self._interpret_previous_result_followup(
                         user_id,
@@ -23595,23 +23842,6 @@ class Orchestrator:
                     )
                     if interpretation_response is not None:
                         return interpretation_response
-                production_chat_request = bool(
-                    isinstance(context.get("payload"), dict)
-                    and callable(getattr(self._chat_runtime_adapter, "chat_route_decision", None))
-                )
-                direct_presence_probe = bool(
-                    not production_chat_request
-                    and understanding.selected_capability_id == "assistant.presence"
-                    and not normalized_for_ownership.startswith(("hello", "hi ", "hey "))
-                )
-                if (production_chat_request and not compatibility_owned) or direct_presence_probe:
-                    understood_response = (
-                        self._dispatch_understood_request(understanding)
-                        if production_chat_request or direct_presence_probe
-                        else None
-                    )
-                    if understood_response is not None:
-                        return self._with_request_understanding(understood_response, understanding)
             if not cmd and self._looks_like_agent_pack_install_request(effective_user_text):
                 local_pack_preview = self._local_pack_install_preview_response(user_id, effective_user_text)
                 if local_pack_preview is not None:

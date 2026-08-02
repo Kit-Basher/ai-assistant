@@ -1,6 +1,6 @@
 {
   "schema": "personal-agent.mutation-file-classification.v2b",
-  "reviewed_count": 160,
+  "reviewed_count": 161,
   "required_fields": [
     "path",
     "disposition",
@@ -2415,6 +2415,21 @@
       "confirmation_requirements": "explicit command invocation without --check",
       "rollback_scope": "single checked-in generated Audit 3 inventory file",
       "audit_evidence": "Audit 3 deterministic regeneration and exact-comparison test",
+      "contract_identity": "not_applicable"
+    },
+    {
+      "path": "scripts/wp1_latency_probe.py",
+      "disposition": "offline_tool",
+      "capability": "developer.performance_probe",
+      "entry_point": "explicit command-line main",
+      "actor": "developer/release operator",
+      "target_resources": "temporary isolated state directory or explicitly supplied loopback candidate API",
+      "mutation_type": "temporary benchmark fixture creation and isolated chat transcript writes",
+      "policy_path": "not imported by shipping runtime; explicit operator invocation; live API use requires an explicit URL",
+      "executor": "script-owned bounded latency sampler using the production request-understanding and chat surfaces",
+      "confirmation_requirements": "explicit command invocation",
+      "rollback_scope": "temporary directory owned by the probe",
+      "audit_evidence": "WP1 before/after median and p95 latency report",
       "contract_identity": "not_applicable"
     }
   ]

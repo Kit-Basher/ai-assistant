@@ -11,6 +11,10 @@ if str(ROOT) not in sys.path:
 
 from scripts.release_smoke import EXTENDED_TEST_NODES, MAIN_TEST_NODES
 
+WP1_UNIFIED_ROUTING_TEST_NODES: tuple[str, ...] = (
+    "tests/test_unified_conversation_routing.py",
+)
+
 PY_COMPILE_TARGETS: tuple[str, ...] = (
     "agent/api_server.py",
     "memory/db.py",
@@ -49,6 +53,7 @@ PY_COMPILE_TARGETS: tuple[str, ...] = (
     "scripts/vm_proof_smoke.py",
     "scripts/daily_driver_maturity_audit.py",
     "scripts/chat_frontdoor_smoke.py",
+    "scripts/wp1_latency_probe.py",
 )
 
 def _pytest_command(test_nodes: tuple[str, ...]) -> tuple[str, ...]:
@@ -66,7 +71,7 @@ RELEASE_GATE_COMMANDS: tuple[tuple[str, ...], ...] = (
         "desktop/tests/packStateUiHelpers.test.js",
         "desktop/tests/stateUiHelpers.test.js",
     ),
-    _pytest_command(MAIN_TEST_NODES),
+    _pytest_command((*MAIN_TEST_NODES, *WP1_UNIFIED_ROUTING_TEST_NODES)),
     _pytest_command(EXTENDED_TEST_NODES),
     ("git", "diff", "--check"),
 )

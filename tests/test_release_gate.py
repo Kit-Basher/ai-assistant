@@ -37,7 +37,31 @@ class TestReleaseGate(unittest.TestCase):
         self.assertIn("scripts/split_smoke.py", rendered)
         self.assertIn(" -m pytest -q --maxfail=1 tests/test_publishability_smoke.py", rendered)
         self.assertIn("tests/test_clean_context_validation.py", rendered)
+        self.assertIn("tests/test_unified_conversation_routing.py", rendered)
         self.assertIn("git diff --check", rendered)
+
+    def test_release_gate_propagates_unified_routing_suite_failure(self) -> None:
+        module = _load_module(REPO_ROOT / "scripts" / "release_gate.py", "release_gate_script_failure")
+        unified_commands = [
+            command
+            for command in module.RELEASE_GATE_COMMANDS
+            if "tests/test_unified_conversation_routing.py" in command
+        ]
+        self.assertEqual(1, len(unified_commands))
+
+        def _fake_run(command, cwd=None, check=False):  # noqa: ANN001
+            _ = cwd
+            _ = check
+
+            class _Result:
+                returncode = 73 if tuple(command) == unified_commands[0] else 0
+
+            return _Result()
+
+        with patch.object(module.subprocess, "run", side_effect=_fake_run):
+            exit_code = module.main([])
+
+        self.assertEqual(73, exit_code)
 
     def test_release_gate_runs_commands_in_order(self) -> None:
         module = _load_module(REPO_ROOT / "scripts" / "release_gate.py", "release_gate_script_run")

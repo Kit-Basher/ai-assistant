@@ -18,13 +18,12 @@ in BotFather, update the Personal Agent secret store, and restart
 the embedded Telegram poller in `personal-agent-api.service`.
 
 ## Current Product Truth
-Current release line: v0.2.5 development patch on top of the v0.2.4 Telegram
-redaction checkpoint. The v0.2.2 authorization foundation is implemented and
-verified. v0.2.3 improved Telegram diagnostics and local system intent quality.
-v0.2.4 added token redaction and first-reply reliability. v0.2.5 focuses on
-friendly capability answers, conservative memory behavior, and better
-clarifying questions. Release tags are not created automatically by audit
-tooling.
+Current release line: v0.2.7. It preserves the existing authorization,
+Telegram, memory, filesystem, model-management, pack, and Web UI foundations
+while making unified request understanding and the live capability registry the
+sole ordinary `/chat` capability-selection path. See
+[`docs/releases/v0.2.7.md`](docs/releases/v0.2.7.md). Release tags are not
+created automatically by audit tooling.
 
 The user interacts with the assistant layer. The assistant interprets intent,
 asks the agent layer for grounded runtime/tool facts or bounded action results

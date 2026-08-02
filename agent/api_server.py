@@ -11590,24 +11590,27 @@ class AgentRuntime:
 
         user_id = self._chat_user_id(payload)
         thread_id = self._chat_thread_id(payload, user_id=user_id)
-        request_understanding_preview = None
+        request_understanding_preview = payload.get("_request_understanding_preview")
+        request_understanding_ms = int(payload.get("_request_understanding_ms") or 0)
         unified_bootstrap_skip = False
-        if not bootstrap_social_hint:
-            try:
+        try:
+            if request_understanding_preview is None:
+                understanding_started = time.monotonic()
                 request_understanding_preview = self.orchestrator().preview_conversation_request(
                     user_id,
                     last_user_text,
                     thread_id=thread_id,
                 )
-                unified_bootstrap_skip = bool(
-                    request_understanding_preview.selected_capability_id
-                    or request_understanding_preview.clarification
-                    or request_understanding_preview.fallback_category.value
-                    in {"grounded_casual", "unavailable_capability"}
-                )
-            except Exception:
-                request_understanding_preview = None
-                unified_bootstrap_skip = False
+                request_understanding_ms = int(max(0.0, time.monotonic() - understanding_started) * 1000)
+            unified_bootstrap_skip = bool(
+                request_understanding_preview.selected_capability_id
+                or request_understanding_preview.clarification
+                or request_understanding_preview.fallback_category.value
+                in {"grounded_casual", "unavailable_capability"}
+            )
+        except Exception:
+            request_understanding_preview = None
+            unified_bootstrap_skip = False
         if (
             not bootstrap_social_hint
             and not unified_bootstrap_skip
@@ -11617,8 +11620,13 @@ class AgentRuntime:
             _ = self._auto_bootstrap_local_chat_model()
             bootstrap_ms = int(max(0.0, time.monotonic() - bootstrap_started) * 1000)
             timings_ms["bootstrap_ms"] = bootstrap_ms
+        timings_ms["request_understanding_ms"] = request_understanding_ms
         chat_context = {
-            "payload": dict(payload),
+            "payload": {
+                key: value
+                for key, value in payload.items()
+                if not str(key).startswith("_request_understanding_")
+            },
             "messages": messages,
             "trace_id": trace_id,
             "request_id": request_id,
@@ -24792,14 +24800,52 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 assistant_frontdoor_generic = False
                 assistant_followup_hint: dict[str, Any] = {}
                 unified_understanding_preview = None
+                unified_understanding_ms = 0
                 legacy_clarification_allowed = True
                 suppress_thread_integrity_prompt = False
                 suppress_intent_choice_prompt = False
                 runtime_route: dict[str, Any] = {}
                 if path == "/chat":
+                    # Request understanding owns ordinary /chat meaning.  Build
+                    # its preview before consulting the legacy compatibility
+                    # classifier so a legacy status hint cannot prevent a
+                    # registered capability from ever being considered.
+                    try:
+                        unified_understanding_started = time.monotonic()
+                        orchestrator = self.runtime.orchestrator()
+                        request_thread_id = self.runtime._chat_thread_id(payload, user_id=chat_user_id)
+                        unified_understanding_preview = orchestrator.preview_conversation_request(
+                            chat_user_id,
+                            str(input_text or ""),
+                            thread_id=request_thread_id,
+                        )
+                        unified_understanding_ms = int(
+                            max(0.0, time.monotonic() - unified_understanding_started) * 1000
+                        )
+                    except Exception:
+                        orchestrator = None
+                        request_thread_id = None
+                        unified_understanding_preview = None
+
                     runtime_route = self.runtime.chat_route_decision(payload, input_text)
                     route_name = str(runtime_route.get("route") or "generic_chat").strip().lower() or "generic_chat"
-                    authoritative_runtime_route = route_name != "generic_chat"
+                    unified_owns_turn = bool(
+                        unified_understanding_preview is not None
+                        and (
+                            unified_understanding_preview.selected_capability_id
+                            or unified_understanding_preview.clarification
+                            or unified_understanding_preview.fallback_category.value
+                            in {"grounded_casual", "unavailable_capability"}
+                        )
+                    )
+                    # A unified selection is authoritative regardless of what
+                    # label the compatibility classifier produced.  Legacy
+                    # routing remains eligible only when unified understanding
+                    # intentionally left the turn to an out-of-scope family.
+                    authoritative_runtime_route = bool(
+                        route_name != "generic_chat"
+                        and not unified_owns_turn
+                    )
                     assistant_frontdoor_active = bool(
                         self.runtime.should_use_assistant_frontdoor(
                             text=input_text,
@@ -24809,13 +24855,8 @@ class APIServerHandler(BaseHTTPRequestHandler):
                     )
                     assistant_frontdoor_generic = bool(assistant_frontdoor_active and route_name == "generic_chat")
                     try:
-                        orchestrator = self.runtime.orchestrator()
-                        request_thread_id = None
-                        if not authoritative_runtime_route and callable(getattr(self.runtime, "_chat_thread_id", None)):
-                            try:
-                                request_thread_id = self.runtime._chat_thread_id(payload, user_id=chat_user_id)
-                            except Exception:
-                                request_thread_id = None
+                        if orchestrator is None:
+                            orchestrator = self.runtime.orchestrator()
                         assistant_followup_hint = (
                             orchestrator.assistant_followup_hint(
                                 chat_user_id,
@@ -24828,8 +24869,10 @@ class APIServerHandler(BaseHTTPRequestHandler):
                             )
                             else {}
                         )
-                        if not authoritative_runtime_route and callable(
-                            getattr(orchestrator, "preview_conversation_request", None)
+                        if (
+                            unified_understanding_preview is None
+                            and not authoritative_runtime_route
+                            and callable(getattr(orchestrator, "preview_conversation_request", None))
                         ):
                             unified_understanding_preview = orchestrator.preview_conversation_request(
                                 chat_user_id,
@@ -25282,6 +25325,9 @@ class APIServerHandler(BaseHTTPRequestHandler):
                     payload_with_trace = dict(payload)
                     payload_with_trace.setdefault("trace_id", trace_id)
                     payload_with_trace.setdefault("source_surface", "api")
+                    if unified_understanding_preview is not None:
+                        payload_with_trace["_request_understanding_preview"] = unified_understanding_preview
+                        payload_with_trace["_request_understanding_ms"] = unified_understanding_ms
                     chat_result = self.runtime.chat(payload_with_trace)
                     ok_local, body_local = chat_result
                     assistant = (
