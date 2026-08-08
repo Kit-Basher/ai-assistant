@@ -626,6 +626,7 @@ class RequestUnderstandingService:
 
         public_entity_question = bool(
             re.search(r"\b[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)+\b", original)
+            and not _LOCAL_PATH_RE.search(original)
             and memory_tokens & {"what", "is", "are", "good", "useful", "worth"}
             and not memory_tokens & {"find", "install", "list", "open", "read", "search", "switch"}
             and not memory_tokens & {

@@ -411,12 +411,22 @@ def test_transformation_matrix_is_balanced_by_family_and_category() -> None:
         "what is inside {path}",
     ),
 )
-def test_filesystem_semantics_are_independent_of_path_payload_words(request_template: str) -> None:
+@pytest.mark.parametrize(
+    "path_parts",
+    (
+        ("personal-agent", "models", "packs", "downloaded", "during", "setup"),
+        ("personal-agent", "release-candidate", "current-state"),
+    ),
+)
+def test_filesystem_semantics_are_independent_of_path_payload_words(
+    request_template: str,
+    path_parts: tuple[str, ...],
+) -> None:
     """A path is a structured argument and must not dilute or change intent."""
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
         allowed = root / "allowed"
-        target = allowed / "personal-agent" / "models" / "packs" / "downloaded" / "during" / "setup"
+        target = allowed.joinpath(*path_parts)
         target.mkdir(parents=True)
         (target / "proof.txt").write_text("path-independent routing\n", encoding="utf-8")
         runtime = AgentRuntime(
