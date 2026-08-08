@@ -95,7 +95,12 @@ def normalize_user_meaning(text: str | None) -> str:
     }
     expanded: list[str] = []
     for token in tokens:
-        expanded.extend(expansions.get(token, token).split())
+        # Possessive morphology carries no intent distinction, but retaining
+        # the suffix makes ordinary subjects such as "computer's CPU" miss
+        # the system domain. This changes only the semantic copy; the original
+        # message remains intact for structured inputs and audit.
+        semantic_token = token[:-2] if token.endswith("'s") and len(token) > 2 else token
+        expanded.extend(expansions.get(semantic_token, semantic_token).split())
     return " ".join(expanded)
 
 
@@ -194,16 +199,18 @@ def _semantic_domain_boost(capability_id: str, tokens: set[str]) -> float:
         score += 0.42
     filesystem_domain = has(
         "file", "files", "filename", "folder", "directory", "document", "drive", "download", "downloaded",
-        "repo", "repository",
+        "repo", "repository", "path",
     ) or any(token.startswith(("/", "~")) for token in tokens)
     filesystem_search_action = has("find", "locate", "search", "where") or has_fuzzy(
         "find", "locate", "search", "where"
     )
+    filesystem_read_action = has("read", "open", "preview", "text") or has_fuzzy(
+        "read", "open", "preview", "text"
+    )
     if capability_id.startswith("filesystem.") and filesystem_domain:
         score += 0.14
         if capability_id == "filesystem.read" and (
-            has("read", "open", "preview", "text")
-            or has_fuzzy("read", "open", "preview", "text")
+            filesystem_read_action
             or (has("show", "contents") and has("file", "document"))
         ):
             score += 0.26
@@ -212,7 +219,7 @@ def _semantic_domain_boost(capability_id: str, tokens: set[str]) -> float:
         if capability_id == "filesystem.list" and (has("list") or has_fuzzy("list")):
             score += 0.26
         elif capability_id == "filesystem.list" and (
-            (has("inside", "under", "beneath", "lives") and not filesystem_search_action)
+            (has("in", "inside", "under", "beneath", "lives") and not filesystem_search_action and not filesystem_read_action)
             or (has("folder", "directory") and has("show", "contents", "inside", "in"))
         ):
             score += 0.26
@@ -260,7 +267,7 @@ def _semantic_domain_boost(capability_id: str, tokens: set[str]) -> float:
         score += 0.26
     if capability_id == "conversation.history" and has("history", "previous", "earlier", "remember", "recall", "conversation", "continue", "again", "last", "carry", "recap", "underway"):
         score += 0.24
-    if capability_id == "conversation.history" and has("memory") and not has("ram", "system", "computer", "machine", "resources", "using", "usage", "much", "eating", "consuming"):
+    if capability_id == "conversation.history" and has("memory") and not has("cpu", "ram", "system", "computer", "machine", "resources", "using", "usage", "much", "eating", "consuming"):
         score += 0.36
     if capability_id == "conversation.history" and (
         (has("we") and (has("next", "plan") or has_fuzzy("doing", "should", "back")))
@@ -413,7 +420,9 @@ def _structured_capability_inputs(
         ):
             result["status_scope"] = "observe"
         else:
-            result["status_scope"] = "system" if tokens & {"cpu", "ram", "memory", "disk", "storage", "computer", "machine", "resources"} else "runtime"
+            # A generic machine/assistant health question is runtime status;
+            # only concrete resource nouns request the fuller host report.
+            result["status_scope"] = "system" if tokens & {"cpu", "ram", "memory", "disk", "storage", "resources"} else "runtime"
 
     elif capability_id == "models.inventory":
         model_tokens = re.findall(
@@ -830,6 +839,10 @@ class RequestUnderstandingService:
         semantic_surface = _LOCAL_PATH_RE.sub(" ", original)
         query = _features(semantic_surface)
         semantic_tokens = _with_inflection_variants(set(normalized.split()))
+        if _LOCAL_PATH_RE.search(original):
+            # A path is a typed filesystem argument. Preserve that domain
+            # signal after removing its spelling from the similarity vector.
+            semantic_tokens.add("path")
         # Light derivational normalization keeps the semantic taxonomy useful
         # for ordinary forms such as "creating", "importing", and "backing
         # up" without adding surface phrases or trigger aliases.
@@ -957,7 +970,7 @@ class RequestUnderstandingService:
             if (
                 definition.capability_id == "system.status"
                 and "memory" in semantic_tokens
-                and not semantic_tokens & {"ram", "system", "computer", "machine", "resources", "usage", "using"}
+                and not semantic_tokens & {"cpu", "ram", "system", "computer", "machine", "resources", "usage", "using"}
             ):
                 score *= 0.25
             if semantic_tokens & {"backup", "restore", "update", "clean", "uninstall", "repair"}:

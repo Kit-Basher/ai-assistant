@@ -5,7 +5,7 @@ This is the current-state handover doc. Product intent lives in
 `PRODUCT_RUNTIME_SPEC.md`. Treat this file as a status snapshot, not the sole
 source of truth.
 
-## WP2 candidate truth (v0.2.9)
+## WP2 candidate truth (v0.2.10)
 
 - The protected inventory and live registry reconcile 22 native user-goal
   capabilities across assistant, conversation, filesystem, system, models,
@@ -19,8 +19,9 @@ source of truth.
 - Text-only pack ingress is local-directory only. Arbitrary remote archives,
   executable packs, automatic acquisition, and assistant-created packs remain
   unsupported.
-- The promoted runtime remains v0.2.8 until the exact v0.2.9 candidate passes
-  all gates and isolated verification.
+- The v0.2.9 promotion exposed two live-language validation gaps before final
+  acceptance. The exact v0.2.10 candidate includes their semantic-domain fixes
+  and remains a candidate until its complete gates and live verification pass.
 
 The older narrative below is retained as historical context; where it differs,
 the WP2 candidate truth above and the higher-priority product/runtime documents

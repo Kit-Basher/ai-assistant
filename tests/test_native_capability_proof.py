@@ -229,6 +229,29 @@ def test_natural_capability_health_questions_use_live_runtime_and_policy() -> No
         assert _capability_id(directory_preview) == "filesystem.create_directory"
 
 
+def test_container_path_and_hardware_memory_language_route_by_semantic_domain() -> None:
+    """Live-found unseen forms stay governed by concepts, not sentence aliases."""
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        runtime = AgentRuntime(_config(str(root / "registry.json"), str(root / "agent.db"), perception_roots=(raw,)))
+
+        listing = _chat(
+            runtime,
+            f"show what is in {raw}",
+            user="wp2-container-language",
+            thread="wp2:container-language",
+        )
+        assert _capability_id(listing) == "filesystem.list"
+
+        resources = _chat(
+            runtime,
+            "how are this computer's CPU and memory doing?",
+            user="wp2-resource-language",
+            thread="wp2:resource-language",
+        )
+        assert _capability_id(resources) == "system.status"
+
+
 def test_systematic_transformations_cover_every_wp2_capability_family() -> None:
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
