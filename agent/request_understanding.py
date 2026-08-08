@@ -82,6 +82,9 @@ def normalize_user_meaning(text: str | None) -> str:
     """Normalize for matching while preserving the caller's original text."""
     value = unicodedata.normalize("NFKC", str(text or "")).casefold().replace("’", "'")
     value = re.sub(r"\badd[-\s]?on(s?)\b", r"addon\1", value)
+    # Canonicalize the ordinary phrasal verb as one lifecycle concept. This
+    # lets setup/repair ownership remain distinct from using the dependency.
+    value = re.sub(r"\bset[-\s]+up\b", "setup", value)
     value = re.sub(r"(?<=\w)/(?=\w)", " ", value)
     tokens = _TOKEN_RE.findall(value)
     expansions = {
