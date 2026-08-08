@@ -151,6 +151,17 @@ def _is_single_edit_or_transposition(left: str, right: str) -> bool:
     return any(longer[:index] + longer[index + 1 :] == shorter for index in range(len(longer)))
 
 
+def _with_inflection_variants(tokens: set[str]) -> set[str]:
+    """Add conservative word-shape variants without rewriting user text."""
+    expanded = set(tokens)
+    for token in tuple(tokens):
+        if len(token) > 5 and token.endswith("ing"):
+            stem = token[:-3]
+            expanded.add(stem)
+            expanded.add(f"{stem}e")
+    return expanded
+
+
 def _semantic_domain_boost(capability_id: str, tokens: set[str]) -> float:
     """Small concept taxonomy; examples remain the language surface."""
     def has(*concepts: str) -> bool:
@@ -267,7 +278,10 @@ def _semantic_domain_boost(capability_id: str, tokens: set[str]) -> float:
     if capability_id == "system.package.install" and has("install", "add") and has("package", "utility", "tool", "apt", "pip"):
         score += 0.44
     memory_domain = (has("memory", "remembered", "continuity", "recall") or has_fuzzy("memory", "continuity", "recall")) and not has("ram", "cpu", "resources", "usage", "using", "eating", "consuming")
-    if capability_id == "memory.status" and memory_domain and has("status", "enabled", "health", "scope", "what", "where", "available", "explain"):
+    if capability_id == "memory.status" and memory_domain and (
+        has("status", "enabled", "health", "healthy", "scope", "what", "where", "available", "working", "explain")
+        or has_fuzzy("status", "enabled", "health", "healthy", "available", "working")
+    ):
         score += 0.40
     if capability_id == "memory.manage" and memory_domain and has("forget", "delete", "erase", "reset", "export", "redact", "cleanup", "disable", "enable"):
         score += 0.44
@@ -684,7 +698,7 @@ class RequestUnderstandingService:
         # The WP1 conversation capability is read-only. A request to create a
         # durable preference/memory must remain with the existing deterministic
         # mutation flow and cannot be silently reinterpreted as history recall.
-        memory_tokens = set(normalized.split())
+        memory_tokens = _with_inflection_variants(set(normalized.split()))
         if memory_tokens & {"remember", "save", "store", "record"} and not memory_tokens & {
             "what", "which", "show", "recall", "history", "previous", "earlier"
         }:
@@ -815,13 +829,10 @@ class RequestUnderstandingService:
         # ``semantic_tokens`` and the path detector in the domain boost.
         semantic_surface = _LOCAL_PATH_RE.sub(" ", original)
         query = _features(semantic_surface)
-        semantic_tokens = set(normalized.split())
+        semantic_tokens = _with_inflection_variants(set(normalized.split()))
         # Light derivational normalization keeps the semantic taxonomy useful
-        # for ordinary forms such as "importing", "installed", and
-        # "backing up" without adding surface phrases or trigger aliases.
-        for token in tuple(semantic_tokens):
-            if len(token) > 5 and token.endswith("ing"):
-                semantic_tokens.add(token[:-3])
+        # for ordinary forms such as "creating", "importing", and "backing
+        # up" without adding surface phrases or trigger aliases.
         if (
             re.search(r"(?<![/\\\w.:-])[A-Za-z0-9][A-Za-z0-9_-]*\.[A-Za-z0-9][A-Za-z0-9_-]*\b", original)
             and semantic_tokens & {"find", "list", "locate", "open", "preview", "read", "search", "show"}
@@ -906,6 +917,12 @@ class RequestUnderstandingService:
                 score *= 0.15
             if definition.capability_id == "conversation.history" and boost == 0.0:
                 score *= 0.15
+            if (
+                definition.capability_id == "conversation.history"
+                and semantic_tokens & {"memory", "continuity", "remembered"}
+                and semantic_tokens & {"status", "enabled", "health", "healthy", "scope", "available", "working"}
+            ):
+                score *= 0.18
             if semantic_tokens & {"backup", "restore", "update", "clean", "uninstall", "repair"}:
                 if definition.capability_id in {
                     "system.status", "filesystem.list", "filesystem.search", "filesystem.read", "packs.use"

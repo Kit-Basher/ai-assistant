@@ -217,6 +217,17 @@ def test_natural_capability_health_questions_use_live_runtime_and_policy() -> No
         assert "explicit preview and confirmation" in model_text
         assert "silently" in model_text
 
+        memory_status = _chat(runtime, "is saved continuity memory healthy?", user="wp2-status-memory", thread="wp2:status-memory")
+        assert _capability_id(memory_status) == "memory.status"
+
+        directory_preview = _chat(
+            runtime,
+            f"preview creating a folder called inflected-preview in {raw}",
+            user="wp2-inflected-directory",
+            thread="wp2:inflected-directory",
+        )
+        assert _capability_id(directory_preview) == "filesystem.create_directory"
+
 
 def test_systematic_transformations_cover_every_wp2_capability_family() -> None:
     with tempfile.TemporaryDirectory() as raw:
