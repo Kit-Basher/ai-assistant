@@ -162,6 +162,11 @@ def test_capability_status_api_has_plain_and_advanced_views() -> None:
         serialized = json.dumps(advanced.body).lower()
         assert "api_key" not in serialized
         assert "token" not in serialized
+        search = next(row for row in advanced.body["capabilities"] if row["id"] == "search.web")
+        assert search["available"] is False
+        assert search["status"] == "unavailable"
+        assert search["reason"] == "search_disabled"
+        assert "searxng" in str(search["next_step"]).lower()
 
 
 def test_new_native_capabilities_are_reachable_through_production_chat() -> None:

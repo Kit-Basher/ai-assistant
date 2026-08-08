@@ -5,9 +5,9 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Version: `v0.2.10` candidate (Work Package 2)
+- Version: `v0.2.11` candidate (Work Package 2)
 - Baseline: completed WP1 commit `11efebb8d963aa2a566e47bd7c451a93486e45a4`
-- Working live runtime while the corrected candidate is proved: `v0.2.9`
+- Working live runtime while the corrected candidate is proved: `v0.2.10`
 - Capability truth: the live registry plus
   `config/native_capabilities.json`, enforced by
   `scripts/native_capability_proof.py`

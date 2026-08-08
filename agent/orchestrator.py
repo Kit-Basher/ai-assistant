@@ -1069,8 +1069,20 @@ class Orchestrator:
                 else getattr(runtime_config, "searxng_base_url", "")
                 or ""
             ).strip()
-            reason = None if enabled and endpoint else "search_disabled" if not enabled else "endpoint_missing"
-            return True, reason
+            if not enabled:
+                return False, "search_disabled"
+            if not endpoint:
+                return False, "endpoint_missing"
+            # Dependency probes are intentionally excluded from ordinary
+            # request ranking. The canonical status surface refreshes this
+            # bounded cache before publishing registry health; chat search
+            # attempts refresh it through the same runtime status method.
+            cache = getattr(adapter, "_search_status_cache", None)
+            payload = cache.get("payload") if isinstance(cache, dict) else None
+            if isinstance(payload, dict):
+                available = bool(payload.get("available"))
+                return available, None if available else str(payload.get("reason") or "endpoint_unreachable")
+            return False, "search_health_unverified"
         if capability_id.startswith("telegram."):
             return (self._chat_runtime_adapter is not None, None if self._chat_runtime_adapter is not None else "telegram_runtime_unavailable")
         if capability_id.startswith(("memory.", "operator.", "system.shell", "system.package", "filesystem.create")):

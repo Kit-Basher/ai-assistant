@@ -18,11 +18,11 @@ in BotFather, update the Personal Agent secret store, and restart
 the embedded Telegram poller in `personal-agent-api.service`.
 
 ## Current Product Truth
-Current release candidate: v0.2.10. It preserves the existing authorization,
+Current release candidate: v0.2.11. It preserves the existing authorization,
 Telegram, memory, filesystem, model-management, pack, and Web UI foundations
 while making unified request understanding and the live capability registry the
 sole ordinary `/chat` capability-selection path. See
-[`docs/releases/v0.2.10.md`](docs/releases/v0.2.10.md). Release tags are not
+[`docs/releases/v0.2.11.md`](docs/releases/v0.2.11.md). Release tags are not
 created automatically by audit tooling.
 
 The user interacts with the assistant layer. The assistant interprets intent,

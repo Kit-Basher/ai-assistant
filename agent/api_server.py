@@ -10183,6 +10183,16 @@ class AgentRuntime:
         return self._ensure_chat_runtime_bootstrapped()
 
     def capability_status(self, *, advanced: bool = False) -> dict[str, Any]:
+        # Refresh optional provider truth only on the explicit status surface.
+        # Request understanding reads the resulting bounded cache and never
+        # adds a network probe to every ordinary chat message.
+        try:
+            self.search_status()
+        except Exception:
+            self._search_status_cache = {
+                "cached_at_monotonic": time.monotonic(),
+                "payload": {"available": False, "reason": "search_status_unavailable"},
+            }
         rows = self.orchestrator().capability_registry_snapshot()
         available = [row for row in rows if bool(row.get("available"))]
         unavailable = [row for row in rows if not bool(row.get("available"))]
@@ -10198,7 +10208,13 @@ class AgentRuntime:
                 "status": health.get("state") or ("available" if row.get("available") else "unavailable"),
                 "reason": health.get("reason"),
                 "requires_confirmation": str(row.get("approval_policy") or "") == "required",
-                "next_step": health.get("next_step") or ("Open chat and describe what you want to do." if row.get("available") else "Check the optional dependency or runtime status."),
+                "next_step": health.get("next_step") or (
+                    "Start or configure the trusted bounded SearXNG provider, then check capability status again."
+                    if row.get("id") == "search.web" and not row.get("available")
+                    else "Open chat and describe what you want to do."
+                    if row.get("available")
+                    else "Check the optional dependency or runtime status."
+                ),
             }
             if advanced:
                 public.update({
