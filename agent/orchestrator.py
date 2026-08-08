@@ -6026,6 +6026,27 @@ class Orchestrator:
                 "unable to access or locate files",
                 "cannot directly access your device",
             )
+            # Match the semantic family of blanket file/directory denials from
+            # a generic model without treating an honest configured-root or
+            # permission restriction as contradictory.
+            filesystem_restriction_qualified = any(
+                qualifier in normalized
+                for qualifier in (
+                    "allowed root",
+                    "configured root",
+                    "outside the root",
+                    "outside that root",
+                    "permission denied",
+                    "not permitted",
+                )
+            )
+            if not filesystem_restriction_qualified and re.search(
+                r"\b(?:cannot|can't|unable to|do not have access to|don't have access to)\b"
+                r".{0,80}\b(?:access|read|inspect|provide information (?:about|on))\b"
+                r".{0,80}\b(?:files?|folders?|directories|directory contents)\b",
+                normalized,
+            ):
+                return "no_file_access"
         if available_ids:
             patterns["no_capability_access"] = (
                 "i cannot use tools",

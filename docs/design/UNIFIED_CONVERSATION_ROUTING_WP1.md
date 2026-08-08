@@ -109,6 +109,12 @@ acquisition, and plan/act/verify automation remain WP2+ work.
 | Generic conversation | one local-model inference with authoritative runtime context | a second bounded generation is allowed only to repair a detected bad draft |
 | Serialization, transcript persistence, audit | `AgentRuntime.chat` | SQLite and event sinks preserve the public envelope |
 
+Semantic comparison deliberately excludes absolute and relative path payloads.
+Paths remain unchanged in the original request and are extracted into the
+validated capability input after selection. This prevents directory names,
+path depth, or words such as `models` and `packs` inside a path from changing
+the user's directory-list/search/read intent.
+
 ## Remaining compatibility-classifier calls
 
 `classify_runtime_chat_route` intentionally remains in production, but not in a

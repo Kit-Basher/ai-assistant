@@ -405,6 +405,43 @@ def test_transformation_matrix_is_balanced_by_family_and_category() -> None:
 
 
 @pytest.mark.parametrize(
+    "request_template",
+    (
+        "what lives beneath {path}",
+        "what is inside {path}",
+    ),
+)
+def test_filesystem_semantics_are_independent_of_path_payload_words(request_template: str) -> None:
+    """A path is a structured argument and must not dilute or change intent."""
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        allowed = root / "allowed"
+        target = allowed / "personal-agent" / "models" / "packs" / "downloaded" / "during" / "setup"
+        target.mkdir(parents=True)
+        (target / "proof.txt").write_text("path-independent routing\n", encoding="utf-8")
+        runtime = AgentRuntime(
+            _config(str(root / "registry.json"), str(root / "agent.db"), perception_roots=(str(allowed),))
+        )
+        _ready_mock_chat_runtime(runtime)
+        with patch(
+            "agent.orchestrator.route_inference",
+            side_effect=AssertionError("directory-list request reached the generic model"),
+        ):
+            response = _chat(
+                runtime,
+                request_template.format(path=target),
+                user="path-payload",
+                thread=f"path-payload:{request_template}",
+            )
+    understanding = _understanding(response)
+    meta = response.get("meta") if isinstance(response.get("meta"), dict) else {}
+    assert understanding.get("selected_capability_id") == "filesystem.list", response
+    assert understanding.get("structured_inputs", {}).get("path_hint") == str(target)
+    assert meta.get("used_llm") is False
+    assert "proof.txt" in str(response.get("message") or "")
+
+
+@pytest.mark.parametrize(
     "text",
     [
         "U HERE", "u...here???", "  u   here  ", "r u hre", "you tehre", "hey, are ya still around please",
@@ -462,6 +499,10 @@ def test_model_mutation_approval_typo_and_punctuation_cannot_bypass_boundary() -
         ("I do not have sensory perception and cannot discuss that.", "sensory perception"),
         ("I cannot use tools and I do not have any skills.", "cannot use tools"),
         ("I am not connected to a model and no language model is available.", "not connected to a model"),
+        (
+            "I am unable to access real-time information or specific directory contents.",
+            "unable to access real-time information or specific directory contents",
+        ),
     ),
 )
 def test_false_runtime_claim_from_model_is_replaced_by_grounded_contract(false_text: str, forbidden: str) -> None:

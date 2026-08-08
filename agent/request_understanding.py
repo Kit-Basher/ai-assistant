@@ -183,6 +183,9 @@ def _semantic_domain_boost(capability_id: str, tokens: set[str]) -> float:
         "file", "files", "filename", "folder", "directory", "document", "drive", "download", "downloaded",
         "repo", "repository",
     ) or any(token.startswith(("/", "~")) for token in tokens)
+    filesystem_search_action = has("find", "locate", "search", "where") or has_fuzzy(
+        "find", "locate", "search", "where"
+    )
     if capability_id.startswith("filesystem.") and filesystem_domain:
         score += 0.14
         if capability_id == "filesystem.read" and (
@@ -191,15 +194,12 @@ def _semantic_domain_boost(capability_id: str, tokens: set[str]) -> float:
             or (has("show", "contents") and has("file", "document"))
         ):
             score += 0.26
-        if capability_id == "filesystem.search" and (
-            has("find", "locate", "search", "where")
-            or has_fuzzy("find", "locate", "search", "where")
-        ):
+        if capability_id == "filesystem.search" and filesystem_search_action:
             score += 0.26
         if capability_id == "filesystem.list" and (has("list") or has_fuzzy("list")):
             score += 0.26
         elif capability_id == "filesystem.list" and (
-            (has("inside", "under", "beneath", "lives") and not has("find", "search", "locate"))
+            (has("inside", "under", "beneath", "lives") and not filesystem_search_action)
             or (has("folder", "directory") and has("show", "contents", "inside", "in"))
         ):
             score += 0.26
@@ -701,7 +701,16 @@ class RequestUnderstandingService:
                 audit={"matcher": "offline_feature_vector_v1", "reason": "read_only_filesystem_boundary"},
             )
 
-        query = _features(normalized)
+        # Paths are structured arguments, not semantic language.  Feeding an
+        # absolute path into the feature vector makes routing depend on the
+        # directory's spelling and depth (for example, ``personal-agent`` can
+        # swamp the meaning of "what is inside").  Keep the original and the
+        # normalized meaning intact for audit/input extraction, but remove
+        # absolute/relative path payloads from the semantic comparison.
+        # Filesystem-domain evidence is still carried independently below by
+        # ``semantic_tokens`` and the path detector in the domain boost.
+        semantic_surface = _LOCAL_PATH_RE.sub(" ", original)
+        query = _features(semantic_surface)
         semantic_tokens = set(normalized.split())
         if (
             re.search(r"(?<![/\\\w.:-])[A-Za-z0-9][A-Za-z0-9_-]*\.[A-Za-z0-9][A-Za-z0-9_-]*\b", original)
