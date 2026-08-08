@@ -10182,6 +10182,47 @@ class AgentRuntime:
     def orchestrator(self) -> Orchestrator:
         return self._ensure_chat_runtime_bootstrapped()
 
+    def capability_status(self, *, advanced: bool = False) -> dict[str, Any]:
+        rows = self.orchestrator().capability_registry_snapshot()
+        available = [row for row in rows if bool(row.get("available"))]
+        unavailable = [row for row in rows if not bool(row.get("available"))]
+        confirmation = [row for row in rows if str(row.get("approval_policy") or "") == "required"]
+        public_rows: list[dict[str, Any]] = []
+        for row in rows:
+            health = row.get("health") if isinstance(row.get("health"), dict) else {}
+            public = {
+                "id": row.get("id") if advanced else None,
+                "description": row.get("description"),
+                "available": bool(row.get("available")),
+                "usable": bool(row.get("usable", row.get("available"))),
+                "status": health.get("state") or ("available" if row.get("available") else "unavailable"),
+                "reason": health.get("reason"),
+                "requires_confirmation": str(row.get("approval_policy") or "") == "required",
+                "next_step": health.get("next_step") or ("Open chat and describe what you want to do." if row.get("available") else "Check the optional dependency or runtime status."),
+            }
+            if advanced:
+                public.update({
+                    "family": row.get("type"),
+                    "material_group": row.get("material_group"),
+                    "mode": row.get("mode"),
+                    "permissions": row.get("permissions"),
+                    "mode_requirements": row.get("mode_requirements"),
+                    "input_contract": row.get("input_contract"),
+                    "output_contract": row.get("output_contract"),
+                    "proof_requirements": row.get("proof_requirements"),
+                })
+            else:
+                public.pop("id", None)
+            public_rows.append(public)
+        return {
+            "ok": True,
+            "summary": f"{len(available)} of {len(rows)} native capabilities are available now; {len(confirmation)} require confirmation before changes.",
+            "counts": {"total": len(rows), "available": len(available), "unavailable": len(unavailable), "confirmation_required": len(confirmation)},
+            "capabilities": public_rows,
+            "advanced": bool(advanced),
+            "source": "live_capability_registry",
+        }
+
     def prepare_orchestrator_chat_request(self, request: dict[str, Any]) -> dict[str, Any]:
         payload = dict(request.get("payload")) if isinstance(request.get("payload"), dict) else {}
         if self._safe_mode_enabled():
@@ -24365,6 +24406,11 @@ class APIServerHandler(BaseHTTPRequestHandler):
                     return
             if path == "/ready":
                 self._send_json(200, self.runtime.ready_status())
+                return
+            if path == "/capabilities":
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                advanced = str(query.get("advanced", ["0"])[0]).strip().lower() in {"1", "true", "yes", "on"}
+                self._send_json(200, self.runtime.capability_status(advanced=advanced))
                 return
             if path == "/status":
                 # Compatibility for installed/older CLI clients.  New clients use

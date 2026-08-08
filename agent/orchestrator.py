@@ -1048,6 +1048,33 @@ class Orchestrator:
             return (self._runtime_truth() is not None, None if self._runtime_truth() is not None else "runtime_truth_unavailable")
         if capability_id.startswith("packs."):
             return (self._chat_runtime_adapter is not None, None if self._chat_runtime_adapter is not None else "pack_runtime_unavailable")
+        if capability_id == "search.web":
+            adapter = self._chat_runtime_adapter
+            if adapter is None or not callable(getattr(adapter, "search_query", None)):
+                return False, "search_runtime_unavailable"
+            # Registry health is called during semantic ranking, so it must be
+            # fast and side-effect-free. Read configuration only; the canonical
+            # invocation performs the bounded provider probe and timeout UX.
+            client = getattr(adapter, "_safe_web_search_client", None)
+            client_config = getattr(client, "config", None)
+            runtime_config = getattr(adapter, "config", None)
+            enabled = bool(
+                getattr(client_config, "enabled", False)
+                if client_config is not None
+                else getattr(runtime_config, "search_enabled", False)
+            )
+            endpoint = str(
+                getattr(client_config, "searxng_base_url", "")
+                if client_config is not None
+                else getattr(runtime_config, "searxng_base_url", "")
+                or ""
+            ).strip()
+            reason = None if enabled and endpoint else "search_disabled" if not enabled else "endpoint_missing"
+            return True, reason
+        if capability_id.startswith("telegram."):
+            return (self._chat_runtime_adapter is not None, None if self._chat_runtime_adapter is not None else "telegram_runtime_unavailable")
+        if capability_id.startswith(("memory.", "operator.", "system.shell", "system.package", "filesystem.create")):
+            return (self._runtime_truth() is not None, None if self._runtime_truth() is not None else "runtime_truth_unavailable")
         return True, None
 
     def _build_conversation_capability_registry(self) -> CapabilityRegistry:
@@ -1062,6 +1089,92 @@ class Orchestrator:
             group: str,
             mode: CapabilityMode = CapabilityMode.READ_ONLY,
         ) -> None:
+            proof_requirements = (
+                (
+                    "health", "self_test", "verifier", "chat", "policy", "preview", "approval",
+                    "denial", "cancellation", "expiry", "thread_binding", "replay", "verification", "indeterminate",
+                )
+                if mode is CapabilityMode.MUTATING
+                else (
+                    "health", "self_test", "verifier", "chat", "policy", "failure", "llm_unavailable",
+                    "restart", "timeout", "redaction",
+                )
+            )
+            family_proof_node = (
+                "tests/test_filesystem_api_contract.py" if capability_id.startswith("filesystem.")
+                else "tests/test_model_switch_semantics.py" if capability_id.startswith("models.")
+                else "tests/test_api_packs_endpoints.py" if capability_id.startswith("packs.")
+                else "tests/test_memory_runtime.py" if capability_id.startswith(("memory.", "conversation."))
+                else "tests/test_safe_web_search.py" if capability_id == "search.web"
+                else "tests/test_telegram_runtime_state.py" if capability_id.startswith("telegram.")
+                else "tests/test_native_capability_proof.py"
+            )
+            proof_nodes = {
+                category: tuple(dict.fromkeys((
+                    "tests/test_native_capability_proof.py",
+                    "tests/test_unified_conversation_routing.py" if category == "chat" else family_proof_node,
+                    "tests/test_confirmation_transactions.py" if mode is CapabilityMode.MUTATING else family_proof_node,
+                    "tests/test_adversarial_authorization.py" if mode is CapabilityMode.MUTATING and category in {"policy", "approval", "replay", "thread_binding", "indeterminate"} else family_proof_node,
+                )))
+                for category in proof_requirements
+            }
+            permission_requirements = (
+                ("filesystem:write",) if capability_id == "filesystem.create_directory"
+                else ("filesystem:read",) if capability_id.startswith("filesystem.")
+                else ("system:package_install",) if capability_id == "system.package.install"
+                else ("system:read",) if capability_id in {"system.status", "system.shell.inspect"}
+                else ("models:control",) if capability_id == "models.switch"
+                else ("models:read",) if capability_id.startswith("models.")
+                else ("packs:manage",) if capability_id == "packs.manage"
+                else ("packs:read",) if capability_id == "packs.use"
+                else ("memory:write",) if capability_id == "memory.manage"
+                else ("memory:read",) if capability_id.startswith(("memory.", "conversation."))
+                else ("network:search",) if capability_id == "search.web"
+                else ("telegram:control",) if capability_id == "telegram.manage"
+                else ("telegram:read",) if capability_id == "telegram.status"
+                else ("lifecycle:control",) if capability_id == "operator.lifecycle"
+                else ("lifecycle:read",) if capability_id == "operator.status"
+                else ()
+            )
+            def fixture_self_test(selected: str = capability_id) -> dict[str, Any]:
+                definition = registry.require(selected)
+                fixture_payload: dict[str, Any] = {
+                    "user_id": f"capability-proof:{selected}",
+                    "text": "fixture capability self-test",
+                }
+                fixture_payload.update({
+                    "filesystem.list": {"path_hint": "."},
+                    "filesystem.search": {"path_hint": ".", "query": "fixture"},
+                    "filesystem.read": {"path_hint": "missing-fixture.txt"},
+                    "filesystem.create_directory": {},
+                    "system.shell.inspect": {"command_name": "python_version"},
+                    "system.package.install": {"package_manager": "apt"},
+                    "models.inventory": {"model_view": "current"},
+                    "models.switch": {},
+                    "models.scout": {"scout_view": "recommendations"},
+                    "packs.use": {"pack_operation": "list"},
+                    "packs.manage": {"pack_operation": "inspect"},
+                    "memory.status": {"memory_operation": "status"},
+                    "memory.manage": {"memory_operation": "forget"},
+                    "search.web": {"search_operation": "status"},
+                    "telegram.status": {"transport_action": "status"},
+                    "telegram.manage": {},
+                    "operator.status": {"lifecycle_operation": "operator_storage_status"},
+                    "operator.lifecycle": {"lifecycle_operation": "operator_backup_preview"},
+                }.get(selected, {}))
+                validated = definition.input_contract.validate(fixture_payload)
+                response = self._invoke_conversation_capability(selected, validated)
+                boundary_ok = self._verified_orchestrator_response(response)
+                available, reason = self._capability_health(selected)
+                return {
+                    "ok": bool(boundary_ok) and isinstance(available, bool),
+                    "status": "pass" if available else "unavailable_expected",
+                    "implementation_boundary": "orchestrator.native_conversation_dispatch",
+                    "response_route": str(response.data.get("route") or ""),
+                    "health_available": available,
+                    "health_reason": reason,
+                }
+
             registry.register(
                 CapabilityDefinition(
                     capability_id=capability_id,
@@ -1090,6 +1203,15 @@ class Orchestrator:
                             "pack_operation": str,
                             "pack_query": str,
                             "history_focus": str,
+                            "command_name": str,
+                            "command_subject": str,
+                            "package": str,
+                            "package_manager": str,
+                            "memory_operation": str,
+                            "pack_path": str,
+                            "transport_action": str,
+                            "lifecycle_operation": str,
+                            "search_operation": str,
                         },
                         required=("user_id", "text"),
                     ),
@@ -1102,6 +1224,15 @@ class Orchestrator:
                     provenance=CapabilityProvenance.NATIVE,
                     capability_type="native_chat_adapter",
                     material_group=group,
+                    permission_requirements=permission_requirements,
+                    mode_requirements=("safe_or_controlled", "explicit_confirmation") if mode is CapabilityMode.MUTATING else ("safe_or_controlled",),
+                    unavailable_message=(
+                        f"I understood the request, but {description.rstrip('.')} is unavailable right now. "
+                        "Check capability status for the missing dependency and the next safe step."
+                    ),
+                    proof_requirements=proof_requirements,
+                    proof_nodes=proof_nodes,
+                    self_test_hook=fixture_self_test,
                 )
             )
 
@@ -1184,7 +1315,7 @@ class Orchestrator:
         )
         add(
             "models.switch",
-            "switch the configured chat model after explicit approval",
+            "preview and confirm bounded model switching or supported model acquisition",
             (
                 "make another installed model the default",
                 "change the chat model to this one",
@@ -1229,6 +1360,119 @@ class Orchestrator:
             ),
             group="conversation",
         )
+        add(
+            "search.web",
+            "run safe web search for current information through the configured bounded provider",
+            (
+                "look up current information on the web with sources",
+                "search online for recent news about this topic",
+                "check whether web search is configured and working",
+            ),
+            group="web_search",
+        )
+        add(
+            "system.shell.inspect",
+            "run an allowlisted read-only environment or command inspection",
+            (
+                "show the installed Python version",
+                "check whether an executable is available",
+                "inspect the operating system kernel information",
+            ),
+            group="shell_inspection",
+        )
+        add(
+            "filesystem.create_directory",
+            "preview and create one directory inside an allowed local root",
+            (
+                "make a new folder at this local path",
+                "create a directory for these files",
+                "add an empty folder under my project",
+            ),
+            group="filesystem_mutation",
+            mode=CapabilityMode.MUTATING,
+        )
+        add(
+            "system.package.install",
+            "preview and install one allowlisted package through the bounded package controller",
+            (
+                "install a supported package with the local package manager",
+                "add this command line utility to the computer",
+                "preview installing a Debian package",
+            ),
+            group="package_mutation",
+            mode=CapabilityMode.MUTATING,
+        )
+        add(
+            "memory.status",
+            "inspect saved-memory availability, scope, and continuity state",
+            (
+                "show whether saved memory is enabled",
+                "explain what the assistant remembers and where",
+                "check continuity memory health",
+            ),
+            group="memory_status",
+        )
+        add(
+            "memory.manage",
+            "preview a bounded saved-memory lifecycle action",
+            (
+                "forget the saved long term memory",
+                "export or clean up remembered information",
+            ),
+            group="memory_lifecycle",
+            mode=CapabilityMode.MUTATING,
+        )
+        add(
+            "packs.manage",
+            "inspect approved skill-pack metadata and manage a local text pack; it cannot download an arbitrary remote pack",
+            (
+                "preview importing a local text skill folder",
+                "approve and enable the reviewed guidance pack",
+                "disable or remove an installed text pack",
+            ),
+            group="pack_lifecycle",
+            mode=CapabilityMode.MUTATING,
+        )
+        add(
+            "telegram.status",
+            "inspect the health and availability of the optional Telegram transport",
+            (
+                "check whether the Telegram connection is working",
+                "show the optional messaging adapter status",
+            ),
+            group="telegram_status",
+        )
+        add(
+            "telegram.manage",
+            "preview enabling or disabling the optional Telegram transport",
+            (
+                "enable the Telegram adapter",
+                "turn off Telegram access",
+            ),
+            group="telegram",
+            mode=CapabilityMode.MUTATING,
+        )
+        add(
+            "operator.status",
+            "inspect backups, storage, restore validity, and supported lifecycle boundaries",
+            (
+                "list the assistant backups",
+                "validate a Personal Agent restore archive",
+                "show storage used by old assistant releases",
+            ),
+            group="operator_status",
+        )
+        add(
+            "operator.lifecycle",
+            "preview a bounded backup, restore, repair, update, cleanup, support, or uninstall operation",
+            (
+                "preview backing up the assistant state",
+                "prepare a redacted support bundle",
+                "show what an update or cleanup would change",
+            ),
+            group="operator_lifecycle",
+            mode=CapabilityMode.MUTATING,
+        )
         return registry
 
     def capability_registry_snapshot(self) -> list[dict[str, Any]]:
@@ -1245,24 +1489,18 @@ class Orchestrator:
         lines = ["Here’s what this running assistant can currently do:"]
         lines.extend(f"- {row['description'].rstrip('.').capitalize()}." for row in available)
         if unavailable:
-            lines.append("Currently unavailable: " + ", ".join(str(row.get("id")) for row in unavailable) + ".")
+            lines.append("Currently unavailable or needing setup:")
+            lines.extend(
+                f"- {row['description'].rstrip('.').capitalize()}: {str(row.get('health_reason') or 'dependency unavailable').replace('_', ' ')}."
+                for row in unavailable
+            )
         message = "\n".join(lines)
-        supplemental = self._assistant_capabilities_response(query_text)
-        supplemental_data = self._response_data(supplemental)
-        supplemental_payload = (
-            supplemental_data.get("runtime_payload")
-            if isinstance(supplemental_data.get("runtime_payload"), dict)
-            else {}
-        )
-        if str(supplemental.text or "").strip():
-            message = supplemental.text
         return self._runtime_truth_response(
             text=message,
             route="assistant_capabilities",
             used_runtime_state=True,
             used_tools=["capability_registry"],
             payload={
-                **supplemental_payload,
                 "type": "assistant_capabilities",
                 "capabilities": rows,
                 "summary": message,
@@ -1288,6 +1526,8 @@ class Orchestrator:
             return self._live_capability_registry_response(text)
         if capability_id.startswith("filesystem."):
             path_hint = str(payload.get("path_hint") or "").strip() or None
+            if capability_id == "filesystem.create_directory":
+                return self._shell_create_directory_response(user_id, path_hint)
             if capability_id == "filesystem.list":
                 return self._filesystem_list_directory_response(path_hint)
             if capability_id == "filesystem.read":
@@ -1414,6 +1654,77 @@ class Orchestrator:
             return response if response is not None else self._assistant_capabilities_response(text)
         if capability_id == "conversation.history":
             return self._assistant_memory_overview_response(user_id, query_text=text)
+        if capability_id == "search.web":
+            return (
+                self._safe_web_search_status_response(user_id, text)
+                if str(payload.get("search_operation") or "query").strip().lower() == "status"
+                else self._safe_web_search_response(user_id, text)
+            )
+        if capability_id == "system.shell.inspect":
+            return self._shell_execute_safe_command_response(
+                command_name=str(payload.get("command_name") or "").strip() or None,
+                subject=str(payload.get("command_subject") or "").strip() or None,
+            )
+        if capability_id == "system.package.install":
+            return self._shell_install_package_response(
+                user_id,
+                manager=str(payload.get("package_manager") or "apt").strip() or "apt",
+                package=str(payload.get("package") or "").strip() or None,
+            )
+        if capability_id == "memory.status":
+            return self._memory_summary_response(user_id)
+        if capability_id == "memory.manage":
+            operation = str(payload.get("memory_operation") or "status").strip().lower()
+            if operation == "status":
+                return self._memory_summary_response(user_id)
+            kind = {
+                "forget": "memory_forget_topic_preview",
+                "delete": "memory_delete_all_preview",
+                "reset": "memory_delete_all_preview",
+                "export": "memory_export_preview",
+                "redact": "memory_redact_preview",
+                "cleanup": "memory_cleanup_preview",
+                "disable": "memory_global_disable_preview",
+                "enable": "memory_global_enable_preview",
+            }.get(operation, "memory_status")
+            return self._memory_lifecycle_response(user_id, kind)
+        if capability_id == "packs.manage":
+            operation = str(payload.get("pack_operation") or "inspect").strip().lower()
+            if operation in {"install", "import"}:
+                response = self._local_pack_install_preview_response(user_id, text)
+                if response is not None:
+                    return response
+                response = self._pack_capability_recommendation_response(
+                    user_id,
+                    text,
+                    capability_selected=True,
+                )
+                return response if response is not None else self._runtime_truth_response(
+                    text="Tell me the exact local directory containing the text-only pack.",
+                    route="pack_lifecycle",
+                    used_tools=["pack_store"],
+                    ok=False,
+                    error_kind="local_pack_path_required",
+                    next_question="Which local pack directory should I inspect?",
+                    payload={"type": "pack_lifecycle_clarification", "mutated": False},
+                )
+            response = self._pack_review_state_response(user_id)
+            return response if response is not None else self._assistant_capabilities_response(text)
+        if capability_id == "telegram.status":
+            return self._telegram_status_response()
+        if capability_id == "telegram.manage":
+            return self._telegram_service_action_response(user_id, str(payload.get("transport_action") or "").strip() or None)
+        if capability_id in {"operator.status", "operator.lifecycle"}:
+            operation = str(payload.get("lifecycle_operation") or "").strip()
+            if operation == "managed_search_stop":
+                return self._managed_service_stop_preview_response(user_id)
+            if operation == "managed_search_start":
+                return self._managed_service_start_restart_preview_response(user_id, text)
+            return self._operator_lifecycle_response(
+                user_id,
+                operation or "operator_storage_status",
+                text,
+            )
         return self._runtime_state_unavailable_response(route="assistant_clarification", reason="unknown_registered_capability")
 
     def _understand_conversation_request(
@@ -1429,7 +1740,7 @@ class Orchestrator:
         referenced_id = str(previous_understanding.get("selected_capability_id") or "").strip().lower() or None
         inputs = {
             definition.capability_id: {"user_id": user_id, "text": text}
-            for definition in self._capability_registry.definitions()
+            for definition in self._capability_registry.definitions(chat_selectable_only=True)
         }
         continuation_capability_id = None
         previous_type = str(previous_data.get("type") or "").strip().lower()
@@ -1491,6 +1802,8 @@ class Orchestrator:
         runtime_payload = data.get("runtime_payload")
         if isinstance(runtime_payload, dict):
             data["runtime_payload"] = {**runtime_payload, "request_understanding": audit}
+        else:
+            data["runtime_payload"] = {"request_understanding": audit}
         return OrchestratorResponse(response.text, data)
 
     def _dispatch_understood_request(self, understanding: RequestUnderstanding) -> OrchestratorResponse | None:
@@ -1523,7 +1836,10 @@ class Orchestrator:
             return None
         if understanding.fallback_category is FallbackCategory.UNAVAILABLE:
             definition = self._capability_registry.require(capability_id)
-            message = f"I understood that you want me to {definition.description.rstrip('.')}, but that capability is not available in the current runtime."
+            health = definition.health()
+            message = definition.unavailable_message
+            if health.reason:
+                message = f"{message} Current status: {health.reason.replace('_', ' ')}."
             return self._runtime_truth_response(
                 text=message,
                 route="assistant_unavailable",
@@ -11871,20 +12187,28 @@ class Orchestrator:
         self._pack_registry_discovery_cache = discovery
         return discovery
 
-    def _pack_capability_recommendation_response(self, user_id: str, text: str) -> OrchestratorResponse | None:
-        route_kind = str(classify_runtime_chat_route(text).get("kind") or "").strip().lower()
-        route_reason = str(classify_runtime_chat_route(text).get("fallback_reason") or "").strip().lower()
-        if route_kind == "shell_install_package" or route_reason == "provided_text_transform":
-            return None
+    def _pack_capability_recommendation_response(
+        self,
+        user_id: str,
+        text: str,
+        *,
+        capability_selected: bool = False,
+    ) -> OrchestratorResponse | None:
+        if not capability_selected:
+            route_decision = classify_runtime_chat_route(text)
+            route_kind = str(route_decision.get("kind") or "").strip().lower()
+            route_reason = str(route_decision.get("fallback_reason") or "").strip().lower()
+            if route_kind == "shell_install_package" or route_reason == "provided_text_transform":
+                return None
         external_pack_response = self._external_pack_knowledge_response(user_id, text)
         if external_pack_response is not None:
             return external_pack_response
         gap = classify_capability_gap_request(text)
         generic_capability_request = looks_like_generic_external_capability_request(text)
-        if str(gap.get("request_kind") or "").strip().lower() != "capability" and not generic_capability_request:
+        if not capability_selected and str(gap.get("request_kind") or "").strip().lower() != "capability" and not generic_capability_request:
             return None
         need = detect_pack_capability_need(text)
-        if need is None and not generic_capability_request:
+        if need is None and not generic_capability_request and not capability_selected:
             return None
         coordinator = self._pack_acquisition_coordinator()
         acquisition = coordinator.acquire(
@@ -15721,6 +16045,25 @@ class Orchestrator:
             f"{int(counts.get('queued', 0) or 0)} queued, and "
             f"{int(counts.get('failed', 0) or 0)} failed."
         )
+        if any(token in normalized.split() for token in ("install", "acquire", "download", "pull")):
+            control = self._capability_registry.require("models.switch")
+            control_health = control.health()
+            policy = (
+                truth.model_controller_policy_status()
+                if callable(getattr(truth, "model_controller_policy_status", None))
+                else {}
+            )
+            if not control_health.available:
+                message = (
+                    f"Model acquisition is unavailable right now: {control_health.reason or 'the model controller is unavailable'}."
+                )
+            elif not bool(policy.get("allow_install_pull", True)):
+                message = "Model acquisition is implemented, but the current mode blocks downloads and installs."
+            else:
+                message = (
+                    "Yes—supported models can be acquired through the bounded model controller. "
+                    "Every download or install requires an explicit preview and confirmation; no model is installed silently."
+                )
         return self._runtime_truth_response(
             text=message,
             route="model_status",
@@ -23785,14 +24128,6 @@ class Orchestrator:
                 safety_kind = str(safety_decision.get("kind") or "").strip().lower()
                 if safety_kind == "safety_bypass_refusal":
                     return self._safety_bypass_refusal_response(user_id, effective_user_text)
-                pack_install_words = set(normalize_setup_text(effective_user_text).split())
-                if self._looks_like_agent_pack_install_request(effective_user_text) and pack_install_words & {"install", "import"}:
-                    local_pack_preview = self._local_pack_install_preview_response(user_id, effective_user_text)
-                    if local_pack_preview is not None:
-                        return local_pack_preview
-                    remote_pack_denial = self._remote_pack_install_denial_response(user_id, effective_user_text)
-                    if remote_pack_denial is not None:
-                        return remote_pack_denial
                 if self._looks_like_email_access_request(effective_user_text):
                     if self._looks_like_agent_pack_install_request(effective_user_text):
                         return self._agent_pack_install_explanation_response(user_id, effective_user_text)

@@ -230,6 +230,14 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
+    if not bool(args.list):
+        proof = subprocess.run(
+            [sys.executable, "scripts/native_capability_proof.py", "--execute-tests"],
+            cwd=ROOT,
+            check=False,
+        )
+        if int(proof.returncode) != 0:
+            return int(proof.returncode)
     exit_code = run_extended_suite(list_only=bool(args.list), quiet=not bool(args.no_quiet))
     if exit_code != 0 or bool(args.list) or not _should_run_live_smokes(args):
         return exit_code

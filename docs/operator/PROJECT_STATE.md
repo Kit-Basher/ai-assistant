@@ -5,12 +5,24 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Version: `v0.2.5`
-- Audit 3 baseline commit: `a324ff65d7614bcd7955306f35252302b4c6ece3`
-- Fresh Debian VM proof: not run
-- Release status: universal authorization is checkpointed within its documented
-  boundary; End-User Behavior and UX Audit 3 has completed its verification
-  checkpoint. Fresh Debian VM proof remains deferred.
+- Version: `v0.2.9` candidate (Work Package 2)
+- Baseline: completed WP1 commit `11efebb8d963aa2a566e47bd7c451a93486e45a4`
+- Promoted baseline while candidate work proceeds: `v0.2.8`
+- Capability truth: the live registry plus
+  `config/native_capabilities.json`, enforced by
+  `scripts/native_capability_proof.py`
+- Registered native user-goal capabilities: 22
+- Release status: candidate only until all WP2 gates, isolated verification,
+  exact-SHA promotion, and live verification pass.
+
+See `docs/design/NATIVE_CAPABILITY_CENSUS_WP2.md` for the census,
+reconciliation, proof profiles, surface mappings, and explicit unsupported
+boundaries.
+
+## Historical checkpoints
+
+The remaining sections below are retained as historical audit records. Their
+version numbers and test totals are not current runtime truth.
 
 ## Active Audit: End-User Behavior and UX Audit 3
 

@@ -81,6 +81,7 @@ _QUOTED_VALUE_RE = re.compile(r"(?P<quote>['\"`])(?P<value>[^'\"`]+)(?P=quote)")
 def normalize_user_meaning(text: str | None) -> str:
     """Normalize for matching while preserving the caller's original text."""
     value = unicodedata.normalize("NFKC", str(text or "")).casefold().replace("’", "'")
+    value = re.sub(r"\badd[-\s]?on(s?)\b", r"addon\1", value)
     value = re.sub(r"(?<=\w)/(?=\w)", " ", value)
     tokens = _TOKEN_RE.findall(value)
     expansions = {
@@ -169,6 +170,7 @@ def _semantic_domain_boost(capability_id: str, tokens: set[str]) -> float:
         "model", "models", "ollama", "provider", "telegram", "file", "files",
         "engine", "engines", "pack", "packs", "skill", "skills", "system", "runtime", "search",
         "install", "switch", "upgrade",
+        "memory", "remembered", "continuity",
     }
     if capability_id == "assistant.presence" and presence_words and len(tokens) <= 7 and not domain_words:
         score += 0.42
@@ -212,6 +214,8 @@ def _semantic_domain_boost(capability_id: str, tokens: set[str]) -> float:
         score += 0.42
     if capability_id == "system.status" and has("agent") and has("running", "working", "healthy", "health", "status", "alive", "doctor"):
         score += 0.16
+    if capability_id == "system.status" and has("cpu", "memory", "resources") and has("using", "usage", "eating", "consuming"):
+        score += 0.34
     model_domain = has("model", "models", "ollama", "openrouter", "gemma", "qwen", "provider", "engine") or has_fuzzy(
         "model", "models", "ollama", "openrouter", "gemma", "qwen", "provider", "engine"
     ) or (has("remote") and has("policy", "cap", "cheap", "free", "switch", "choose"))
@@ -220,6 +224,8 @@ def _semantic_domain_boost(capability_id: str, tokens: set[str]) -> float:
     ) or (has("why") and has("switch"))
     if model_domain and capability_id == "models.inventory" and (model_inventory_signal or has("local", "cloud") or {"set", "up"}.issubset(tokens)):
         score += 0.40 if (has("provider", "providers", "openrouter", "ollama") or has_fuzzy("provider", "providers", "openrouter", "ollama")) and (has("status", "health") or has_fuzzy("status", "health")) else 0.24
+    if model_domain and capability_id == "models.inventory" and has("install", "acquire", "download", "pull") and has("can", "could", "available", "support"):
+        score += 0.44
     if model_domain and capability_id == "models.scout" and (has("scout") or has_fuzzy("scout")):
         score += 0.40
     elif model_domain and capability_id == "models.scout" and has("discover", "discovery", "catalog", "hugging", "huggingface"):
@@ -250,6 +256,42 @@ def _semantic_domain_boost(capability_id: str, tokens: set[str]) -> float:
         or (has("plan") and has_fuzzy("back"))
     ):
         score += 0.34
+    if capability_id == "search.web" and has("web", "online", "internet", "news", "current", "latest", "sources") and has("search", "find", "lookup", "look", "check"):
+        score += 0.38
+    if capability_id == "operator.lifecycle" and has("web", "search", "searxng") and has("start", "restart", "stop", "setup", "configure", "enable", "disable"):
+        score += 0.56
+    if capability_id == "system.shell.inspect" and has("python", "pip", "executable", "command", "kernel", "uname", "shell", "environment", "binary", "version") and has("show", "check", "inspect", "which", "where", "version"):
+        score += 0.36
+    if capability_id == "filesystem.create_directory" and has("create", "make", "add") and has("directory", "folder"):
+        score += 0.44
+    if capability_id == "system.package.install" and has("install", "add") and has("package", "utility", "tool", "apt", "pip"):
+        score += 0.44
+    memory_domain = (has("memory", "remembered", "continuity", "recall") or has_fuzzy("memory", "continuity", "recall")) and not has("ram", "cpu", "resources", "usage", "using", "eating", "consuming")
+    if capability_id == "memory.status" and memory_domain and has("status", "enabled", "health", "scope", "what", "where", "available", "explain"):
+        score += 0.40
+    if capability_id == "memory.manage" and memory_domain and has("forget", "delete", "erase", "reset", "export", "redact", "cleanup", "disable", "enable"):
+        score += 0.44
+    pack_domain = (
+        has("pack", "packs", "skill", "skills", "guidance", "addon")
+        or has_fuzzy("pack", "packs", "skill", "skills")
+        or (has("capability", "capabilities") and has("add", "install", "import"))
+    )
+    if capability_id == "packs.manage" and pack_domain and has("add", "import", "install", "approve", "enable", "disable", "remove", "delete", "grant"):
+        score += 0.44
+    telegram_domain = has("telegram", "messaging", "poller", "bot") or has_fuzzy("telegram", "messaging", "poller")
+    if capability_id == "telegram.status" and telegram_domain and has("status", "health", "working", "connected", "running", "operational", "connection"):
+        score += 0.40
+    if capability_id == "telegram.manage" and telegram_domain and has("enable", "disable", "start", "stop", "turn"):
+        score += 0.44
+    lifecycle_domain = (
+        has("backup", "restore", "update", "cleanup", "uninstall", "repair")
+        or has_fuzzy("backup", "restore", "update", "cleanup", "uninstall", "repair")
+        or (has("support") and has("bundle", "archive", "logs", "diagnostics"))
+    )
+    if capability_id == "operator.status" and lifecycle_domain and has("status", "list", "validate", "storage", "space", "check", "show"):
+        score += 0.40
+    if capability_id == "operator.lifecycle" and lifecycle_domain and has("preview", "create", "make", "run", "perform", "prepare", "start", "do"):
+        score += 0.44
     return score
 
 
@@ -281,13 +323,25 @@ def _structured_capability_inputs(
             path_hint = str(relative_file_match.group("name") or "").strip()
         if not path_hint and capability_id == "filesystem.list" and tokens & {"this", "current", "here"}:
             path_hint = "."
+        if not path_hint and capability_id == "filesystem.create_directory":
+            named_target = re.search(
+                r"\b(?:called|named)\s+(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)\b",
+                original,
+                re.IGNORECASE,
+            )
+            if named_target:
+                path_hint = str(named_target.group("name") or "").strip()
         if path_hint:
             result["path_hint"] = path_hint
         if capability_id == "filesystem.search":
             if "filesystem_view" not in result:
                 if tokens & {"recent", "just", "downloaded", "download"} and not path_hint:
                     result["filesystem_view"] = "recent_download"
-                elif {"can", "search"}.issubset(tokens) and tokens & {"file", "files", "drive"} and not path_hint:
+                elif (
+                    tokens & {"file", "files", "drive"}
+                    and tokens & {"can", "working", "available", "supported"}
+                    and not path_hint
+                ):
                     result["filesystem_view"] = "capability_status"
                 else:
                     result["filesystem_view"] = "search"
@@ -370,7 +424,9 @@ def _structured_capability_inputs(
             tokens & {"gpu", "vram", "debian", "hardware"}
             and tokens & {"setup", "support", "use", "recommend", "provider", "model"}
         )
-        if model_tokens and tokens & {"status", "state", "installed", "installing", "download", "downloading", "ready"}:
+        if tokens & {"install", "acquire", "download", "pull"} and tokens & {"can", "could", "available", "support"}:
+            result["model_view"] = "lifecycle"
+        elif model_tokens and tokens & {"status", "state", "installed", "installing", "download", "downloading", "ready"}:
             result["model_view"] = "lifecycle"
         elif provider_guidance_question:
             result["model_view"] = "provider_guidance"
@@ -456,6 +512,61 @@ def _structured_capability_inputs(
 
     elif capability_id == "conversation.history":
         result["history_focus"] = "recent" if tokens & {"recent", "last", "previous", "earlier", "recap"} else "current"
+    elif capability_id == "search.web":
+        result["search_operation"] = "status" if tokens & {"status", "health", "working", "configured", "available"} and not tokens & {"news", "weather", "today", "current", "latest"} else "query"
+        ignored = {"search", "web", "online", "internet", "look", "lookup", "find", "for", "please", "current", "latest", "news", "about", "with", "sources"}
+        result["query"] = " ".join(token for token in normalized.split() if token not in ignored).strip() or normalized
+    elif capability_id == "system.shell.inspect":
+        if "python" in tokens:
+            result["command_name"] = "python_version"
+        elif "pip" in tokens:
+            result["command_name"] = "pip_version"
+        elif tokens & {"kernel", "uname", "system"}:
+            result["command_name"] = "uname"
+        elif tokens & {"working", "directory", "pwd"}:
+            result["command_name"] = "pwd"
+        elif "ollama" in tokens:
+            result["command_name"] = "ollama_list"
+        else:
+            result["command_name"] = "which"
+            ignored = {"check", "show", "inspect", "where", "which", "command", "executable", "binary", "is", "the", "installed", "available"}
+            candidates = [token for token in normalized.split() if token not in ignored]
+            if candidates:
+                result["command_subject"] = candidates[-1]
+    elif capability_id == "system.package.install":
+        result["package_manager"] = "pip" if "pip" in tokens else "apt"
+        ignored = {"install", "add", "package", "utility", "tool", "please", "with", "using", "apt", "pip", "the", "a", "an", "debian", "preview"}
+        candidates = [token for token in normalized.split() if token not in ignored]
+        if candidates:
+            result["package"] = candidates[-1]
+    elif capability_id == "memory.status":
+        result["memory_operation"] = "status"
+    elif capability_id == "memory.manage":
+        result["memory_operation"] = next((name for name in ("forget", "delete", "export", "redact", "cleanup", "disable", "enable", "reset") if name in tokens), "status")
+    elif capability_id == "packs.manage":
+        result["pack_operation"] = next((name for name in ("import", "install", "approve", "enable", "disable", "remove", "grant") if name in tokens), "install" if "add" in tokens else "inspect")
+        path_match = _LOCAL_PATH_RE.search(original)
+        if path_match:
+            result["pack_path"] = str(path_match.group("path") or "").strip().rstrip(".\"'`")
+    elif capability_id == "telegram.status":
+        result["transport_action"] = "status"
+    elif capability_id == "telegram.manage":
+        result["transport_action"] = "disable" if tokens & {"disable", "stop", "off"} else "enable"
+    elif capability_id == "operator.status":
+        if "backup" in tokens and tokens & {"list", "show"}:
+            result["lifecycle_operation"] = "operator_backup_list"
+        elif "restore" in tokens and tokens & {"validate", "check"}:
+            result["lifecycle_operation"] = "operator_restore_validate"
+        else:
+            result["lifecycle_operation"] = "operator_storage_status"
+    elif capability_id == "operator.lifecycle":
+        if tokens & {"web", "search", "searxng"} and tokens & {"stop", "disable"}:
+            result["lifecycle_operation"] = "managed_search_stop"
+        elif tokens & {"web", "search", "searxng"} and tokens & {"start", "restart", "setup", "configure", "enable"}:
+            result["lifecycle_operation"] = "managed_search_start"
+        else:
+            operation = next((name for name in ("backup", "restore", "update", "cleanup", "uninstall", "repair") if name in tokens), "support" if "support" in tokens else "repair")
+            result["lifecycle_operation"] = f"operator_{operation}_preview" if operation != "support" else "operator_support_bundle_preview"
     return result
 
 
@@ -465,7 +576,7 @@ class RequestUnderstandingService:
     def __init__(self, registry: CapabilityRegistry) -> None:
         self.registry = registry
         self._vectors: dict[str, tuple[Counter[str], ...]] = {}
-        for definition in registry.definitions():
+        for definition in registry.definitions(chat_selectable_only=True):
             corpus = (definition.description, *definition.example_goals)
             self._vectors[definition.capability_id] = tuple(_features(item) for item in corpus)
 
@@ -615,14 +726,9 @@ class RequestUnderstandingService:
             and not memory_tokens & {"file", "files", "filename", "folder", "directory", "drive", "repo", "repository"}
             and not re.search(r"\b(?:do not|dont|don't|without|no)\s+(?:web\s+|internet\s+)?(?:search|browse|look)\b", normalized)
         )
-        if explicit_web_lookup:
-            return RequestUnderstanding(
-                original_text=original,
-                normalized_meaning=normalized,
-                context_used=context_used,
-                fallback_category=FallbackCategory.GENERIC_CHAT,
-                audit={"matcher": "offline_feature_vector_v1", "reason": "safe_web_lookup_boundary"},
-            )
+        # WP2 registers bounded web search, so explicit lookups continue into
+        # the registry matcher. The native search adapter still owns provider
+        # trust, timeouts, source shaping, and unavailable behavior.
 
         public_entity_question = bool(
             re.search(r"\b[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)+\b", original)
@@ -675,16 +781,9 @@ class RequestUnderstandingService:
             memory_tokens & {"install", "acquire", "create"}
             or ("add" in memory_tokens and "on" not in memory_tokens)
         )
-        if pack_acquisition_action and memory_tokens & {
-            "pack", "packs", "skill", "skills", "capability", "capabilities"
-        }:
-            return RequestUnderstanding(
-                original_text=original,
-                normalized_meaning=normalized,
-                context_used=context_used,
-                fallback_category=FallbackCategory.GENERIC_CHAT,
-                audit={"matcher": "offline_feature_vector_v1", "reason": "pack_acquisition_boundary"},
-            )
+        # Local text-pack lifecycle requests are registered in WP2. Remote or
+        # executable pack requests are rejected by the canonical pack policy,
+        # never by a second intent classifier.
 
         # The WP1 filesystem capabilities are explicitly read-only. Creation,
         # editing, moving, and deletion stay with the deterministic mutation
@@ -693,7 +792,11 @@ class RequestUnderstandingService:
             memory_tokens & {"create", "make", "write", "edit", "modify", "rename", "move", "delete", "remove"}
             and memory_tokens & {"file", "files", "folder", "directory", "path", "repo", "repository", "project"}
         )
-        if filesystem_mutation_action:
+        directory_create_action = bool(
+            memory_tokens & {"create", "make", "add"}
+            and memory_tokens & {"folder", "directory"}
+        )
+        if filesystem_mutation_action and not directory_create_action:
             return RequestUnderstanding(
                 original_text=original,
                 normalized_meaning=normalized,
@@ -713,6 +816,12 @@ class RequestUnderstandingService:
         semantic_surface = _LOCAL_PATH_RE.sub(" ", original)
         query = _features(semantic_surface)
         semantic_tokens = set(normalized.split())
+        # Light derivational normalization keeps the semantic taxonomy useful
+        # for ordinary forms such as "importing", "installed", and
+        # "backing up" without adding surface phrases or trigger aliases.
+        for token in tuple(semantic_tokens):
+            if len(token) > 5 and token.endswith("ing"):
+                semantic_tokens.add(token[:-3])
         if (
             re.search(r"(?<![/\\\w.:-])[A-Za-z0-9][A-Za-z0-9_-]*\.[A-Za-z0-9][A-Za-z0-9_-]*\b", original)
             and semantic_tokens & {"find", "list", "locate", "open", "preview", "read", "search", "show"}
@@ -732,7 +841,7 @@ class RequestUnderstandingService:
             for concept in ("switch", "change", "default", "temporary", "temporarily", "try", "use", "another", "different")
         )
         ranked: list[CapabilityCandidate] = []
-        for definition in self.registry.definitions():
+        for definition in self.registry.definitions(chat_selectable_only=True):
             vectors = self._vectors[definition.capability_id]
             score = max((_cosine(query, vector) for vector in vectors), default=0.0)
             boost = _semantic_domain_boost(definition.capability_id, semantic_tokens)
@@ -773,10 +882,26 @@ class RequestUnderstandingService:
                 score *= 0.15
             if definition.capability_id == "packs.use" and boost == 0.0:
                 score *= 0.15
+            if (
+                definition.capability_id == "packs.manage"
+                and not semantic_tokens & {"add", "import", "install", "approve", "enable", "disable", "remove", "delete", "grant"}
+            ):
+                score *= 0.16
             if definition.capability_id == "assistant.capabilities" and boost == 0.0:
                 score *= 0.15
+            if (
+                definition.capability_id == "assistant.capabilities"
+                and semantic_tokens & {"add", "install", "import", "enable", "disable", "remove", "delete", "grant"}
+            ):
+                score *= 0.18
             if definition.capability_id.startswith("filesystem.") and boost == 0.0:
                 score *= 0.20
+            if (
+                definition.capability_id.startswith("filesystem.")
+                and semantic_tokens & {"pack", "packs", "skill", "skills"}
+                and semantic_tokens & {"import", "install", "approve", "enable", "disable", "remove", "grant"}
+            ):
+                score *= 0.18
             if definition.capability_id == "system.status" and boost == 0.0:
                 score *= 0.15
             if definition.capability_id == "conversation.history" and boost == 0.0:
@@ -807,6 +932,11 @@ class RequestUnderstandingService:
             score = min(1.0, score + boost)
             if definition.capability_id == "system.status" and model_domain_present:
                 score *= 0.30
+            if (
+                definition.capability_id == "search.web"
+                and semantic_tokens & {"start", "restart", "stop", "setup", "configure", "enable", "disable"}
+            ):
+                score *= 0.12
             if (
                 definition.capability_id == "system.status"
                 and "memory" in semantic_tokens

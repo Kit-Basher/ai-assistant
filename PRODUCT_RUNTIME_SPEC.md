@@ -197,12 +197,12 @@ the project intent document, project intent wins.
 - Registry/listing metadata is untrusted input and never becomes authoritative
   pack identity.
 - Discovery cache is performance-only and remains untrusted metadata.
-- Preview is not install. It may generate a safe install handoff, but pack
-  contents are not fetched or made usable until explicit `/packs/install`.
-- `POST /packs/install` treats downloaded third-party packs as hostile input by
-  default.
+- Preview is not install. Catalog content is metadata-only and is not fetched
+  or made usable by the current runtime.
+- `POST /packs/install` accepts a user-provided local text-pack directory only.
+  URL and remote archive fields fail closed before network access.
 - Ingestion order is:
-  - optional safe remote archive fetch
+  - local-directory validation and quarantine copy
   - quarantine
   - classify
   - static risk scan
@@ -211,8 +211,8 @@ the project intent document, project intent wins.
 - Supported today:
   - `SKILL.md`-centered portable text skills
   - optional `references/`, `assets/`, `AGENTS.md`, and metadata files
-- Supported remote ingress today:
-  - `github_repo`
+- Remote archive/repository ingress is not supported today. Catalog entries may
+  describe remote sources, but they cannot install or enable content.
   - `github_archive`
   - `generic_archive_url`
   - `https` only, with provenance capture and archive validation

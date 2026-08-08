@@ -18,11 +18,11 @@ in BotFather, update the Personal Agent secret store, and restart
 the embedded Telegram poller in `personal-agent-api.service`.
 
 ## Current Product Truth
-Current release line: v0.2.8. It preserves the existing authorization,
+Current release candidate: v0.2.9. It preserves the existing authorization,
 Telegram, memory, filesystem, model-management, pack, and Web UI foundations
 while making unified request understanding and the live capability registry the
 sole ordinary `/chat` capability-selection path. See
-[`docs/releases/v0.2.8.md`](docs/releases/v0.2.8.md). Release tags are not
+[`docs/releases/v0.2.9.md`](docs/releases/v0.2.9.md). Release tags are not
 created automatically by audit tooling.
 
 The user interacts with the assistant layer. The assistant interprets intent,
@@ -138,6 +138,12 @@ local activation marker; purge uninstall remains unsupported.
   - `avoid`
 
 ## Native Capabilities
+
+The live registry is the current authority. `GET /capabilities` gives the
+normal-user view; `GET /capabilities?advanced=1` adds IDs, contracts, policy,
+health, and proof metadata. The protected inventory and reconciliation record
+are in `config/native_capabilities.json` and
+`docs/design/NATIVE_CAPABILITY_CENSUS_WP2.md`.
 
 ### Runtime / Model / Controller
 - Current model and effective runtime target inspection.

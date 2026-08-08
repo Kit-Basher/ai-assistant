@@ -14,6 +14,17 @@ from scripts.release_smoke import EXTENDED_TEST_NODES, MAIN_TEST_NODES
 WP1_UNIFIED_ROUTING_TEST_NODES: tuple[str, ...] = (
     "tests/test_unified_conversation_routing.py",
 )
+WP2_NATIVE_CAPABILITY_TEST_NODES: tuple[str, ...] = (
+    "tests/test_native_capability_proof.py",
+    "tests/test_confirmation_transactions.py",
+    "tests/test_adversarial_authorization.py",
+    "tests/test_filesystem_api_contract.py",
+    "tests/test_safe_web_search.py",
+    "tests/test_api_packs_endpoints.py",
+    "tests/test_memory_runtime.py",
+    "tests/test_telegram_runtime_state.py",
+    "tests/test_model_switch_semantics.py",
+)
 
 PY_COMPILE_TARGETS: tuple[str, ...] = (
     "agent/api_server.py",
@@ -54,6 +65,7 @@ PY_COMPILE_TARGETS: tuple[str, ...] = (
     "scripts/daily_driver_maturity_audit.py",
     "scripts/chat_frontdoor_smoke.py",
     "scripts/wp1_latency_probe.py",
+    "scripts/native_capability_proof.py",
 )
 
 def _pytest_command(test_nodes: tuple[str, ...]) -> tuple[str, ...]:
@@ -62,6 +74,7 @@ def _pytest_command(test_nodes: tuple[str, ...]) -> tuple[str, ...]:
 
 RELEASE_GATE_COMMANDS: tuple[tuple[str, ...], ...] = (
     (sys.executable, "-m", "py_compile", *PY_COMPILE_TARGETS),
+    (sys.executable, "scripts/native_capability_proof.py", "--execute-tests"),
     ("bash", "scripts/build_webui.sh"),
     (
         "node",
@@ -71,7 +84,7 @@ RELEASE_GATE_COMMANDS: tuple[tuple[str, ...], ...] = (
         "desktop/tests/packStateUiHelpers.test.js",
         "desktop/tests/stateUiHelpers.test.js",
     ),
-    _pytest_command((*MAIN_TEST_NODES, *WP1_UNIFIED_ROUTING_TEST_NODES)),
+    _pytest_command((*MAIN_TEST_NODES, *WP1_UNIFIED_ROUTING_TEST_NODES, *WP2_NATIVE_CAPABILITY_TEST_NODES)),
     _pytest_command(EXTENDED_TEST_NODES),
     ("git", "diff", "--check"),
 )

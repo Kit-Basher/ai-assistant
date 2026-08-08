@@ -5,6 +5,27 @@ This is the current-state handover doc. Product intent lives in
 `PRODUCT_RUNTIME_SPEC.md`. Treat this file as a status snapshot, not the sole
 source of truth.
 
+## WP2 candidate truth (v0.2.9)
+
+- The protected inventory and live registry reconcile 22 native user-goal
+  capabilities across assistant, conversation, filesystem, system, models,
+  packs, memory, optional search, optional Telegram, and operator lifecycle.
+- `GET /capabilities` and the Web UI Capabilities view report live health and
+  confirmation requirements. Optional dependencies are shown as unavailable
+  or degraded with a reason; endpoint existence is not treated as health.
+- `scripts/native_capability_proof.py` reconciles the registry with API, CLI,
+  UI, Telegram, native-skill, compatibility-route, and documentation mappings
+  and is release-blocking.
+- Text-only pack ingress is local-directory only. Arbitrary remote archives,
+  executable packs, automatic acquisition, and assistant-created packs remain
+  unsupported.
+- The promoted runtime remains v0.2.8 until the exact v0.2.9 candidate passes
+  all gates and isolated verification.
+
+The older narrative below is retained as historical context; where it differs,
+the WP2 candidate truth above and the higher-priority product/runtime documents
+govern.
+
 ## Current State
 
 - The core system foundations are largely in place:

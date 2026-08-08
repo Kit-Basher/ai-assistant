@@ -4,6 +4,7 @@ import BasicsTab from "./components/BasicsTab";
 import ChatExperience from "./components/ChatExperience";
 import DebugTab from "./components/DebugTab";
 import FilesTab from "./components/FilesTab";
+import CapabilityStatusTab from "./components/CapabilityStatusTab";
 import ModelScoutTab from "./components/ModelScoutTab";
 import PacksTab from "./components/PacksTab";
 import OperationsTab from "./components/OperationsTab";
@@ -337,6 +338,7 @@ export default function App() {
   const [llmHealthMessage, setLlmHealthMessage] = useState("");
   const [llmHealthRunning, setLlmHealthRunning] = useState(false);
   const [packsState, setPacksState] = useState(null);
+  const [capabilityStatus, setCapabilityStatus] = useState(null);
   const [autoconfigPlan, setAutoconfigPlan] = useState(null);
   const [autoconfigStatus, setAutoconfigStatus] = useState("");
   const [autoconfigBusy, setAutoconfigBusy] = useState(false);
@@ -462,7 +464,8 @@ export default function App() {
         autopilotLedgerPayload,
         registrySnapshotsPayload,
         permissionsPayload,
-        auditPayload
+        auditPayload,
+        capabilityStatusPayload
       ] = await Promise.all([
         request("GET", "/providers"),
         request("GET", "/models"),
@@ -483,7 +486,8 @@ export default function App() {
         request("GET", "/llm/autopilot/ledger?limit=10").catch(() => null),
         request("GET", "/llm/registry/snapshots?limit=20").catch(() => null),
         request("GET", "/permissions").catch(() => null),
-        request("GET", "/audit?limit=20").catch(() => null)
+        request("GET", "/audit?limit=20").catch(() => null),
+        request("GET", "/capabilities?advanced=1").catch(() => null)
       ]);
 
       const providerRows = providersPayload.providers || [];
@@ -500,6 +504,9 @@ export default function App() {
       }
       if (packsStatePayload && packsStatePayload.ok) {
         setPacksState(packsStatePayload);
+      }
+      if (capabilityStatusPayload && capabilityStatusPayload.ok) {
+        setCapabilityStatus(capabilityStatusPayload);
       }
       if (telegramPayload && telegramPayload.ok) {
         setTelegramConfigured(telegramPayload.configured === true);
@@ -1990,6 +1997,19 @@ export default function App() {
       label: "Runtime state",
       group: "Runtime details",
       content: <StateTab stateSnapshot={uiState} />
+    },
+    {
+      id: "capabilities",
+      label: "Capabilities",
+      group: "Local tools",
+      content: (
+        <CapabilityStatusTab
+          snapshot={capabilityStatus}
+          onRefresh={() => {
+            void refreshRuntimeState({ includeAdmin: true });
+          }}
+        />
+      )
     },
     {
       id: "files",

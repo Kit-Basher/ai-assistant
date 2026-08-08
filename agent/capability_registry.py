@@ -23,6 +23,33 @@ class CapabilityProvenance(str, Enum):
 InvocationHook = Callable[[Mapping[str, Any]], Any]
 VerificationHook = Callable[[Any], bool]
 HealthHook = Callable[[], tuple[bool, str | None]]
+SelfTestHook = Callable[[], Mapping[str, Any]]
+
+
+class CapabilityHealthState(str, Enum):
+    AVAILABLE = "available"
+    DEGRADED = "degraded"
+    BLOCKED = "blocked"
+    UNAVAILABLE = "unavailable"
+
+
+@dataclass(frozen=True)
+class CapabilityHealth:
+    state: CapabilityHealthState
+    reason: str | None = None
+    next_step: str | None = None
+
+    @property
+    def available(self) -> bool:
+        return self.state in {CapabilityHealthState.AVAILABLE, CapabilityHealthState.DEGRADED}
+
+    def public_dict(self) -> dict[str, Any]:
+        return {
+            "state": self.state.value,
+            "available": self.available,
+            "reason": self.reason,
+            "next_step": self.next_step,
+        }
 
 
 @dataclass(frozen=True)
@@ -76,13 +103,45 @@ class CapabilityDefinition:
     provenance: CapabilityProvenance = CapabilityProvenance.NATIVE
     capability_type: str = "native"
     material_group: str = "general"
+    permission_requirements: tuple[str, ...] = ()
+    mode_requirements: tuple[str, ...] = ()
+    unavailable_message: str = "This capability is not available in the current runtime."
+    proof_requirements: tuple[str, ...] = ()
+    proof_nodes: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    self_test_hook: SelfTestHook | None = None
+    chat_selectable: bool = True
 
     def availability(self) -> tuple[bool, str | None]:
+        health = self.health()
+        return health.available, health.reason
+
+    def health(self) -> CapabilityHealth:
         try:
             available, reason = self.health_hook()
-            return bool(available), str(reason).strip() or None if reason is not None else None
+            clean_reason = str(reason).strip() or None if reason is not None else None
+            return CapabilityHealth(
+                (
+                    CapabilityHealthState.DEGRADED
+                    if bool(available) and clean_reason
+                    else CapabilityHealthState.AVAILABLE
+                    if bool(available)
+                    else CapabilityHealthState.UNAVAILABLE
+                ),
+                clean_reason,
+            )
         except Exception as exc:
-            return False, f"health_check_failed:{exc.__class__.__name__}"
+            return CapabilityHealth(CapabilityHealthState.UNAVAILABLE, f"health_check_failed:{exc.__class__.__name__}")
+
+    def self_test(self) -> dict[str, Any]:
+        if self.self_test_hook is None:
+            return {"ok": False, "status": "missing", "reason": "self_test_hook_missing"}
+        try:
+            result = dict(self.self_test_hook())
+        except Exception as exc:
+            return {"ok": False, "status": "fail", "reason": f"self_test_failed:{exc.__class__.__name__}"}
+        result.setdefault("ok", False)
+        result.setdefault("status", "pass" if bool(result["ok"]) else "fail")
+        return result
 
 
 class CapabilityRegistry:
@@ -128,8 +187,15 @@ class CapabilityRegistry:
             raise RuntimeError("capability_result_verification_failed")
         return result
 
-    def definitions(self, *, available_only: bool = False) -> tuple[CapabilityDefinition, ...]:
+    def definitions(
+        self,
+        *,
+        available_only: bool = False,
+        chat_selectable_only: bool = False,
+    ) -> tuple[CapabilityDefinition, ...]:
         values = tuple(self._items[key] for key in sorted(self._items))
+        if chat_selectable_only:
+            values = tuple(item for item in values if item.chat_selectable)
         if not available_only:
             return values
         return tuple(item for item in values if item.availability()[0])
@@ -137,20 +203,29 @@ class CapabilityRegistry:
     def public_snapshot(self) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         for item in self.definitions():
-            available, reason = item.availability()
+            health = item.health()
             rows.append(
                 {
                     "id": item.capability_id,
                     "description": item.description,
                     "mode": item.mode.value,
                     "approval_policy": item.approval_policy.value,
-                    "available": available,
-                    "health_reason": reason,
+                    "available": health.state is CapabilityHealthState.AVAILABLE,
+                    "usable": health.available,
+                    "health": health.public_dict(),
+                    "health_reason": health.reason,
                     "provenance": item.provenance.value,
                     "type": item.capability_type,
+                    "material_group": item.material_group,
                     "input_contract": item.input_contract.public_schema(),
                     "output_contract": item.output_contract.public_schema(),
                     "verification": "hook",
+                    "self_test": "hook" if item.self_test_hook is not None else "missing",
+                    "permissions": list(item.permission_requirements),
+                    "mode_requirements": list(item.mode_requirements),
+                    "chat_selectable": item.chat_selectable,
+                    "proof_requirements": list(item.proof_requirements),
+                    "proof_categories": sorted(item.proof_nodes),
                 }
             )
         return rows

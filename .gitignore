@@ -36,3 +36,4 @@ control/agent_events.jsonl
 
 # Generated build artifacts
 /dist/
+/build/

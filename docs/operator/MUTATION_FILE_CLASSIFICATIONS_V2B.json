@@ -1,6 +1,6 @@
 {
   "schema": "personal-agent.mutation-file-classification.v2b",
-  "reviewed_count": 161,
+  "reviewed_count": 162,
   "required_fields": [
     "path",
     "disposition",
@@ -2430,6 +2430,21 @@
       "confirmation_requirements": "explicit command invocation",
       "rollback_scope": "temporary directory owned by the probe",
       "audit_evidence": "WP1 before/after median and p95 latency report",
+      "contract_identity": "not_applicable"
+    },
+    {
+      "path": "scripts/native_capability_proof.py",
+      "disposition": "offline_tool",
+      "capability": "developer.capability_proof",
+      "entry_point": "explicit command-line main and release-gate subprocess",
+      "actor": "developer/release operator",
+      "target_resources": "temporary proof state plus generated redacted capability reports",
+      "mutation_type": "deterministic offline proof execution and report generation",
+      "policy_path": "not imported by shipping runtime; release gate invokes it against a temporary runtime boundary",
+      "executor": "script-owned manifest reconciler and report writer",
+      "confirmation_requirements": "explicit command or canonical release-gate invocation",
+      "rollback_scope": "generated build reports and temporary proof state only",
+      "audit_evidence": "tests/test_native_capability_proof.py and canonical release gate",
       "contract_identity": "not_applicable"
     }
   ]
