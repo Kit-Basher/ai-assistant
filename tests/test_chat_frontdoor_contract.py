@@ -501,7 +501,7 @@ def test_failed_real_transcript_stays_on_deterministic_chat_frontdoor() -> None:
     )
     expected_routes = (
         {"action_tool"},
-        {"action_tool"},
+        {"assistant_unavailable"},
         {"action_tool"},
         {"assistant_capabilities"},
         {"model_status"},
@@ -572,6 +572,9 @@ def test_failed_real_transcript_stays_on_deterministic_chat_frontdoor() -> None:
             meta = response.get("meta") if isinstance(response.get("meta"), dict) else {}
             message = str(response.get("message") or "")
             assert meta.get("route") in allowed_routes, (utterance, response)
+            if utterance == "can you search the internet?":
+                assert "unavailable" in message.lower()
+                assert "search disabled" in message.lower()
             assert meta.get("used_llm") is False, (utterance, response)
             assert "LLM timed out before producing a response" not in message, (utterance, response)
 
