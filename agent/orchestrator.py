@@ -1082,7 +1082,10 @@ class Orchestrator:
             if isinstance(payload, dict):
                 available = bool(payload.get("available"))
                 return available, None if available else str(payload.get("reason") or "endpoint_unreachable")
-            return False, "search_health_unverified"
+            # Configured but not yet probed is degraded, not unavailable: the
+            # first bounded search may establish health. The explicit status
+            # surface probes first, so it never presents this as green.
+            return True, "search_health_unverified"
         if capability_id.startswith("telegram."):
             return (self._chat_runtime_adapter is not None, None if self._chat_runtime_adapter is not None else "telegram_runtime_unavailable")
         if capability_id.startswith(("memory.", "operator.", "system.shell", "system.package", "filesystem.create")):
@@ -1242,6 +1245,7 @@ class Orchestrator:
                         f"I understood the request, but {description.rstrip('.')} is unavailable right now. "
                         "Check capability status for the missing dependency and the next safe step."
                     ),
+                    unavailable_invocation_safe=capability_id == "search.web",
                     proof_requirements=proof_requirements,
                     proof_nodes=proof_nodes,
                     self_test_hook=fixture_self_test,
@@ -1848,6 +1852,13 @@ class Orchestrator:
             return None
         if understanding.fallback_category is FallbackCategory.UNAVAILABLE:
             definition = self._capability_registry.require(capability_id)
+            if definition.unavailable_invocation_safe:
+                # Optional read-only adapters may own a richer deterministic
+                # failure result (including a bounded repair preview). This is
+                # an explicit registry contract, never generic fallback and
+                # never permission to execute a mutation.
+                result = self._capability_registry.invoke(capability_id, understanding.structured_inputs)
+                return result if isinstance(result, OrchestratorResponse) else None
             health = definition.health()
             message = definition.unavailable_message
             if health.reason:

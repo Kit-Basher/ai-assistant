@@ -106,6 +106,7 @@ class CapabilityDefinition:
     permission_requirements: tuple[str, ...] = ()
     mode_requirements: tuple[str, ...] = ()
     unavailable_message: str = "This capability is not available in the current runtime."
+    unavailable_invocation_safe: bool = False
     proof_requirements: tuple[str, ...] = ()
     proof_nodes: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     self_test_hook: SelfTestHook | None = None
@@ -174,7 +175,7 @@ class CapabilityRegistry:
     def validate_selection(self, capability_id: str, inputs: Mapping[str, Any] | None) -> tuple[CapabilityDefinition, dict[str, Any]]:
         definition = self.require(capability_id)
         available, reason = definition.availability()
-        if not available:
+        if not available and not definition.unavailable_invocation_safe:
             raise RuntimeError(reason or "capability_unavailable")
         return definition, definition.input_contract.validate(inputs)
 
@@ -225,6 +226,7 @@ class CapabilityRegistry:
                     "mode_requirements": list(item.mode_requirements),
                     "chat_selectable": item.chat_selectable,
                     "proof_requirements": list(item.proof_requirements),
+                    "unavailable_invocation_safe": item.unavailable_invocation_safe,
                     "proof_categories": sorted(item.proof_nodes),
                 }
             )
