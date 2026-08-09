@@ -25,6 +25,12 @@ WP2_NATIVE_CAPABILITY_TEST_NODES: tuple[str, ...] = (
     "tests/test_telegram_runtime_state.py",
     "tests/test_model_switch_semantics.py",
 )
+WP3_TASK_LOOP_TEST_NODES: tuple[str, ...] = (
+    "tests/test_general_task_loop.py",
+    "tests/test_task_loop_properties.py",
+    "tests/test_wp3_scenarios.py",
+    "tests/test_task_loop_proof.py",
+)
 
 PY_COMPILE_TARGETS: tuple[str, ...] = (
     "agent/api_server.py",
@@ -32,6 +38,7 @@ PY_COMPILE_TARGETS: tuple[str, ...] = (
     "agent/orchestrator.py",
     "agent/capability_registry.py",
     "agent/request_understanding.py",
+    "agent/task_loop.py",
     "agent/setup_chat_flow.py",
     "agent/filesystem_skill.py",
     "agent/executor_registry.py",
@@ -66,6 +73,8 @@ PY_COMPILE_TARGETS: tuple[str, ...] = (
     "scripts/chat_frontdoor_smoke.py",
     "scripts/wp1_latency_probe.py",
     "scripts/native_capability_proof.py",
+    "scripts/task_loop_proof.py",
+    "scripts/wp3_latency_probe.py",
 )
 
 def _pytest_command(test_nodes: tuple[str, ...]) -> tuple[str, ...]:
@@ -75,6 +84,7 @@ def _pytest_command(test_nodes: tuple[str, ...]) -> tuple[str, ...]:
 RELEASE_GATE_COMMANDS: tuple[tuple[str, ...], ...] = (
     (sys.executable, "-m", "py_compile", *PY_COMPILE_TARGETS),
     (sys.executable, "scripts/native_capability_proof.py", "--execute-tests"),
+    (sys.executable, "scripts/task_loop_proof.py", "--execute-tests"),
     ("bash", "scripts/build_webui.sh"),
     (
         "node",
@@ -83,8 +93,9 @@ RELEASE_GATE_COMMANDS: tuple[tuple[str, ...], ...] = (
         "desktop/tests/chatUiHelpers.test.js",
         "desktop/tests/packStateUiHelpers.test.js",
         "desktop/tests/stateUiHelpers.test.js",
+        "desktop/tests/taskUiHelpers.test.js",
     ),
-    _pytest_command((*MAIN_TEST_NODES, *WP1_UNIFIED_ROUTING_TEST_NODES, *WP2_NATIVE_CAPABILITY_TEST_NODES)),
+    _pytest_command((*MAIN_TEST_NODES, *WP1_UNIFIED_ROUTING_TEST_NODES, *WP2_NATIVE_CAPABILITY_TEST_NODES, *WP3_TASK_LOOP_TEST_NODES)),
     _pytest_command(EXTENDED_TEST_NODES),
     ("git", "diff", "--check"),
 )

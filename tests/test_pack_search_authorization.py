@@ -21,7 +21,10 @@ def _runtime(tmp: Path, **overrides: object) -> AgentRuntime:
 
 
 def _confirmation(plan: dict[str, object]) -> dict[str, object]:
-    return build_mutation_confirmation(plan, confirmation_id="explicit-v2f-confirmation")
+    return build_mutation_confirmation(
+        plan,
+        confirmation_id=f"explicit-v2f-confirmation-{plan.get('plan_id')}",
+    )
 
 
 def test_all_v2f_operations_have_distinct_capability_executor_bindings() -> None:

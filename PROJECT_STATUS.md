@@ -5,7 +5,25 @@ This is the current-state handover doc. Product intent lives in
 `PRODUCT_RUNTIME_SPEC.md`. Treat this file as a status snapshot, not the sole
 source of truth.
 
-## WP2 candidate truth (v0.2.11)
+## WP3 candidate truth (v0.2.12)
+
+- WP3 adds a bounded general task coordinator above the protected 22-capability
+  WP2 registry. It is not a second tool layer: every step invokes a registered,
+  typed canonical implementation and its verifier.
+- Direct casual and one-capability requests remain on the existing fast path.
+  Multi-capability goals receive durable plans, evidence, task control, exact
+  approval binding for mutations, and restart reconciliation.
+- Task APIs and the responsive Web UI task card use the same canonical SQLite
+  records. Progress and completion are evidence-based and redact content,
+  prompts, tokens, and secrets.
+- Missing capabilities use a structured no-action handoff. Executable packs,
+  automatic acquisition, assistant-created packs/tools, and general pack
+  workers remain deferred to WP4/WP5.
+- `scripts/task_loop_proof.py` and the canonical/extended gates protect task
+  schemas, composability metadata, approval, cancellation, restart,
+  verification, invariants, redaction, and all 16 required scenario categories.
+
+## Completed WP2 baseline (v0.2.11)
 
 - The protected inventory and live registry reconcile 22 native user-goal
   capabilities across assistant, conversation, filesystem, system, models,
@@ -20,12 +38,11 @@ source of truth.
   executable packs, automatic acquisition, and assistant-created packs remain
   unsupported.
 - Live verification of v0.2.10 exposed a capability-status health mismatch for
-  stopped SearXNG. The exact v0.2.11 candidate includes both semantic-domain
-  fixes and dependency-truth reconciliation, and remains a candidate until its
-  complete gates and live verification pass.
+  stopped SearXNG. The exact v0.2.11 release corrected semantic-domain and
+  dependency-truth reconciliation before promotion.
 
 The older narrative below is retained as historical context; where it differs,
-the WP2 candidate truth above and the higher-priority product/runtime documents
+the WP3 truth above and the higher-priority product/runtime documents
 govern.
 
 ## Current State

@@ -193,11 +193,12 @@ def _semantic_domain_boost(capability_id: str, tokens: set[str]) -> float:
     }
     if capability_id == "assistant.presence" and presence_words and len(tokens) <= 7 and not domain_words:
         score += 0.42
-    if capability_id == "assistant.capabilities" and has("tool", "tools", "capability", "capabilities", "abilities", "functions"):
+    if capability_id == "assistant.capabilities" and has("tool", "tools", "capability", "capabilities", "abilities", "functions", "jobs", "actions"):
         score += 0.28
     if capability_id == "assistant.capabilities" and (
-        (has("can") and has("you") and has("do", "handle"))
+        (has("can") and has("you", "assistant", "helper") and has("do", "handle"))
         or (has("what") and has("help") and has("with"))
+        or (has("what", "which") and has("jobs", "work", "actions") and has("handle", "support", "do"))
     ):
         score += 0.42
     filesystem_domain = has(
@@ -226,15 +227,17 @@ def _semantic_domain_boost(capability_id: str, tokens: set[str]) -> float:
             or (has("folder", "directory") and has("show", "contents", "inside", "in"))
         ):
             score += 0.26
-    if capability_id == "system.status" and (
-        has("runtime", "system", "computer", "service", "cpu", "ram", "memory", "resources", "disk", "storage", "running", "working", "healthy", "health", "status", "alive", "slow")
+    if capability_id == "system.status" and not has("install", "create", "make", "switch", "remove", "delete", "enable", "disable") and (
+        has("runtime", "system", "computer", "machine", "service", "process", "cpu", "ram", "memory", "resources", "disk", "storage", "healthy", "health", "status", "slow")
         or has_fuzzy("runtime", "system", "healthy", "health", "status", "storage")
     ):
         score += 0.24
     if capability_id == "system.status" and has("doctor"):
         score += 0.42
-    if capability_id == "system.status" and has("agent") and has("running", "working", "healthy", "health", "status", "alive", "doctor"):
-        score += 0.16
+    if capability_id == "system.status" and has("running", "working", "alive") and has("still", "status", "health"):
+        score += 0.36
+    if capability_id == "system.status" and has("agent", "assistant", "service", "process") and has("running", "working", "healthy", "health", "status", "alive", "doctor", "doing"):
+        score += 0.34
     if capability_id == "system.status" and has("cpu", "memory", "resources") and has("using", "usage", "eating", "consuming"):
         score += 0.34
     model_domain = has("model", "models", "ollama", "openrouter", "gemma", "qwen", "provider", "engine") or has_fuzzy(
@@ -285,7 +288,10 @@ def _semantic_domain_boost(capability_id: str, tokens: set[str]) -> float:
         score += 0.36
     if capability_id == "filesystem.create_directory" and has("create", "make", "add") and has("directory", "folder"):
         score += 0.44
-    if capability_id == "system.package.install" and has("install", "add") and has("package", "utility", "tool", "apt", "pip"):
+    if capability_id == "system.package.install" and has("install", "add") and (
+        has("package", "utility", "tool", "apt", "pip")
+        or (has("machine", "computer", "system") and not has("model", "pack", "skill"))
+    ):
         score += 0.44
     memory_domain = (has("memory", "remembered", "continuity", "recall") or has_fuzzy("memory", "continuity", "recall")) and not has("ram", "cpu", "resources", "usage", "using", "eating", "consuming")
     if capability_id == "memory.status" and memory_domain and (
@@ -561,10 +567,14 @@ def _structured_capability_inputs(
                 result["command_subject"] = candidates[-1]
     elif capability_id == "system.package.install":
         result["package_manager"] = "pip" if "pip" in tokens else "apt"
-        ignored = {"install", "add", "package", "utility", "tool", "please", "with", "using", "apt", "pip", "the", "a", "an", "debian", "preview"}
-        candidates = [token for token in normalized.split() if token not in ignored]
-        if candidates:
-            result["package"] = candidates[-1]
+        target = re.search(
+            r"\b(?:install|installing|add|adding)\s+"
+            r"(?:(?:the|a|an|package|utility|tool|debian)\s+)*"
+            r"(?P<package>[a-z0-9][a-z0-9+._-]*)\b",
+            normalized,
+        )
+        if target:
+            result["package"] = str(target.group("package") or "").strip()
     elif capability_id == "memory.status":
         result["memory_operation"] = "status"
     elif capability_id == "memory.manage":

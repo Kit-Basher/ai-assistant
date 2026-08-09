@@ -18,11 +18,13 @@ in BotFather, update the Personal Agent secret store, and restart
 the embedded Telegram poller in `personal-agent-api.service`.
 
 ## Current Product Truth
-Current release candidate: v0.2.11. It preserves the existing authorization,
+Current release candidate: v0.2.12. It preserves the existing authorization,
 Telegram, memory, filesystem, model-management, pack, and Web UI foundations
-while making unified request understanding and the live capability registry the
-sole ordinary `/chat` capability-selection path. See
-[`docs/releases/v0.2.11.md`](docs/releases/v0.2.11.md). Release tags are not
+while adding a bounded, durable plan-act-verify coordinator above the live
+capability registry. Simple requests retain the direct WP1/WP2 path; substantial
+goals may sequence only registered capabilities, pause at exact approval
+boundaries, and complete only with verifier evidence. See
+[`docs/releases/v0.2.12.md`](docs/releases/v0.2.12.md). Release tags are not
 created automatically by audit tooling.
 
 The user interacts with the assistant layer. The assistant interprets intent,
@@ -47,6 +49,12 @@ It is not a guessy autonomous agent. It does not invent state, does not expose
 arbitrary shell execution, and does not mutate local or system state without an
 explicit confirmation step.
 
+For a bounded multi-capability goal, the assistant stores a concise plan and
+evidence in the canonical state database. The user can inspect progress, stop,
+pause or safely resume through chat or the task card. A plan is an untrusted
+proposal until its capability IDs and typed inputs pass the live registry;
+executor success alone is never treated as proof of completion.
+
 Current limitations are explicit: arbitrary malicious in-process Python is not
 process-isolated; Git push execution is classified but disabled; destructive
 Git variants and broad service control are denied; primary uninstall requires a
@@ -63,6 +71,10 @@ local activation marker; purge uninstall remains unsupported.
   confirmation-gated and are not arbitrary shell access.
 - Approval-gated: mutating actions preview first and execute only after explicit
   confirmation.
+- Durable task coordination: substantial goals use a bounded state machine,
+  exact plan-bound approval, registry dispatch, independent verification, and
+  restart reconciliation. Direct deterministic requests do not create tasks or
+  consume a planning generation.
 - Safe local text-pack ingestion: a user-provided local directory is quarantined,
   scanned, normalized, and denied permissions by default. Catalog discovery is
   metadata-only; arbitrary remote pack acquisition is currently unavailable.
@@ -79,6 +91,8 @@ local activation marker; purge uninstall remains unsupported.
 - It will not claim full web browsing. Explicit/current-information requests use
   configured SearXNG search results with source titles and URLs; the assistant
   does not silently fetch arbitrary result pages.
+- It will not create, fetch, install, enable, or execute a pack to fill a missing
+  task capability. WP3 records an honest structured handoff only.
 
 ## Core Concepts
 
@@ -352,6 +366,12 @@ Useful local commands:
 ## Product-Relevant Operator Surfaces
 - `POST /chat`
   - assistant front door
+- `GET /tasks`
+  - durable tasks for the current actor/session, optionally filtered by thread
+- `GET /tasks/<task_id>`
+  - concise current plan, progress, verification, and outcome
+- `POST /tasks/<task_id>/control`
+  - actor/session/thread/revision-bound stop, pause, or safe resume
 - `GET /health`
   - fast service/runtime health
   - explicit `phase`, `startup_phase`, `runtime_mode`, `warmup_remaining`,

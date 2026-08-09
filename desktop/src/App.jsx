@@ -390,6 +390,7 @@ export default function App() {
   const [chatThreads, setChatThreads] = useState([]);
   const [chatHistoryLoading, setChatHistoryLoading] = useState(true);
   const [chatHistoryError, setChatHistoryError] = useState("");
+  const [activeTask, setActiveTask] = useState(null);
 
   const [logs, setLogs] = useState([]);
   const autopilotLastHashRef = useRef("");
@@ -1190,6 +1191,12 @@ export default function App() {
     const threadToRestore = currentExists ? chatThreadId : String(threads[0]?.thread_id || "");
     if (threadToRestore) {
       await loadChatThread(threadToRestore, { quiet: true });
+      try {
+        const taskPayload = await request("GET", `/tasks?limit=1&session_id=${encodeURIComponent(chatSessionId)}&thread_id=${encodeURIComponent(threadToRestore)}&source_surface=webui`);
+        setActiveTask(Array.isArray(taskPayload?.tasks) ? taskPayload.tasks[0] || null : null);
+      } catch (_error) {
+        setActiveTask(null);
+      }
     }
     setChatHistoryLoading(false);
   };
@@ -1240,6 +1247,9 @@ export default function App() {
 
       const assistantMessage = buildAssistantMessage(result);
       setMessages((prev) => [...prev, assistantMessage]);
+      if (result?.setup?.task && typeof result.setup.task === "object") {
+        setActiveTask(result.setup.task);
+      }
       appendLog({
         endpoint: "/chat",
         ok: result.ok === true,
@@ -1299,6 +1309,7 @@ export default function App() {
     setChatThreadId(nextThreadId);
     saveStoredChatId(CHAT_THREAD_STORAGE_KEY, nextThreadId);
     setMessages([]);
+    setActiveTask(null);
     setChatHistoryError("");
     appendLog({ endpoint: "chat/reset", ok: true, detail: "Conversation reset" });
   };
@@ -2197,6 +2208,7 @@ export default function App() {
   return (
     <>
       <ChatExperience
+        activeTask={activeTask}
         chatBusy={chatBusy}
         chatHistoryError={chatHistoryError}
         chatHistoryLoading={chatHistoryLoading}

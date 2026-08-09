@@ -118,6 +118,83 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     created_at TEXT NOT NULL
 );
 
+-- WP3 bounded plan-act-verify tasks. These records share the canonical state
+-- database but remain distinct from the user's personal to-do `tasks` table.
+CREATE TABLE IF NOT EXISTS agent_tasks (
+    task_id TEXT PRIMARY KEY,
+    schema_version TEXT NOT NULL,
+    actor_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    goal TEXT NOT NULL,
+    success_criteria_json TEXT NOT NULL,
+    plan_json TEXT NOT NULL,
+    plan_hash TEXT NOT NULL,
+    plan_version INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 0,
+    current_step INTEGER NOT NULL DEFAULT 0,
+    capability_calls INTEGER NOT NULL DEFAULT 0,
+    planning_generations INTEGER NOT NULL DEFAULT 0,
+    replan_count INTEGER NOT NULL DEFAULT 0,
+    failure_json TEXT,
+    outcome_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    terminal_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_tasks_actor_thread
+    ON agent_tasks(actor_id, thread_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS agent_task_steps (
+    task_id TEXT NOT NULL,
+    step_id TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    capability_id TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    approval_policy TEXT NOT NULL,
+    status TEXT NOT NULL,
+    inputs_json TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    invocation_id TEXT,
+    result_json TEXT,
+    evidence_json TEXT,
+    verifier_status TEXT,
+    failure_json TEXT,
+    started_at TEXT,
+    finished_at TEXT,
+    PRIMARY KEY(task_id, step_id),
+    FOREIGN KEY(task_id) REFERENCES agent_tasks(task_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS agent_task_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    event_type TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(task_id, sequence),
+    FOREIGN KEY(task_id) REFERENCES agent_tasks(task_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS agent_task_approvals (
+    approval_id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    plan_version INTEGER NOT NULL,
+    plan_hash TEXT NOT NULL,
+    binding_hash TEXT NOT NULL,
+    actor_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    mutating_steps_json TEXT NOT NULL,
+    state TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    consumed_at TEXT,
+    FOREIGN KEY(task_id) REFERENCES agent_tasks(task_id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_chat_messages_thread
     ON chat_messages(user_id, thread_id, id);
 

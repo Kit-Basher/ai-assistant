@@ -37,6 +37,7 @@ from agent.capability_registry import (
     CapabilityRegistry,
 )
 from agent.request_understanding import FallbackCategory, RequestUnderstanding, RequestUnderstandingService
+from agent.task_loop import GeneralTaskPlanner, TaskCoordinator, TaskState, TaskStore, build_deterministic_plan, build_missing_capability
 from agent.disk_diff import diff_disk_reports, time_since
 from agent.disk_anomalies import detect_anomalies
 from agent.doctor import (
@@ -1024,9 +1025,18 @@ class Orchestrator:
         )
         self._capability_registry = self._build_conversation_capability_registry()
         self._request_understanding = RequestUnderstandingService(self._capability_registry)
+        self._task_coordinator = TaskCoordinator(
+            store=TaskStore(self.db),
+            registry=self._capability_registry,
+        )
+        self._general_task_planner = GeneralTaskPlanner()
 
     @staticmethod
     def _verified_orchestrator_response(result: Any) -> bool:
+        # Registry verification validates the typed response boundary. Task
+        # outcome verification separately evaluates success/failure fields so
+        # an honest failed tool result can still be returned directly without
+        # becoming an internal error or completion evidence.
         return isinstance(result, OrchestratorResponse) and bool(str(result.text or "").strip())
 
     def _capability_health(self, capability_id: str) -> tuple[bool, str | None]:
@@ -1115,6 +1125,14 @@ class Orchestrator:
                     "restart", "timeout", "redaction",
                 )
             )
+            task_proof_requirements = (
+                "task_schema", "task_dispatch", "task_verification", "task_restart",
+            ) + (
+                ("task_approval", "task_cancellation", "task_indeterminate")
+                if mode is CapabilityMode.MUTATING
+                else ()
+            )
+            proof_requirements = (*proof_requirements, *task_proof_requirements)
             family_proof_node = (
                 "tests/test_filesystem_api_contract.py" if capability_id.startswith("filesystem.")
                 else "tests/test_model_switch_semantics.py" if capability_id.startswith("models.")
@@ -1133,6 +1151,11 @@ class Orchestrator:
                 )))
                 for category in proof_requirements
             }
+            for category in task_proof_requirements:
+                proof_nodes[category] = (
+                    "tests/test_general_task_loop.py",
+                    "tests/test_task_loop_properties.py",
+                )
             permission_requirements = (
                 ("filesystem:write",) if capability_id == "filesystem.create_directory"
                 else ("filesystem:read",) if capability_id.startswith("filesystem.")
@@ -1189,6 +1212,24 @@ class Orchestrator:
                     "health_available": available,
                     "health_reason": reason,
                 }
+
+            def validate_task_inputs(payload: Mapping[str, Any], selected: str = capability_id) -> tuple[bool, str | None]:
+                if not selected.startswith("filesystem."):
+                    return True, None
+                raw_path = str(payload.get("path_hint") or "").strip()
+                if not raw_path:
+                    # Search/list can legitimately obtain scope from their
+                    # canonical defaults; exact-path actions validate once a
+                    # path is supplied or resolved from prior evidence.
+                    return True, None
+                truth = self._runtime_truth()
+                skill_factory = getattr(truth, "_filesystem_skill", None) if truth is not None else None
+                if not callable(skill_factory):
+                    return False, "filesystem_runtime_unavailable"
+                _resolved, error = skill_factory()._resolve_request_path(raw_path)  # noqa: SLF001 - canonical side-effect-free containment validator
+                if error is not None:
+                    return False, str(error.get("error_kind") or "filesystem_path_invalid")
+                return True, None
 
             registry.register(
                 CapabilityDefinition(
@@ -1249,6 +1290,16 @@ class Orchestrator:
                     proof_requirements=proof_requirements,
                     proof_nodes=proof_nodes,
                     self_test_hook=fixture_self_test,
+                    task_composable=True,
+                    retry_safety=("reconcile_first" if mode is CapabilityMode.MUTATING else "read_only_safe"),
+                    max_task_retries=(0 if mode is CapabilityMode.MUTATING else 1),
+                    resume_policy=("reconcile_first" if mode is CapabilityMode.MUTATING else "revalidate"),
+                    independent_verification_hook=(
+                        (lambda inputs, result, selected=capability_id: self._task_independent_verify(selected, inputs, result))
+                        if mode is CapabilityMode.MUTATING
+                        else None
+                    ),
+                    task_input_validation_hook=validate_task_inputs,
                 )
             )
 
@@ -1743,12 +1794,46 @@ class Orchestrator:
             )
         return self._runtime_state_unavailable_response(route="assistant_clarification", reason="unknown_registered_capability")
 
+    def _task_independent_verify(
+        self,
+        capability_id: str,
+        inputs: Mapping[str, Any],
+        result: Any,
+    ) -> dict[str, Any]:
+        """Independent post-mutation observations available to WP3."""
+        if capability_id == "filesystem.create_directory":
+            target = Path(str(inputs.get("path_hint") or "")).expanduser()
+            return {
+                "ok": bool(str(target)) and target.is_dir(),
+                "kind": "filesystem_read_after_write",
+                "target_fingerprint": hashlib.sha256(str(target.resolve(strict=False)).encode("utf-8")).hexdigest(),
+            }
+        if capability_id == "models.switch":
+            truth = self._runtime_truth()
+            status = truth.current_chat_target_status() if truth is not None else {}
+            requested = str(inputs.get("model_target") or "").strip().lower()
+            effective = str(status.get("effective_model") or status.get("model") or "").strip().lower()
+            return {
+                "ok": bool(requested and effective and (requested == effective or requested in effective)),
+                "kind": "model_status_read_after_write",
+                "effective_model": effective or None,
+            }
+        data = result.data if isinstance(result, OrchestratorResponse) and isinstance(result.data, dict) else {}
+        payload = data.get("runtime_payload") if isinstance(data.get("runtime_payload"), dict) else {}
+        verified = bool(payload.get("verified") or payload.get("verification_ok") or payload.get("reachable"))
+        return {
+            "ok": verified,
+            "kind": "declared_runtime_observation" if verified else "independent_observation_unavailable",
+            "reason": None if verified else "capability_has_no_safe_independent_task_verifier",
+        }
+
     def _understand_conversation_request(
         self,
         user_id: str,
         text: str,
         *,
         thread_id: str | None = None,
+        task_continuation_capability_id: str | None = None,
     ) -> RequestUnderstanding:
         previous = self._current_interpretable_result(user_id, thread_id=thread_id)
         previous_data = previous.get("payload") if isinstance(previous.get("payload"), dict) else {}
@@ -1758,7 +1843,7 @@ class Orchestrator:
             definition.capability_id: {"user_id": user_id, "text": text}
             for definition in self._capability_registry.definitions(chat_selectable_only=True)
         }
-        continuation_capability_id = None
+        continuation_capability_id = str(task_continuation_capability_id or "").strip().lower() or None
         previous_type = str(previous_data.get("type") or "").strip().lower()
         followup_tokens = set(normalize_setup_text(text).replace("/", " ").split())
         setup_repair_followup = bool(
@@ -1781,6 +1866,8 @@ class Orchestrator:
             if recommended_model:
                 inputs["models.switch"]["model_target"] = recommended_model
         if (
+            continuation_capability_id is None
+            and
             referenced_id == "filesystem.search"
             and previous_type in {"filesystem_recent_downloaded_videos", "filesystem_recent_videos"}
             and followup_tokens & {"video", "videos"}
@@ -1809,6 +1896,422 @@ class Orchestrator:
     ) -> RequestUnderstanding:
         """Read-only API preflight using the same production understanding owner."""
         return self._understand_conversation_request(user_id, text, thread_id=thread_id)
+
+    def _task_public_payload(self, task: Mapping[str, Any], *, advanced: bool = False) -> dict[str, Any]:
+        steps = []
+        for row in task.get("steps") if isinstance(task.get("steps"), list) else []:
+            if not isinstance(row, Mapping):
+                continue
+            capability_id = str(row.get("capability_id") or "")
+            definition = self._capability_registry.get(capability_id)
+            step_payload = {
+                "step_id": str(row.get("step_id") or ""),
+                "capability_id": capability_id,
+                "description": definition.description if definition is not None else "Registered capability step",
+                "status": str(row.get("status") or "pending"),
+                "mode": str(row.get("mode") or "read_only"),
+                "verified": str(row.get("verifier_status") or "") == "pass",
+                "verifier_status": str(row.get("verifier_status") or "") or None,
+            }
+            if advanced:
+                step_payload.update({
+                    "approval_policy": str(row.get("approval_policy") or "never"),
+                    "evidence": row.get("evidence"),
+                })
+            steps.append(step_payload)
+        failure_raw = task.get("failure") if isinstance(task.get("failure"), Mapping) else None
+        outcome_raw = task.get("outcome") if isinstance(task.get("outcome"), Mapping) else None
+        failure_public = (
+            {
+                "classification": str(failure_raw.get("classification") or ""),
+                "reason": str(failure_raw.get("reason") or "")[:240],
+            }
+            if failure_raw is not None
+            else None
+        )
+        outcome_public = (
+            {
+                "status": str(outcome_raw.get("status") or ""),
+                "verified": bool(outcome_raw.get("verified")),
+                "criteria_met": [str(item)[:500] for item in (outcome_raw.get("criteria_met") if isinstance(outcome_raw.get("criteria_met"), list) else [])[:8]],
+                **({"missing_capability": outcome_raw.get("missing_capability")} if isinstance(outcome_raw.get("missing_capability"), Mapping) else {}),
+            }
+            if outcome_raw is not None
+            else None
+        )
+        payload = {
+            "schema_version": str(task.get("schema_version") or "personal-agent.task.v1"),
+            "task_id": str(task.get("task_id") or ""),
+            "goal": str(task.get("goal") or ""),
+            "state": str(task.get("state") or ""),
+            "revision": int(task.get("revision") or 0),
+            "plan_version": int(task.get("plan_version") or 0),
+            "current_step": int(task.get("current_step") or 0),
+            "steps": steps,
+            "success_criteria": list(task.get("success_criteria") or []),
+            "failure": failure_raw if advanced else failure_public,
+            "outcome": outcome_raw if advanced else outcome_public,
+            "created_at": task.get("created_at"),
+            "updated_at": task.get("updated_at"),
+        }
+        if advanced:
+            payload["plan_hash"] = str(task.get("plan_hash") or "")
+        return payload
+
+    def task_list(self, *, user_id: str, thread_id: str | None = None, limit: int = 20, advanced: bool = False) -> list[dict[str, Any]]:
+        return [
+            self._task_public_payload(task, advanced=advanced)
+            for task in self._task_coordinator.store.list(actor_id=user_id, thread_id=thread_id, limit=limit)
+        ]
+
+    def task_get(self, task_id: str, *, user_id: str, thread_id: str | None = None, advanced: bool = False) -> dict[str, Any] | None:
+        task = self._task_coordinator.store.get(task_id, actor_id=user_id, thread_id=thread_id)
+        return self._task_public_payload(task, advanced=advanced) if task else None
+
+    def task_control(
+        self,
+        task_id: str,
+        *,
+        action: str,
+        user_id: str,
+        session_id: str,
+        thread_id: str,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        task = self._task_coordinator.control(
+            task_id,
+            action=action,
+            actor_id=user_id,
+            session_id=session_id,
+            thread_id=thread_id,
+            expected_revision=expected_revision,
+        )
+        return self._task_public_payload(task)
+
+    @staticmethod
+    def _task_control_kind(text: str) -> str | None:
+        normalized = normalize_setup_text(text)
+        tokens = set(normalized.split())
+        if tokens & {"deny"} or normalized in {"no", "n"}:
+            return "deny"
+        if tokens & {"cancel", "stop", "abort"}:
+            return "cancel"
+        if tokens & {"pause", "hold"}:
+            return "pause"
+        if tokens & {"resume", "continue"}:
+            return "resume"
+        if tokens & {"status", "progress", "plan"} or ({"what", "doing"} <= tokens):
+            return "status"
+        return None
+
+    def _active_task_chat_response(
+        self,
+        user_id: str,
+        text: str,
+        *,
+        thread_id: str,
+        session_id: str,
+    ) -> OrchestratorResponse | None:
+        task = self._task_coordinator.store.active_for_thread(actor_id=user_id, thread_id=thread_id)
+        if task is None:
+            return None
+        control = self._task_control_kind(text)
+        if control is None:
+            current_index = int(task.get("current_step") or 0)
+            steps = task.get("steps") if isinstance(task.get("steps"), list) else []
+            current_step = steps[current_index] if current_index < len(steps) else {}
+            current_capability = str(current_step.get("capability_id") or "")
+            correction_tokens = set(normalize_setup_text(text).replace("/", " ").split())
+            correction = bool(correction_tokens & {"actually", "instead", "meant", "rather", "other", "correction"})
+            understood = self._understand_conversation_request(
+                user_id,
+                text,
+                thread_id=thread_id,
+                task_continuation_capability_id=current_capability if correction else None,
+            )
+            if (
+                str(task.get("state") or "") == TaskState.AWAITING_APPROVAL.value
+                and understood.selected_capability_id == current_capability
+                and understood.approval_required
+                and dict(understood.structured_inputs) != dict(current_step.get("inputs") or {})
+            ):
+                old_plan = task.get("plan") if isinstance(task.get("plan"), dict) else {}
+                revised_steps = []
+                for row in old_plan.get("steps") if isinstance(old_plan.get("steps"), list) else []:
+                    revised_steps.append({
+                        "step_id": row.get("step_id"),
+                        "capability_id": row.get("capability_id"),
+                        "inputs": dict(understood.structured_inputs) if row.get("step_id") == current_step.get("step_id") else row.get("inputs"),
+                        "depends_on": row.get("depends_on") or [],
+                        "expected_evidence": row.get("expected_evidence"),
+                        "verification": row.get("verification"),
+                        "timeout_seconds": row.get("timeout_seconds"),
+                        "retry_limit": row.get("retry_limit"),
+                        "compensation_capability_id": row.get("compensation_capability_id"),
+                    })
+                proposal = {
+                    "schema_version": "personal-agent.plan.v1",
+                    "task_id": task["task_id"],
+                    "version": int(task["plan_version"]) + 1,
+                    "goal": str(text),
+                    "success_criteria": old_plan.get("success_criteria") or task.get("success_criteria") or [str(text)],
+                    "steps": revised_steps,
+                    "created_by": "user_direction_change",
+                    "planning_generation_count": 0,
+                }
+                self._clear_pending_confirmation(user_id, status=PENDING_STATUS_ABORTED)
+                revised = self._task_coordinator.revise(
+                    proposal, actor_id=user_id, session_id=session_id, thread_id=thread_id,
+                )
+                revised = self._task_coordinator.run(str(revised["task_id"]), actor_id=user_id, thread_id=thread_id)
+                public = self._task_public_payload(revised)
+                message = "I revised the target, kept already verified evidence, invalidated the old approval, and prepared a fresh exact preview."
+                return self._runtime_truth_response(
+                    text=message, route="task_control", used_runtime_state=True,
+                    used_tools=["task_coordinator", current_capability],
+                    payload={"type": "task_progress", "summary": message, "task": public, "plan_revised": True},
+                    skip_post_response_hooks=True,
+                )
+            # An unrelated read-only or casual question is answered without
+            # consuming, replacing, or advancing the active task.
+            if understood.fallback_category is FallbackCategory.CASUAL or (
+                understood.selected_capability_id
+                and understood.read_only
+                and understood.selected_capability_id != current_capability
+            ):
+                response = self._dispatch_understood_request(understood)
+                return self._with_request_understanding(response, understood) if response is not None else None
+            return None
+        if control == "status":
+            public = self._task_public_payload(task)
+            complete = sum(1 for step in public["steps"] if step["status"] == "completed")
+            message = f"Task progress: {complete} of {len(public['steps'])} steps are complete. Current state: {public['state'].replace('_', ' ')}."
+        else:
+            try:
+                task = self._task_coordinator.control(
+                    str(task["task_id"]), action=control, actor_id=user_id,
+                    session_id=session_id, thread_id=thread_id,
+                    expected_revision=int(task["revision"]),
+                )
+                if control in {"cancel", "deny"}:
+                    self._clear_pending_confirmation(user_id, status=PENDING_STATUS_ABORTED)
+                public = self._task_public_payload(task)
+                message = {
+                    "cancel": "I cancelled the task. No remaining step will run.",
+                    "deny": "I denied the pending change. No remaining mutation will run.",
+                    "pause": "I paused the task before the next step.",
+                    "resume": f"I resumed the task. Its current state is {public['state'].replace('_', ' ')}.",
+                }[control]
+            except (ValueError, RuntimeError, PermissionError) as exc:
+                public = self._task_public_payload(task)
+                message = f"I could not {control} this task safely: {str(exc).replace('_', ' ')}."
+        return self._runtime_truth_response(
+            text=message,
+            route="task_control",
+            used_runtime_state=True,
+            used_tools=["task_coordinator"],
+            payload={"type": "task_progress", "summary": message, "task": public},
+            skip_post_response_hooks=True,
+        )
+
+    def _substantial_task_response(
+        self,
+        user_id: str,
+        text: str,
+        *,
+        thread_id: str,
+        session_id: str,
+    ) -> OrchestratorResponse | None:
+        # Grammatical decomposition delegates meaning to the same semantic
+        # understanding owner. The conjunctions only identify candidate goal
+        # boundaries; they never select a capability.
+        if not re.search(r";|\b(?:and then|then|also)\b", str(text or ""), flags=re.IGNORECASE):
+            return None
+        clauses = [
+            part.strip(" ,.;")
+            for part in re.split(r"(?:;+|(?<!\.)\.(?!\.)\s+|[!?]+\s+|\b(?:and then|then|also)\b)", str(text or ""), flags=re.IGNORECASE)
+            if part.strip(" ,.;")
+        ]
+        if len(clauses) < 2:
+            return None
+        requests: list[tuple[str, Mapping[str, Any]]] = []
+        unmatched_clauses: list[str] = []
+        for clause in clauses[:8]:
+            understood = self._understand_conversation_request(user_id, clause, thread_id=thread_id)
+            if understood.clarification or not understood.selected_capability_id:
+                unmatched_clauses.append(clause)
+                continue
+            capability_id = str(understood.selected_capability_id)
+            if capability_id in {item[0] for item in requests}:
+                continue
+            definition = self._capability_registry.require(capability_id)
+            if not definition.task_composable:
+                continue
+            requests.append((capability_id, dict(understood.structured_inputs)))
+        # An explicit sequence with one registered goal and one unmatched goal
+        # is a substantial partial task: complete the safe registered portion
+        # and emit a structured missing-capability handoff for the remainder.
+        # A lone recognized clause without an unmatched goal stays on fast path.
+        if not requests or (len(requests) < 2 and not unmatched_clauses):
+            return None
+        proposal = build_deterministic_plan(goal=text, capability_requests=requests, actor_id=user_id)
+        for index, step in enumerate(proposal.get("steps") if isinstance(proposal.get("steps"), list) else []):
+            definition = self._capability_registry.require(str(step.get("capability_id") or ""))
+            if definition.mode is CapabilityMode.READ_ONLY and definition.retry_safety == "read_only_safe":
+                step["retry_limit"] = min(1, int(definition.max_task_retries))
+            if (
+                index > 0
+                and step.get("capability_id") == "filesystem.read"
+                and proposal["steps"][index - 1].get("capability_id") == "filesystem.search"
+                and not str((step.get("inputs") or {}).get("path_hint") or "").strip()
+            ):
+                step["inputs"]["path_hint"] = f"${{{proposal['steps'][index - 1]['step_id']}.result.first_path}}"
+        try:
+            task = self._task_coordinator.create(
+                proposal, actor_id=user_id, session_id=session_id, thread_id=thread_id,
+            )
+            task = self._task_coordinator.run(
+                str(task["task_id"]), actor_id=user_id, thread_id=thread_id,
+                defer_completion=bool(unmatched_clauses),
+            )
+            missing_capability = None
+            if unmatched_clauses:
+                missing_capability = build_missing_capability(
+                    goal=text,
+                    success_criteria=[f"Complete: {clause}" for clause in unmatched_clauses],
+                    missing_description="; ".join(unmatched_clauses),
+                    considered_capabilities=[item[0] for item in requests],
+                    completed_evidence=[step.get("evidence") for step in task.get("steps") or [] if step.get("evidence")],
+                )
+                failure = {"classification": "missing_capability", "reason": "remaining_goal_has_no_registered_capability"}
+                self._task_coordinator.store.set_failure_outcome(
+                    str(task["task_id"]), failure=failure,
+                    outcome={"schema_version": "personal-agent.task.v1", "status": "partially_completed", "verified": True, "missing_capability": missing_capability},
+                )
+                if str(task.get("state") or "") != TaskState.AWAITING_APPROVAL.value:
+                    task = self._task_coordinator.store.transition(
+                        str(task["task_id"]), TaskState.PARTIALLY_COMPLETED,
+                        event="task.missing_capability", payload={"missing_capability": missing_capability},
+                    )
+        except Exception as exc:
+            message = "I could not create a safe bounded plan for that goal. No action ran."
+            return self._runtime_truth_response(
+                text=message,
+                route="task_planning",
+                used_runtime_state=True,
+                used_tools=["task_coordinator"],
+                ok=False,
+                error_kind="task_plan_rejected",
+                payload={"type": "task_plan_rejected", "summary": message, "reason": str(exc)[:200]},
+            )
+        public = self._task_public_payload(task)
+        state = str(public["state"])
+        complete = sum(1 for step in public["steps"] if step["status"] == "completed")
+        if state == TaskState.SUCCEEDED.value:
+            message = f"I completed and verified all {complete} planned steps for: {public['goal']}"
+        elif state == TaskState.AWAITING_APPROVAL.value:
+            message = f"I completed {complete} safe inspection step(s). The next exact change is waiting for your approval."
+        elif state == TaskState.PARTIALLY_COMPLETED.value:
+            message = f"I completed and verified {complete} step(s), but the remaining goal is blocked."
+        else:
+            message = f"I created a bounded {len(public['steps'])}-step task. Current state: {state.replace('_', ' ')}."
+        return self._runtime_truth_response(
+            text=message,
+            route="task_loop",
+            used_runtime_state=True,
+            used_tools=["task_coordinator", *[step["capability_id"] for step in public["steps"]]],
+            ok=state not in {TaskState.FAILED.value, TaskState.INDETERMINATE.value},
+            error_kind=("task_incomplete" if state in {TaskState.BLOCKED.value, TaskState.PARTIALLY_COMPLETED.value} else None),
+            payload={"type": "task_progress", "summary": message, "task": public, "missing_capability": missing_capability},
+            skip_post_response_hooks=True,
+        )
+
+    def _model_substantial_task_response(
+        self,
+        user_id: str,
+        text: str,
+        *,
+        thread_id: str,
+        session_id: str,
+        trace_id: str,
+    ) -> OrchestratorResponse | None:
+        boundaries = re.split(r"(?:;+|(?<!\.)\.(?!\.)\s+|[!?]+\s+|\b(?:and then|then|also)\b)", str(text or ""), flags=re.IGNORECASE)
+        if len([item for item in boundaries if item.strip()]) < 2:
+            return None
+        try:
+            proposed = self._general_task_planner.propose(
+                goal=text, actor_id=user_id, registry=self._capability_registry,
+                llm_client=self.llm_client, trace_id=trace_id,
+            )
+        except Exception as exc:
+            proposed = {"ok": False, "kind": "blocked", "error": f"task_planner_rejected:{exc.__class__.__name__}"}
+        if not bool(proposed.get("ok")):
+            message = "I can still handle direct registered requests, but I could not safely generate a new multi-step plan right now. No action ran."
+            return self._runtime_truth_response(
+                text=message, route="task_planning", used_runtime_state=True, used_llm=True,
+                used_tools=["general_task_planner"], ok=False,
+                error_kind=str(proposed.get("error") or "task_planner_unavailable"),
+                payload={"type": "task_planning_blocked", "summary": message, "mutated": False},
+            )
+        kind = str(proposed.get("kind") or "")
+        if kind == "missing":
+            message = "I cannot safely complete that outcome with the capabilities registered in this runtime. I recorded the missing-capability handoff; I did not fetch, install, enable, execute, or create a pack."
+            return self._runtime_truth_response(
+                text=message, route="task_missing_capability", used_runtime_state=True, used_llm=True,
+                used_tools=["general_task_planner", "capability_registry"], ok=False,
+                error_kind="missing_capability",
+                payload={"type": "missing_capability", "summary": message, "missing_capability": proposed.get("missing_capability"), "mutated": False},
+            )
+        if kind == "clarify":
+            question = str(proposed.get("question") or "What outcome should I use?")
+            return self._runtime_truth_response(
+                text=question, route="task_planning", used_runtime_state=False, used_llm=True,
+                used_tools=["general_task_planner"], next_question=question,
+                payload={"type": "task_information_required", "summary": question},
+            )
+        if kind != "plan" or not isinstance(proposed.get("proposal"), Mapping):
+            return None
+        try:
+            task = self._task_coordinator.create(
+                proposed["proposal"], actor_id=user_id, session_id=session_id, thread_id=thread_id,
+            )
+            task = self._task_coordinator.run(str(task["task_id"]), actor_id=user_id, thread_id=thread_id)
+        except Exception as exc:
+            message = "The proposed plan failed strict validation, so I did not run it."
+            return self._runtime_truth_response(
+                text=message, route="task_planning", used_runtime_state=True, used_llm=True,
+                used_tools=["general_task_planner"], ok=False, error_kind="task_plan_rejected",
+                payload={"type": "task_plan_rejected", "summary": message, "reason": str(exc)[:200], "mutated": False},
+            )
+        public = self._task_public_payload(task)
+        message = f"I created the bounded plan using one planning generation. Current state: {public['state'].replace('_', ' ')}."
+        return self._runtime_truth_response(
+            text=message, route="task_loop", used_runtime_state=True, used_llm=True,
+            used_tools=["general_task_planner", "task_coordinator"],
+            payload={"type": "task_progress", "summary": message, "task": public, "planning_generations": 1},
+        )
+
+    def _model_task_planning_warranted(self, user_id: str, text: str, *, thread_id: str) -> bool:
+        """Use structured complexity, not trigger phrases, for model planning."""
+
+        clauses = [
+            part.strip(" ,.;")
+            for part in re.split(r"(?:;+|(?<!\.)\.(?!\.)\s+|[!?]+\s+|\b(?:and then|then|also)\b)", str(text or ""), flags=re.IGNORECASE)
+            if part.strip(" ,.;")
+        ]
+        if len(clauses) < 2:
+            return False
+        materially_understood = 0
+        for clause in clauses[:8]:
+            understood = self._understand_conversation_request(user_id, clause, thread_id=thread_id)
+            if understood.selected_capability_id or (
+                understood.candidates and float(understood.candidates[0].score) >= 0.50
+            ):
+                materially_understood += 1
+        # Two semantic goal signals warrant one planning proposal. A long,
+        # genuinely compound unknown goal may also be proposed, while short
+        # multi-sentence conversation remains on ordinary chat.
+        return materially_understood >= 2 or (len(clauses) >= 3 and len(str(text).split()) >= 40)
 
     @staticmethod
     def _with_request_understanding(response: OrchestratorResponse, understanding: RequestUnderstanding) -> OrchestratorResponse:
@@ -5150,6 +5653,125 @@ class Orchestrator:
         )
 
     def _execute_confirmed_native_mutation(self, user_id: str, action: dict[str, Any]) -> OrchestratorResponse:
+        thread_id = str(action.get("thread_id") or "").strip() or self._active_thread_id_for_user(user_id)
+        task = self._task_coordinator.store.active_for_thread(actor_id=user_id, thread_id=thread_id)
+        if task is not None and str(task.get("state") or "") == TaskState.AWAITING_APPROVAL.value:
+            current = int(task.get("current_step") or 0)
+            steps = task.get("steps") if isinstance(task.get("steps"), list) else []
+            if current < len(steps):
+                approval_step = steps[current]
+                approval_definition = self._capability_registry.require(str(approval_step.get("capability_id") or ""))
+                try:
+                    self._task_coordinator.store.consume_approval(
+                        str(task["task_id"]),
+                        actor_id=user_id,
+                        thread_id=thread_id,
+                        capability_id=approval_definition.capability_id,
+                        inputs=approval_step.get("inputs") or {},
+                        health_state=approval_definition.health().state.value,
+                    )
+                    task = self._task_coordinator.store.transition(
+                        str(task["task_id"]), TaskState.RUNNING,
+                        event="task.mutation_dispatching",
+                        payload={"step_id": approval_step.get("step_id"), "capability_id": approval_definition.capability_id},
+                    )
+                    self._task_coordinator.store.update_step(
+                        str(task["task_id"]), str(approval_step.get("step_id") or ""), status="dispatched",
+                    )
+                except PermissionError as exc:
+                    message = "I blocked that task approval because its exact plan, target, binding, expiry, or runtime preconditions changed. No task mutation ran."
+                    return self._runtime_truth_response(
+                        text=message,
+                        route="task_control",
+                        used_runtime_state=True,
+                        used_tools=["task_coordinator"],
+                        ok=False,
+                        error_kind=str(exc),
+                        payload={"type": "task_approval_rejected", "summary": message, "task": self._task_public_payload(task), "mutated": False},
+                        skip_post_response_hooks=True,
+                    )
+        response = self._execute_confirmed_native_mutation_impl(user_id, action)
+        if task is None or str(task.get("state") or "") != TaskState.RUNNING.value:
+            return response
+        current = int(task.get("current_step") or 0)
+        steps = task.get("steps") if isinstance(task.get("steps"), list) else []
+        if current >= len(steps):
+            return response
+        step = steps[current]
+        definition = self._capability_registry.require(str(step.get("capability_id") or ""))
+        if definition.mode is not CapabilityMode.MUTATING:
+            return response
+        response_data = response.data if isinstance(response.data, dict) else {}
+        runtime_payload = response_data.get("runtime_payload") if isinstance(response_data.get("runtime_payload"), dict) else {}
+        execution_ok = bool(response_data.get("ok", True)) and not bool(response_data.get("error_kind"))
+        if not execution_ok:
+            failure = {
+                "classification": "indeterminate" if str(response_data.get("error_kind") or "") in {"timeout", "upstream_timeout", "indeterminate"} else "deterministic_failure",
+                "reason": str(response_data.get("error_kind") or runtime_payload.get("error") or "mutation_execution_failed")[:200],
+                "capability_id": definition.capability_id,
+            }
+            self._task_coordinator.store.update_step(
+                str(task["task_id"]), str(step["step_id"]), status="indeterminate" if failure["classification"] == "indeterminate" else "failed",
+                result={"summary": response.text, "data": runtime_payload}, verifier_status="fail", failure=failure,
+            )
+            self._task_coordinator.store.set_failure_outcome(str(task["task_id"]), failure=failure)
+            target = TaskState.INDETERMINATE if failure["classification"] == "indeterminate" else TaskState.FAILED
+            task = self._task_coordinator.store.transition(str(task["task_id"]), target, event="task.mutation_failed", payload=failure)
+        else:
+            registry_verified = bool(definition.verification_hook(response))
+            independent = (
+                dict(definition.independent_verification_hook(step.get("inputs") or {}, response))
+                if definition.independent_verification_hook is not None
+                else {"ok": False, "reason": "independent_verifier_missing"}
+            )
+            evidence = {
+                "schema_version": "personal-agent.task.v1",
+                "capability_id": definition.capability_id,
+                "registry_verified": registry_verified,
+                "independent_observation": independent,
+                "recorded_at": datetime.now(timezone.utc).isoformat(),
+            }
+            if not registry_verified or not bool(independent.get("ok")):
+                failure = {"classification": "verification_failure", "reason": "mutation_not_independently_observed", "capability_id": definition.capability_id}
+                self._task_coordinator.store.update_step(str(task["task_id"]), str(step["step_id"]), status="failed", result={"summary": response.text, "data": runtime_payload}, evidence=evidence, verifier_status="fail", failure=failure)
+                self._task_coordinator.store.set_failure_outcome(str(task["task_id"]), failure=failure)
+                task = self._task_coordinator.store.transition(str(task["task_id"]), TaskState.FAILED, event="task.mutation_verification_failed", payload=failure)
+            else:
+                self._task_coordinator.store.update_step(str(task["task_id"]), str(step["step_id"]), status="completed", result={"summary": response.text, "data": runtime_payload}, evidence=evidence, verifier_status="pass")
+                self._task_coordinator.store.advance_step(str(task["task_id"]))
+                interim = self._task_coordinator.store.get(str(task["task_id"])) or task
+                self._task_coordinator.store.transition(str(task["task_id"]), TaskState.VERIFYING, event="task.mutation_verified")
+                if int(interim.get("current_step") or 0) >= len(interim.get("steps") or []):
+                    verified = all(str(row.get("verifier_status") or "") == "pass" for row in interim.get("steps") or [])
+                    if verified:
+                        prior_failure = interim.get("failure") if isinstance(interim.get("failure"), Mapping) else {}
+                        if str(prior_failure.get("classification") or "") == "missing_capability":
+                            task = self._task_coordinator.store.transition(
+                                str(task["task_id"]), TaskState.PARTIALLY_COMPLETED,
+                                event="task.verified_partial_complete",
+                                payload={"remaining_blocker": "missing_capability"},
+                            )
+                        else:
+                            outcome = {"schema_version": "personal-agent.task.v1", "status": "succeeded", "verified": True, "criteria_met": interim.get("success_criteria") or []}
+                            self._task_coordinator.store.set_failure_outcome(str(task["task_id"]), outcome=outcome)
+                            task = self._task_coordinator.store.transition(str(task["task_id"]), TaskState.SUCCEEDED, event="task.verified_complete")
+                    else:
+                        task = self._task_coordinator.store.transition(str(task["task_id"]), TaskState.FAILED, event="task.overall_verification_failed")
+                else:
+                    self._task_coordinator.store.transition(str(task["task_id"]), TaskState.RUNNING, event="task.next_step_ready")
+                    self._task_coordinator.store.transition(str(task["task_id"]), TaskState.RECOVERING, event="task.continuation_scheduled")
+                    self._task_coordinator.store.transition(str(task["task_id"]), TaskState.READY, event="task.continuation_ready")
+                    task = self._task_coordinator.run(str(task["task_id"]), actor_id=user_id, thread_id=thread_id)
+        public = self._task_public_payload(task)
+        data = dict(response_data)
+        data["runtime_payload"] = {**runtime_payload, "task": public}
+        if str(public.get("state")) == TaskState.SUCCEEDED.value:
+            return OrchestratorResponse(f"{response.text}\n\nThe full task is completed and independently verified.", data)
+        if str(public.get("state")) in {TaskState.FAILED.value, TaskState.INDETERMINATE.value}:
+            return OrchestratorResponse(f"{response.text}\n\nI did not mark the task complete because its required verification did not pass.", data)
+        return OrchestratorResponse(response.text, data)
+
+    def _execute_confirmed_native_mutation_impl(self, user_id: str, action: dict[str, Any]) -> OrchestratorResponse:
         operation = str(action.get("operation") or "").strip().lower()
         params = action.get("params") if isinstance(action.get("params"), dict) else {}
         canonical_plan_for_status = action.get("canonical_plan") if isinstance(action.get("canonical_plan"), dict) else {}
@@ -6343,6 +6965,12 @@ class Orchestrator:
                 "cannot access external information",
                 "i have no external access",
                 "i don't have external access",
+                "unable to access real-time information",
+                "cannot access real-time information",
+                "unable to access real time information",
+                "cannot access real time information",
+                "unable to access external data",
+                "cannot access external data",
             ),
             "physical_sensory_disclaimer": (
                 "i do not have a physical form",
@@ -24130,6 +24758,18 @@ class Orchestrator:
                     except Exception:
                         pass
             normalized_effective_user_text = " ".join(str(effective_user_text or "").strip().lower().split())
+            task_thread_id = str(context.get("thread_id") or "").strip() or self._active_thread_id_for_user(user_id)
+            task_payload = context.get("payload") if isinstance(context.get("payload"), dict) else {}
+            task_session_id = str(task_payload.get("session_id") or "").strip()
+            if not cmd:
+                active_task_response = self._active_task_chat_response(
+                    user_id,
+                    effective_user_text,
+                    thread_id=task_thread_id,
+                    session_id=task_session_id,
+                )
+                if active_task_response is not None:
+                    return active_task_response
             if not cmd and self._looks_like_primary_uninstall_policy_request(effective_user_text):
                 return self._primary_uninstall_policy_status_response(user_id, effective_user_text)
             if not cmd and self._looks_like_capability_policy_request(effective_user_text):
@@ -24185,6 +24825,28 @@ class Orchestrator:
                 if onboarding_response is not None:
                     return onboarding_response
                 context["request_understanding"] = understanding.public_audit()
+                substantial_task_response = self._substantial_task_response(
+                    user_id,
+                    effective_user_text,
+                    thread_id=task_thread_id,
+                    session_id=task_session_id,
+                )
+                if substantial_task_response is not None:
+                    return substantial_task_response
+                if (
+                    not understanding.selected_capability_id
+                    and not understanding.clarification
+                    and self._model_task_planning_warranted(user_id, effective_user_text, thread_id=task_thread_id)
+                ):
+                    model_task_response = self._model_substantial_task_response(
+                        user_id,
+                        effective_user_text,
+                        thread_id=task_thread_id,
+                        session_id=task_session_id,
+                        trace_id=str(context.get("trace_id") or f"task-plan-{uuid.uuid4().hex[:8]}"),
+                    )
+                    if model_task_response is not None:
+                        return model_task_response
                 # Deterministic confirmation/cancellation and explicit command
                 # guards have already run above.  From this point a unified
                 # selection is final: compatibility classifiers may service an

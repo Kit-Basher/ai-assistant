@@ -323,10 +323,40 @@ function extractCapabilityUi(payload) {
   return null;
 }
 
+export function extractTaskUi(payload) {
+  const task = payload?.setup?.task;
+  if (!task || typeof task !== "object") return null;
+  const allowedStates = new Set([
+    "planning", "proposed", "ready", "awaiting_information", "awaiting_approval", "running", "verifying",
+    "paused", "blocked", "recovering", "succeeded", "partially_completed", "failed", "denied", "cancelled", "expired", "indeterminate"
+  ]);
+  const state = String(task.state || "").trim();
+  if (!allowedStates.has(state)) return null;
+  return {
+    schema_version: String(task.schema_version || "personal-agent.task.v1"),
+    task_id: String(task.task_id || ""),
+    goal: String(task.goal || "Task").slice(0, 2000),
+    state,
+    revision: Number(task.revision || 0),
+    plan_version: Number(task.plan_version || 0),
+    current_step: Number(task.current_step || 0),
+    steps: Array.isArray(task.steps)
+      ? task.steps.slice(0, 8).map((step) => ({
+          step_id: String(step?.step_id || ""),
+          capability_id: String(step?.capability_id || ""),
+          status: String(step?.status || "pending"),
+          mode: String(step?.mode || "read_only"),
+          verifier_status: step?.verifier_status ? String(step.verifier_status) : null
+        }))
+      : []
+  };
+}
+
 export function buildAssistantMessage(payload) {
   const text = extractAssistantText(payload);
   const setup = payload?.setup && typeof payload.setup === "object" ? payload.setup : null;
   const capability = extractCapabilityUi(payload);
+  const task = extractTaskUi(payload);
   const capabilityImportConfirmation =
     capability?.type === "preview" && capability.importOffered
       ? {
@@ -363,6 +393,7 @@ export function buildAssistantMessage(payload) {
       confirmation,
       clarification,
       capability,
+      task,
       operationState: confirmation ? "waiting_for_confirmation" : failed ? "failed" : "complete"
     }
   };

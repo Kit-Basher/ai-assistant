@@ -87,7 +87,10 @@ class TestPlanModePolicy(unittest.TestCase):
         return {
             **dict(plan_payload.get("operation_payload") or {}),
             "mutation_plan": plan,
-            "confirmation": build_mutation_confirmation(plan, confirmation_id="explicit-plan-policy-confirmation"),
+            "confirmation": build_mutation_confirmation(
+                plan,
+                confirmation_id=f"explicit-plan-policy-confirmation-{plan.get('plan_id')}",
+            ),
         }
 
     def test_unknown_operations_default_to_mutating(self) -> None:

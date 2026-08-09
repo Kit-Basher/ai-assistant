@@ -10345,6 +10345,58 @@ class AgentRuntime:
             }
         return True, {"ok": True, "thread": thread}
 
+    def task_list(self, payload: dict[str, Any]) -> dict[str, Any]:
+        user_id = self._chat_user_id(payload)
+        thread_id = str(payload.get("thread_id") or "").strip() or None
+        try:
+            limit = min(50, max(1, int(payload.get("limit") or 20)))
+        except (TypeError, ValueError):
+            limit = 20
+        with self._orchestrator_lock:
+            tasks = self.orchestrator().task_list(
+                user_id=user_id, thread_id=thread_id, limit=limit,
+                advanced=str(payload.get("advanced") or "").strip().lower() in {"1", "true", "yes"},
+            )
+        return {"ok": True, "tasks": tasks, "count": len(tasks), "source": "canonical_task_store"}
+
+    def task_get(self, task_id: str, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        user_id = self._chat_user_id(payload)
+        thread_id = str(payload.get("thread_id") or "").strip() or None
+        with self._orchestrator_lock:
+            task = self.orchestrator().task_get(
+                task_id, user_id=user_id, thread_id=thread_id,
+                advanced=str(payload.get("advanced") or "").strip().lower() in {"1", "true", "yes"},
+            )
+        if task is None:
+            return False, {"ok": False, "error": "task_not_found", "message": "That task was not found for this session/thread."}
+        return True, {"ok": True, "task": task, "source": "canonical_task_store"}
+
+    def task_control(self, task_id: str, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        user_id = self._chat_user_id(payload)
+        session_id = str(payload.get("session_id") or "").strip()
+        thread_id = str(payload.get("thread_id") or "").strip() or self._chat_thread_id(payload, user_id=user_id)
+        action = str(payload.get("action") or "").strip().lower()
+        if action not in {"cancel", "pause", "resume"}:
+            return False, {"ok": False, "error": "task_control_invalid", "message": "Use cancel, pause, or resume."}
+        try:
+            revision = int(payload["revision"]) if payload.get("revision") is not None else None
+            with self._orchestrator_lock:
+                task = self.orchestrator().task_control(
+                    task_id,
+                    action=action,
+                    user_id=user_id,
+                    session_id=session_id,
+                    thread_id=thread_id,
+                    expected_revision=revision,
+                )
+        except KeyError:
+            return False, {"ok": False, "error": "task_not_found", "message": "That task was not found."}
+        except PermissionError:
+            return False, {"ok": False, "error": "task_binding_mismatch", "message": "That task belongs to another session or thread."}
+        except (ValueError, RuntimeError) as exc:
+            return False, {"ok": False, "error": str(exc), "message": "That control is not valid for the task's current state."}
+        return True, {"ok": True, "task": task, "source": "canonical_task_store"}
+
     @staticmethod
     def _payload_setup_state_hint(payload: dict[str, Any]) -> dict[str, Any]:
         hint = payload.get("setup_state_hint")
@@ -24384,6 +24436,28 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 ok, body = self.runtime.chat_thread(urllib.parse.unquote(parts[2]), payload)
                 self._send_json(200 if ok else 404, body)
                 return
+            if path == "/tasks":
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                payload = {
+                    "limit": query.get("limit", [20])[0],
+                    "session_id": query.get("session_id", [None])[0],
+                    "thread_id": query.get("thread_id", [None])[0],
+                    "source_surface": query.get("source_surface", ["webui"])[0],
+                    "advanced": query.get("advanced", [None])[0],
+                }
+                self._send_json(200, self.runtime.task_list(payload))
+                return
+            if len(parts) == 2 and parts[0] == "tasks":
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                payload = {
+                    "session_id": query.get("session_id", [None])[0],
+                    "thread_id": query.get("thread_id", [None])[0],
+                    "source_surface": query.get("source_surface", ["webui"])[0],
+                    "advanced": query.get("advanced", [None])[0],
+                }
+                ok, body = self.runtime.task_get(urllib.parse.unquote(parts[1]), payload)
+                self._send_json(200 if ok else 404, body)
+                return
             if path.startswith("/filesystem/"):
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
@@ -24773,6 +24847,10 @@ class APIServerHandler(BaseHTTPRequestHandler):
                     max_bytes_per_file=payload.get("max_bytes_per_file", 8192),
                 )
                 self._send_json(self._filesystem_http_status(body), body)
+                return
+            if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "control":
+                ok, body = self.runtime.task_control(urllib.parse.unquote(parts[1]), payload)
+                self._send_json(200 if ok else 409, body)
                 return
             internal_claim = reject_public_internal_authority_claim(payload)
             if internal_claim:

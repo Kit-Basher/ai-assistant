@@ -1,6 +1,6 @@
 {
   "schema": "personal-agent.mutation-file-classification.v2b",
-  "reviewed_count": 162,
+  "reviewed_count": 165,
   "required_fields": [
     "path",
     "disposition",
@@ -2446,6 +2446,51 @@
       "rollback_scope": "generated build reports and temporary proof state only",
       "audit_evidence": "tests/test_native_capability_proof.py and canonical release gate",
       "contract_identity": "not_applicable"
+    },
+    {
+      "path": "agent/task_loop.py",
+      "disposition": "central_authorized",
+      "capability": "conversation.history",
+      "entry_point": "TaskCoordinator and TaskStore through orchestrator chat/task surfaces",
+      "actor": "bound chat/API user and canonical runtime",
+      "target_resources": "canonical SQLite task, step, event, and exact approval records",
+      "mutation_type": "durable task state transitions and registry-governed capability dispatch",
+      "policy_path": "validated task state machine plus live CapabilityRegistry mode, permission, approval, health, and verifier contracts",
+      "executor": "TaskCoordinator; mutating capability execution remains in the existing central confirmation/executor boundary",
+      "confirmation_requirements": "exact plan/version/hash, mutation inputs, actor/session/thread, health preconditions, and expiry",
+      "rollback_scope": "task-record transaction rollback only; capability compensation exists only when explicitly registered",
+      "audit_evidence": "tests/test_general_task_loop.py, tests/test_task_loop_properties.py, and tests/test_wp3_scenarios.py",
+      "contract_identity": "personal-agent.task.v1"
+    },
+    {
+      "path": "scripts/task_loop_proof.py",
+      "disposition": "offline_tool",
+      "capability": "developer.task_loop_proof",
+      "entry_point": "explicit command-line main and release-gate subprocess",
+      "actor": "developer/release operator",
+      "target_resources": "temporary proof state plus generated redacted task-loop reports",
+      "mutation_type": "deterministic proof execution and report generation",
+      "policy_path": "not imported by shipping runtime; canonical gate binds results to source fingerprint",
+      "executor": "script-owned registry/manifest reconciler and focused test runner",
+      "confirmation_requirements": "explicit command or canonical release-gate invocation",
+      "rollback_scope": "generated build reports and temporary proof state only",
+      "audit_evidence": "tests/test_task_loop_proof.py and canonical release gate",
+      "contract_identity": "task-loop-proof-report.v1"
+    },
+    {
+      "path": "scripts/wp3_latency_probe.py",
+      "disposition": "offline_tool",
+      "capability": "developer.performance_probe",
+      "entry_point": "explicit command-line main",
+      "actor": "developer/release operator",
+      "target_resources": "explicit loopback candidate API and generated benchmark report",
+      "mutation_type": "bounded chat/task benchmark transcript writes and report generation",
+      "policy_path": "not imported by shipping runtime; explicit URL and sample count required",
+      "executor": "script-owned bounded HTTP sampler",
+      "confirmation_requirements": "explicit command invocation",
+      "rollback_scope": "temporary candidate state and generated report only",
+      "audit_evidence": "WP3 before/after median and p95 reports",
+      "contract_identity": "wp3-latency.v1"
     }
   ]
 }

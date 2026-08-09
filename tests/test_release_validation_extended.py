@@ -60,7 +60,9 @@ class TestReleaseValidationExtended(unittest.TestCase):
         def _fake_temp_live_api_server():  # noqa: ANN001
             yield "http://127.0.0.1:54321"
 
-        with patch.object(module, "run_extended_suite", return_value=0), patch.object(
+        with patch.object(module, "run_native_capability_proof", return_value=0), patch.object(
+            module, "run_task_loop_proof", return_value=0,
+        ), patch.object(module, "run_extended_suite", return_value=0), patch.object(
             module,
             "run_live_product_smoke",
             side_effect=_fake_live_product_smoke,
@@ -125,7 +127,9 @@ class TestReleaseValidationExtended(unittest.TestCase):
 
     def test_release_validation_extended_skips_live_smokes_when_not_requested(self) -> None:
         module = _load_module(REPO_ROOT / "scripts" / "release_validation_extended.py", "release_validation_extended_script_skip")
-        with patch.object(module, "run_extended_suite", return_value=0), patch.object(
+        with patch.object(module, "run_native_capability_proof", return_value=0), patch.object(
+            module, "run_task_loop_proof", return_value=0,
+        ), patch.object(module, "run_extended_suite", return_value=0), patch.object(
             module,
             "run_restart_memory_smoke",
             side_effect=AssertionError("restart smoke should not run without --with-live-smokes"),
@@ -186,7 +190,9 @@ class TestReleaseValidationExtended(unittest.TestCase):
         def _fake_temp_live_api_server():  # noqa: ANN001
             yield "http://127.0.0.1:54321"
 
-        with patch.object(module, "run_extended_suite", return_value=0), patch.object(
+        with patch.object(module, "run_native_capability_proof", return_value=0), patch.object(
+            module, "run_task_loop_proof", return_value=0,
+        ), patch.object(module, "run_extended_suite", return_value=0), patch.object(
             module,
             "run_restart_memory_smoke",
             side_effect=_fake_restart_memory_smoke,

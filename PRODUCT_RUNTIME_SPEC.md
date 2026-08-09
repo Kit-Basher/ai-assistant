@@ -27,6 +27,8 @@ the project intent document, project intent wins.
 ## 3. Runtime Model
 - `RuntimeTruthService` is the canonical runtime truth source.
 - The orchestrator owns assistant routing and grounded response rendering.
+- The durable task coordinator sequences substantial goals above the live
+  `CapabilityRegistry`; the registry remains the sole action authority.
 - The selector/scout owns canonical advisory computation.
 - The controller owns explicit model actions.
 - The canonical model manager owns install/acquire execution.
@@ -135,7 +137,7 @@ the project intent document, project intent wins.
   - bounded directory creation
 - External pack ingestion is bounded:
   - quarantined first
-  - remote fetch is allowed only for explicit supported `https` archive sources
+  - ingress accepts an explicitly supplied local text-pack directory only
   - static-scanned before any normalization
   - portable text skills only in this pass
   - canonical content identity is authoritative for normalized packs
@@ -157,6 +159,34 @@ the project intent document, project intent wins.
 - Execution happens only after explicit confirmation.
 - This applies across controller-backed model changes and current mutating
   native shell actions.
+- Task approval binds the exact plan version/hash, mutating capability and typed
+  inputs, health/policy preconditions, actor/session/thread, and expiry. A
+  changed plan or target invalidates the approval.
+
+## 7A. General Task Coordination
+
+- Casual turns and one-capability requests remain on the direct path.
+- A substantial goal may create a versioned plan with at most 8 ordered steps,
+  3 plan versions, 2 replans, 16 total capability calls, one model planning
+  generation per plan version, and 900 seconds wall time.
+- Every executable step names a task-composable live registry capability and
+  crosses that capability's typed input, health, permission, mode, invocation,
+  and verification contracts. Model text cannot introduce endpoints, raw shell,
+  approval, evidence, or capabilities.
+- Task state, steps, exact approval bindings, bounded evidence, and audit-safe
+  progress events live in the canonical SQLite database. Terminal history is
+  bounded to 200 tasks.
+- Read-only work may be retried once only when its registry contract declares it
+  safe. Mutations are never blindly retried; a restart after dispatch becomes
+  indeterminate until independently reconciled.
+- Completion requires registry verification plus task evidence. Failed or absent
+  verification produces a distinct failed, blocked, partial, or indeterminate
+  result rather than completion prose.
+- `GET /tasks`, `GET /tasks/<id>`, and `POST /tasks/<id>/control` expose the same
+  durable records used by chat and the Web UI task card.
+- A missing capability produces `personal-agent.missing-capability.v1`; it does
+  not trigger pack discovery, acquisition, installation, creation, enablement,
+  or execution.
 
 ## 8. Discovery / Proposal / Policy Model
 - Discovery is separate from canonical selector truth.
@@ -244,9 +274,15 @@ the project intent document, project intent wins.
 - Background full-disk indexing or unrestricted scanning.
 - Legacy root/system packaging.
 - Duplicate recommendation or controller paths.
+- Executable/declarative pack workers, automatic pack acquisition, and
+  assistant-created capabilities (deferred to later work packages).
 
 ## 11. Release Confidence
 - The canonical release gate is `python scripts/release_gate.py`.
+- It dynamically runs `scripts/task_loop_proof.py`, which reconciles all 22
+  task-composable capabilities with required state, approval, restart,
+  verification, adversarial, and scenario proofs for the current source
+  fingerprint.
 - The fast pre-check inside that gate is `python scripts/release_smoke.py`.
 - Run it before calling a build releasable and after risky install/upgrade work.
 - It is intended to prove the coherent product path plus the main

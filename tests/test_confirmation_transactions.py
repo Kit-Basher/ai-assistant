@@ -38,7 +38,7 @@ def _fixture_plan(plan_id: str = "cross-process-plan") -> tuple[dict, dict]:
         "executor_status": "enabled",
         "risk_level": "medium",
     }
-    confirmation = build_mutation_confirmation(mutation_plan, confirmation_id="confirmation-one")
+    confirmation = build_mutation_confirmation(mutation_plan, confirmation_id=f"confirmation-{plan_id}")
     return wrapper, confirmation
 
 
@@ -110,6 +110,26 @@ def test_two_processes_consume_one_confirmation_once() -> None:
         assert sum(1 for ok, _reason in results if ok) == 1
         assert sum(1 for ok, _reason in results if not ok) == 1
         assert len((Path(raw) / "effects.log").read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_confirmation_id_is_single_use_across_distinct_exact_plans() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        store = ConfirmationTransactionStore(Path(raw) / "confirmations.sqlite3")
+        first_wrapper, first_confirmation = _fixture_plan("first-plan")
+        second_wrapper, _second_confirmation = _fixture_plan("second-plan")
+        second_confirmation = build_mutation_confirmation(
+            second_wrapper["mutation_plan"],
+            confirmation_id=first_confirmation["confirmation_id"],
+        )
+        assert first_wrapper["mutation_plan"]["plan_fingerprint"] != second_wrapper["mutation_plan"]["plan_fingerprint"]
+        assert first_confirmation["confirmation_id"] == second_confirmation["confirmation_id"]
+
+        first = store.reserve(plan=first_wrapper["mutation_plan"], confirmation=first_confirmation)
+        second = store.reserve(plan=second_wrapper["mutation_plan"], confirmation=second_confirmation)
+
+        assert first.allowed
+        assert not second.allowed
+        assert second.reason_code == "mutation_confirmation_in_progress"
 
 
 def test_stale_reserved_and_executing_states_never_retry() -> None:
@@ -240,7 +260,7 @@ def test_schema_is_idempotent_restrictive_and_legacy_rows_migrate() -> None:
             keeper.close()
 
 
-def test_separate_transaction_schema_does_not_modify_schema_v2_agent_database() -> None:
+def test_separate_transaction_schema_does_not_modify_schema_v3_agent_database() -> None:
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
         database = MemoryDB(str(root / "agent.db"))
@@ -252,7 +272,7 @@ def test_separate_transaction_schema_does_not_modify_schema_v2_agent_database() 
         with sqlite3.connect(root / "agent.db") as connection:
             assert connection.execute(
                 "SELECT value FROM schema_meta WHERE key = 'schema_version'"
-            ).fetchone()[0] == "2"
+            ).fetchone()[0] == "3"
 
 
 def test_transaction_boundary_revalidates_scope_before_creating_a_row() -> None:

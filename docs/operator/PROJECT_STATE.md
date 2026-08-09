@@ -5,19 +5,23 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Version: `v0.2.11` candidate (Work Package 2)
-- Baseline: completed WP1 commit `11efebb8d963aa2a566e47bd7c451a93486e45a4`
-- Working live runtime while the corrected candidate is proved: `v0.2.10`
+- Version: `v0.2.12` candidate (Work Package 3)
+- Baseline: completed WP2 commit `ddff7a03017d5c6d23e5d7d076a22c374bcb75f2`
+- Working live runtime while the candidate is proved: `v0.2.11`
 - Capability truth: the live registry plus
   `config/native_capabilities.json`, enforced by
   `scripts/native_capability_proof.py`
 - Registered native user-goal capabilities: 22
-- Release status: candidate only until all WP2 gates, isolated verification,
+- Task authority: the live registry remains sole action authority; the bounded
+  coordinator adds durable sequencing, exact task approval, verifier evidence,
+  restart reconciliation, and `/tasks`/Web UI control without new action tools.
+- Release status: candidate only until all WP3 gates, isolated verification,
   exact-SHA promotion, and live verification pass.
 
 See `docs/design/NATIVE_CAPABILITY_CENSUS_WP2.md` for the census,
 reconciliation, proof profiles, surface mappings, and explicit unsupported
-boundaries.
+boundaries. See `docs/design/GENERAL_TASK_LOOP_WP3.md` for the WP3 state,
+schema, approval, recovery, API/UI, and WP4/WP5 exclusion contract.
 
 ## Historical checkpoints
 

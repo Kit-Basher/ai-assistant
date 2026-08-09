@@ -1500,7 +1500,66 @@ button.button-danger:not(:disabled):hover {
   }
 }
 
+.task-progress-card {
+  margin: 12px 16px 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--panel, var(--surface));
+}
+
+.task-progress-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.task-progress-heading h3 {
+  margin: 2px 0 8px;
+  font-size: 1rem;
+}
+
+.task-state {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 8px;
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.task-step-list {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 12px;
+  padding-left: 20px;
+}
+
+.task-step {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.task-step small {
+  color: var(--muted);
+}
+
+.task-step-completed {
+  color: var(--success, #238636);
+}
+
 @media (max-width: 640px) {
+  .task-progress-card {
+    margin-inline: 8px;
+  }
+
+  .task-progress-heading,
+  .task-step {
+    grid-template-columns: 1fr;
+    flex-direction: column;
+  }
   .product-topbar h1 {
     font-size: 2rem;
   }

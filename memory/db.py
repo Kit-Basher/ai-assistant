@@ -70,7 +70,7 @@ class PendingClarificationRecord:
 
 
 class MemoryDB:
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
     GRAPH_IMPORT_MAX_NODES = 200
     GRAPH_IMPORT_MAX_EDGES = 500
     GRAPH_IMPORT_MAX_ALIASES = 300

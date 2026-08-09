@@ -24,6 +24,8 @@ InvocationHook = Callable[[Mapping[str, Any]], Any]
 VerificationHook = Callable[[Any], bool]
 HealthHook = Callable[[], tuple[bool, str | None]]
 SelfTestHook = Callable[[], Mapping[str, Any]]
+IndependentVerificationHook = Callable[[Mapping[str, Any], Any], Mapping[str, Any]]
+TaskInputValidationHook = Callable[[Mapping[str, Any]], tuple[bool, str | None]]
 
 
 class CapabilityHealthState(str, Enum):
@@ -111,6 +113,13 @@ class CapabilityDefinition:
     proof_nodes: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     self_test_hook: SelfTestHook | None = None
     chat_selectable: bool = True
+    task_composable: bool = True
+    retry_safety: str = "never"
+    max_task_retries: int = 0
+    resume_policy: str = "never"
+    independent_verification_hook: IndependentVerificationHook | None = None
+    compensation_capability_id: str | None = None
+    task_input_validation_hook: TaskInputValidationHook | None = None
 
     def availability(self) -> tuple[bool, str | None]:
         health = self.health()
@@ -161,6 +170,14 @@ class CapabilityRegistry:
             raise ValueError(f"capability_metadata_incomplete:{capability_id}")
         if definition.mode is CapabilityMode.MUTATING and definition.approval_policy is not ApprovalPolicy.REQUIRED:
             raise ValueError(f"mutating_capability_requires_approval:{capability_id}")
+        if definition.retry_safety not in {"read_only_safe", "idempotent", "never", "reconcile_first"}:
+            raise ValueError(f"capability_retry_safety_invalid:{capability_id}")
+        if definition.mode is CapabilityMode.MUTATING and definition.retry_safety == "read_only_safe":
+            raise ValueError(f"mutating_capability_retry_safety_invalid:{capability_id}")
+        if not 0 <= int(definition.max_task_retries) <= 2:
+            raise ValueError(f"capability_task_retry_bound_invalid:{capability_id}")
+        if definition.resume_policy not in {"revalidate", "never", "reconcile_first"}:
+            raise ValueError(f"capability_resume_policy_invalid:{capability_id}")
         self._items[capability_id] = definition
 
     def get(self, capability_id: str) -> CapabilityDefinition | None:
@@ -187,6 +204,17 @@ class CapabilityRegistry:
         if not definition.verification_hook(result):
             raise RuntimeError("capability_result_verification_failed")
         return result
+
+    def preview_mutation(self, capability_id: str, inputs: Mapping[str, Any] | None) -> Any:
+        """Invoke only the registered mutation preview boundary.
+
+        This does not grant approval.  The capability hook must return its
+        canonical preview; execution remains owned by the confirmation path.
+        """
+        definition, validated = self.validate_selection(capability_id, inputs)
+        if definition.mode is not CapabilityMode.MUTATING:
+            raise ValueError("capability_mutation_preview_requires_mutating_capability")
+        return definition.invocation_hook(validated)
 
     def definitions(
         self,
@@ -228,6 +256,12 @@ class CapabilityRegistry:
                     "proof_requirements": list(item.proof_requirements),
                     "unavailable_invocation_safe": item.unavailable_invocation_safe,
                     "proof_categories": sorted(item.proof_nodes),
+                    "task_composable": item.task_composable,
+                    "task_retry_safety": item.retry_safety,
+                    "task_max_retries": item.max_task_retries,
+                    "task_resume_policy": item.resume_policy,
+                    "task_independent_verifier": "hook" if item.independent_verification_hook is not None else "registry_result_only",
+                    "task_compensation_capability_id": item.compensation_capability_id,
                 }
             )
         return rows

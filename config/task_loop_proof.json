@@ -1,0 +1,56 @@
+{
+  "schema_version": "task-loop-proof-manifest.v1",
+  "product_version": "0.2.12",
+  "expected_task_composable_capabilities": [
+    "assistant.presence", "assistant.capabilities", "conversation.history",
+    "filesystem.list", "filesystem.search", "filesystem.read", "filesystem.create_directory",
+    "system.status", "system.shell.inspect", "system.package.install",
+    "models.inventory", "models.switch", "models.scout",
+    "memory.status", "memory.manage", "packs.use", "packs.manage", "search.web",
+    "telegram.status", "telegram.manage", "operator.status", "operator.lifecycle"
+  ],
+  "required_proof_categories": [
+    "schema", "planner_validation", "state_invariants", "registry_dispatch",
+    "approval_binding", "cancellation", "verification", "recovery_retry",
+    "persistence_restart", "missing_capability", "redaction", "api", "webui",
+    "scenario_corpus", "fast_path", "performance"
+  ],
+  "proof_nodes": {
+    "schema": ["tests/test_general_task_loop.py"],
+    "planner_validation": ["tests/test_general_task_loop.py"],
+    "state_invariants": ["tests/test_task_loop_properties.py"],
+    "registry_dispatch": ["tests/test_general_task_loop.py"],
+    "approval_binding": ["tests/test_general_task_loop.py", "tests/test_task_loop_properties.py"],
+    "cancellation": ["tests/test_general_task_loop.py", "tests/test_task_loop_properties.py"],
+    "verification": ["tests/test_general_task_loop.py", "tests/test_task_loop_properties.py"],
+    "recovery_retry": ["tests/test_task_loop_properties.py"],
+    "persistence_restart": ["tests/test_general_task_loop.py", "tests/test_wp3_scenarios.py"],
+    "missing_capability": ["tests/test_general_task_loop.py", "tests/test_wp3_scenarios.py"],
+    "redaction": ["tests/test_task_loop_properties.py"],
+    "api": ["tests/test_general_task_loop.py"],
+    "webui": ["desktop/tests/taskUiHelpers.test.js"],
+    "scenario_corpus": ["tests/test_wp3_scenarios.py"],
+    "fast_path": ["tests/test_general_task_loop.py", "tests/test_unified_conversation_routing.py"],
+    "performance": ["tests/test_general_task_loop.py", "scripts/wp3_latency_probe.py"]
+  },
+  "required_scenarios": [
+    "simple_fast_path", "multi_capability_read", "filesystem_search_read", "verified_mutation",
+    "denied_approval", "cancellation", "recoverable_failure", "verification_failure",
+    "unavailable_dependency", "missing_capability", "partial_completion", "direction_change",
+    "unrelated_interruption", "refresh_restart", "task_inquiry_control", "planner_attack"
+  ],
+  "ceilings": {
+    "max_steps": 8,
+    "max_plan_revisions": 3,
+    "max_replans": 2,
+    "max_step_retries": 2,
+    "max_capability_calls": 16,
+    "max_planning_generations_per_version": 1,
+    "max_task_wall_seconds": 900,
+    "max_concurrent_tasks_per_actor": 3,
+    "max_input_bytes": 16384,
+    "max_result_bytes": 32768,
+    "max_event_bytes": 8192,
+    "max_retained_terminal_tasks": 200
+  }
+}

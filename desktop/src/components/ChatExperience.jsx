@@ -153,6 +153,7 @@ function MessageBubble({ busy, message, onReply }) {
         <ClarificationCard clarification={message.ui?.clarification} />
         <CapabilityCard capability={message.ui?.capability} disabled={busy} onReply={onReply} />
         <ApprovalCard confirmation={message.ui?.confirmation} disabled={busy} onReply={onReply} />
+        <TaskCard busy={busy} onReply={onReply} task={message.ui?.task} />
       </div>
     </div>
   );
@@ -173,7 +174,45 @@ function ThinkingBubble() {
   );
 }
 
+function TaskCard({ busy, onReply, task }) {
+  if (!task || typeof task !== "object") return null;
+  const steps = Array.isArray(task.steps) ? task.steps : [];
+  const terminal = ["succeeded", "partially_completed", "failed", "denied", "cancelled", "expired", "indeterminate"].includes(String(task.state || ""));
+  return (
+    <section aria-label="Current task progress" className="task-progress-card">
+      <div className="task-progress-heading">
+        <div>
+          <p className="inline-action-eyebrow">Task</p>
+          <h3>{String(task.goal || "Current task")}</h3>
+        </div>
+        <span className={`task-state task-state-${String(task.state || "unknown")}`}>{String(task.state || "unknown").replaceAll("_", " ")}</span>
+      </div>
+      <ol className="task-step-list">
+        {steps.map((step) => (
+          <li className={`task-step task-step-${String(step.status || "pending")}`} key={String(step.step_id || step.capability_id)}>
+            <span aria-hidden="true">{step.status === "completed" ? "✓" : step.status === "failed" ? "!" : "•"}</span>
+            <span>{String(step.capability_id || "task step").replaceAll(".", " ")}</span>
+            <small>{String(step.status || "pending").replaceAll("_", " ")}</small>
+          </li>
+        ))}
+      </ol>
+      {!terminal ? (
+        <div className="inline-action-buttons">
+          <button disabled={busy} onClick={() => onReply("stop this task")} type="button">Stop</button>
+          {task.state === "paused" ? <button className="button-primary" disabled={busy} onClick={() => onReply("resume this task")} type="button">Resume</button> : null}
+          <button disabled={busy} onClick={() => onReply("show task progress")} type="button">Details</button>
+        </div>
+      ) : null}
+      <details>
+        <summary>Advanced task details</summary>
+        <p>Plan version {Number(task.plan_version || 0)} · revision {Number(task.revision || 0)}</p>
+      </details>
+    </section>
+  );
+}
+
 export default function ChatExperience({
+  activeTask,
   chatBusy,
   chatHistoryError,
   chatHistoryLoading,
@@ -335,6 +374,7 @@ export default function ChatExperience({
           </div>
         </aside>
         <section className="chat-surface">
+          <TaskCard busy={chatBusy} onReply={handleSendMessage} task={activeTask} />
           {messages.length === 0 ? (
             <div className="chat-empty-state">
               <span className={`status-pill status-pill-${status.tone}`}>{status.label}</span>

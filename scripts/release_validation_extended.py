@@ -27,6 +27,20 @@ from scripts.release_smoke import run_extended_suite
 from scripts.split_smoke import main as run_split_smoke
 
 
+def run_native_capability_proof() -> int:
+    return int(subprocess.run(
+        [sys.executable, "scripts/native_capability_proof.py", "--execute-tests"],
+        cwd=ROOT, check=False,
+    ).returncode)
+
+
+def run_task_loop_proof() -> int:
+    return int(subprocess.run(
+        [sys.executable, "scripts/task_loop_proof.py", "--execute-tests"],
+        cwd=ROOT, check=False,
+    ).returncode)
+
+
 def _should_run_live_smokes(args: argparse.Namespace) -> bool:
     if bool(args.with_live_smokes):
         return True
@@ -231,13 +245,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     if not bool(args.list):
-        proof = subprocess.run(
-            [sys.executable, "scripts/native_capability_proof.py", "--execute-tests"],
-            cwd=ROOT,
-            check=False,
-        )
-        if int(proof.returncode) != 0:
-            return int(proof.returncode)
+        proof_exit = run_native_capability_proof()
+        if proof_exit != 0:
+            return proof_exit
+        task_proof_exit = run_task_loop_proof()
+        if task_proof_exit != 0:
+            return task_proof_exit
     exit_code = run_extended_suite(list_only=bool(args.list), quiet=not bool(args.no_quiet))
     if exit_code != 0 or bool(args.list) or not _should_run_live_smokes(args):
         return exit_code

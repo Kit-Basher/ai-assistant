@@ -48,14 +48,14 @@ def operation_key_for_plan(plan: dict[str, Any]) -> str:
 
 
 def confirmation_key_for_scope(plan: dict[str, Any], confirmation: dict[str, Any]) -> str:
+    # A confirmation token is single-use globally.  Its plan/thread/session
+    # bindings are validated separately by ``validate_mutation_confirmation``.
+    # Including those bindings in the uniqueness key would let two otherwise
+    # valid plans reuse the same token (for example when independently built
+    # processes straddle a timestamp boundary), defeating replay protection.
     return stable_fingerprint(
         {
             "confirmation_id": str(confirmation.get("confirmation_id") or ""),
-            "plan_id": str(plan.get("plan_id") or ""),
-            "plan_fingerprint": str(plan.get("plan_fingerprint") or ""),
-            "actor_id": str(confirmation.get("actor_id") or ""),
-            "thread_id": str(confirmation.get("thread_id") or ""),
-            "session_id": str(confirmation.get("session_id") or ""),
         }
     )
 

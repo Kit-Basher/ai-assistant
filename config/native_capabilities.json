@@ -34,6 +34,7 @@
   },
   "api_surface_rules": [
     {"prefix":"/chat","parent":"conversation.history","disposition":"registered_native"},
+    {"prefix":"/tasks","parent":"conversation.history","disposition":"supporting_internal"},
     {"prefix":"/capabilities","parent":"assistant.capabilities","disposition":"registered_native"},
     {"prefix":"/ask","parent":"conversation.history","disposition":"compatibility_only"},
     {"prefix":"/done","parent":"conversation.history","disposition":"compatibility_only"},
