@@ -1,5 +1,12 @@
 # External Pack Format
 
+> Current authority note (WP4): portable text packs governed by this document
+> remain non-executable. Real external capabilities use the separate strict
+> `personal-agent.pack.v1` and `personal-agent.pack-capability.v1` contracts
+> documented in [SAFE_PACK_CAPABILITY_RUNTIME_WP4.md](SAFE_PACK_CAPABILITY_RUNTIME_WP4.md).
+> Import, review, enablement and permission grant are distinct states; none by
+> itself means a capability is usable.
+
 Status: canonical safe package shape for Personal Agent external packs.
 
 Product intent: [`docs/product/PROJECT_INTENT.md`](/home/c/personal-agent/docs/product/PROJECT_INTENT.md).

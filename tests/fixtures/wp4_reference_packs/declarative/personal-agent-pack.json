@@ -1,0 +1,23 @@
+{
+  "schema_version": "personal-agent.pack.v1",
+  "id": "reference-health",
+  "version": "1.0.0",
+  "pack_class": "declarative",
+  "display_name": "Reference Health",
+  "description": "Read-only declarative registry proof fixture.",
+  "capabilities": [{
+    "schema_version": "personal-agent.pack-capability.v1",
+    "name": "health_report",
+    "display_name": "Reference health report",
+    "description": "Report current system health through the registered native status contract",
+    "examples": ["summarize machine health using the reference helper", "inspect system status with my health add-on"],
+    "input_schema": {"type": "object", "properties": {}, "required": []},
+    "output_schema": {"type": "object", "properties": {"result": {"type": "string"}}, "required": ["result"]},
+    "mode": "read_only",
+    "task_composable": true,
+    "permissions": [],
+    "invocation": {"kind": "registered_capability", "capability_id": "system.status", "inputs": {}},
+    "verifier": {"kind": "nonempty", "field": "result"},
+    "self_test_input": {}
+  }]
+}

@@ -10208,6 +10208,7 @@ class AgentRuntime:
                 "status": health.get("state") or ("available" if row.get("available") else "unavailable"),
                 "reason": health.get("reason"),
                 "requires_confirmation": str(row.get("approval_policy") or "") == "required",
+                "origin": str(row.get("provenance") or "native"),
                 "next_step": health.get("next_step") or (
                     "Start or configure the trusted bounded SearXNG provider, then check capability status again."
                     if row.get("id") == "search.web" and not row.get("available")
@@ -10230,14 +10231,60 @@ class AgentRuntime:
             else:
                 public.pop("id", None)
             public_rows.append(public)
+        native_count = sum(1 for row in rows if str(row.get("provenance") or "native") == "native")
+        external_count = len(rows) - native_count
         return {
             "ok": True,
-            "summary": f"{len(available)} of {len(rows)} native capabilities are available now; {len(confirmation)} require confirmation before changes.",
-            "counts": {"total": len(rows), "available": len(available), "unavailable": len(unavailable), "confirmation_required": len(confirmation)},
+            "summary": f"{len(available)} of {len(rows)} live capabilities are available now ({native_count} native, {external_count} reviewed external); {len(confirmation)} require confirmation before changes.",
+            "counts": {"total": len(rows), "native": native_count, "external": external_count, "available": len(available), "unavailable": len(unavailable), "confirmation_required": len(confirmation)},
             "capabilities": public_rows,
             "advanced": bool(advanced),
             "source": "live_capability_registry",
         }
+
+    def pack_capability_status(self, record_id: str | None = None) -> tuple[bool, dict[str, Any]]:
+        result = self.orchestrator().pack_capability_status(record_id)
+        if result is None:
+            return False, {"ok": False, "error": "pack_capability_record_not_found", "message": "That exact pack capability version was not found."}
+        return True, {"ok": True, "source": "dynamic_pack_capability_runtime", "result": result}
+
+    @staticmethod
+    def _pack_mutation_binding(payload: dict[str, Any]) -> tuple[str, str, str]:
+        return (
+            str(payload.get("actor_id") or payload.get("actor") or "webui").strip(),
+            str(payload.get("session_id") or "local-session").strip(),
+            str(payload.get("thread_id") or "pack-admin").strip(),
+        )
+
+    def pack_capability_mutation_preview(self, action: str, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        action = str(action or "").strip()
+        mutation_payload: dict[str, Any]
+        if action == "import":
+            source = str(payload.get("path") or payload.get("pack_path") or "").strip()
+            if not source:
+                return False, {"ok": False, "error": "pack_path_required", "message": "Choose a local pack directory first."}
+            mutation_payload = {"source_dir": source}
+        elif action in {"gate", "remove"}:
+            mutation_payload = {k: payload[k] for k in ("record_id", "gate", "value") if k in payload}
+        else:
+            return False, {"ok": False, "error": "pack_mutation_action_invalid"}
+        actor, session, thread = self._pack_mutation_binding(payload)
+        try:
+            plan = self.orchestrator().pack_capability_mutation_preview(action, mutation_payload, actor_id=actor, session_id=session, thread_id=thread)
+        except Exception as exc:
+            return False, {"ok": False, "error": str(exc)[:160], "message": "The exact pack mutation could not be previewed safely."}
+        return True, {"ok": True, "plan": plan, "message": plan["preview"]}
+
+    def pack_capability_mutation_apply(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        plan_id = str(payload.get("plan_id") or "").strip(); binding_digest = str(payload.get("binding_digest") or "").strip()
+        if payload.get("confirmed") is not True or not plan_id or not binding_digest:
+            return False, {"ok": False, "error": "exact_confirmation_required", "message": "Confirm the exact unexpired preview first."}
+        actor, session, thread = self._pack_mutation_binding(payload)
+        try:
+            result = self.orchestrator().pack_capability_mutation_apply(plan_id, binding_digest, actor_id=actor, session_id=session, thread_id=thread)
+        except Exception as exc:
+            return False, {"ok": False, "error": str(exc)[:160], "message": "The exact lifecycle mutation was refused without changing pack authority."}
+        return True, {"ok": True, "result": result, "message": "Applied the exact confirmed pack mutation and rebuilt registry authority."}
 
     def prepare_orchestrator_chat_request(self, request: dict[str, Any]) -> dict[str, Any]:
         payload = dict(request.get("payload")) if isinstance(request.get("payload"), dict) else {}
@@ -24574,6 +24621,14 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if path == "/packs/state":
                 self._send_json(200, self.runtime.packs_state())
                 return
+            if path == "/packs/capabilities":
+                ok, body = self.runtime.pack_capability_status()
+                self._send_json(200 if ok else 404, body)
+                return
+            if len(parts) == 3 and parts[:2] == ["packs", "capabilities"]:
+                ok, body = self.runtime.pack_capability_status(urllib.parse.unquote(parts[2]))
+                self._send_json(200 if ok else 404, body)
+                return
             if path == "/pack_sources":
                 self._send_json(200, self.runtime.list_pack_sources())
                 return
@@ -25779,6 +25834,19 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
                 ok, body = self.runtime.route_pack_search_mutation("external_pack.install", payload)
+                self._send_json(200 if ok else 400, body)
+                return
+            if path in {"/packs/capabilities/import/plan", "/packs/capabilities/gate/plan", "/packs/capabilities/remove/plan"}:
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                action = path.rsplit("/", 2)[-2]
+                ok, body = self.runtime.pack_capability_mutation_preview(action, payload)
+                self._send_json(200 if ok else 400, body)
+                return
+            if path in {"/packs/capabilities/import/apply", "/packs/capabilities/gate/apply", "/packs/capabilities/remove/apply"}:
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                ok, body = self.runtime.pack_capability_mutation_apply(payload)
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/packs/install/plan":

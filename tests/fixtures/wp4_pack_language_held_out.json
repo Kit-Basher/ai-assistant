@@ -1,0 +1,10 @@
+[
+  {"family":"executable","category":"polite_filler","text":"Would the reviewed Reference Doubler add-on please multiply 6 by two?","result":12},
+  {"family":"executable","category":"sms_shorthand_misspelling","text":"refernece doubler pls multiply 9 by 2","result":18},
+  {"family":"executable","category":"reordered","text":"Reference Doubler integer 11 by two multiply","result":22},
+  {"family":"executable","category":"excess_punctuation","text":"Reference Doubler!!! multiply 13... by TWO???","result":26},
+  {"family":"declarative","category":"polite_filler","text":"Reference Health add-on, could I have a wellness snapshot for this machine?"},
+  {"family":"declarative","category":"sms_shorthand_misspelling","text":"pls use reviewed external Refernece Health add-on 2 report machine health through native status"},
+  {"family":"declarative","category":"dropped_words","text":"Reference Health machine resource condition"},
+  {"family":"declarative","category":"reordered","text":"through reviewed external Reference Health helper, host wellness report give"}
+]

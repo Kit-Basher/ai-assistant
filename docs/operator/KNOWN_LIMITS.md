@@ -7,7 +7,9 @@ runtime. These limits are deliberate.
 
 - arbitrary shell execution
 - unrestricted filesystem mutation
-- foreign code or plugin pack execution
+- in-process foreign code, arbitrary Python/JavaScript/shell/native plugins, or
+  host-effectful executable packs (WP4 permits only no-import pure Wasm in its
+  isolated worker)
 - silent install/enable/switch behavior
 - automatic adoption of discovery proposals
 - legacy root/system install scripts as the supported shipping path
@@ -31,6 +33,9 @@ runtime. These limits are deliberate.
   runtime contracts rather than generated code; `local_file_import` currently
   records a confirmed grant and validates path metadata only, without reading
   or indexing file contents
+- WP4 executable pack ABI v1 is intentionally `i32 -> i32` pure computation;
+  filesystem, network, model, service, database and secret brokers are absent
+- automatic pack acquisition and assistant-created capabilities remain WP5
 - release and recovery diagnostics are deterministic, but they are not a full
   observability stack
 

@@ -18,13 +18,15 @@ in BotFather, update the Personal Agent secret store, and restart
 the embedded Telegram poller in `personal-agent-api.service`.
 
 ## Current Product Truth
-Current release candidate: v0.2.14. It preserves the existing authorization,
+Current release candidate: v0.2.15. It preserves the existing authorization,
 Telegram, memory, filesystem, model-management, pack, and Web UI foundations
 while adding a bounded, durable plan-act-verify coordinator above the live
 capability registry. Simple requests retain the direct WP1/WP2 path; substantial
 goals may sequence only registered capabilities, pause at exact approval
-boundaries, and complete only with verifier evidence. See
-[`docs/releases/v0.2.14.md`](docs/releases/v0.2.14.md). Release tags are not
+boundaries, and complete only with verifier evidence. Reviewed local declarative
+and pure-computation WebAssembly packs can now add dynamic registry capabilities
+without in-process foreign code or host authority. See
+[`docs/releases/v0.2.15.md`](docs/releases/v0.2.15.md). Release tags are not
 created automatically by audit tooling.
 
 The user interacts with the assistant layer. The assistant interprets intent,
@@ -78,6 +80,10 @@ local activation marker; purge uninstall remains unsupported.
 - Safe local text-pack ingestion: a user-provided local directory is quarantined,
   scanned, normalized, and denied permissions by default. Catalog discovery is
   metadata-only; arbitrary remote pack acquisition is currently unavailable.
+- Safe local capability packs: a strict declarative contract may call only a
+  named registered native capability; a strict executable contract may perform
+  pure integer computation in a short-lived Bubblewrap/Wasmtime worker with no
+  WASI, host files, network, environment, subprocess, database, or secrets.
 
 ## What It Won't Do
 - It will not run arbitrary shell commands.
@@ -86,7 +92,8 @@ local activation marker; purge uninstall remains unsupported.
 - It will not auto-install or auto-switch models.
 - It will not let discovery proposals change canonical recommendations on their
   own.
-- It will not execute foreign code or plugin packs.
+- It will not import foreign code into the service or run arbitrary Python,
+  JavaScript, shell, native plugins, dependencies, or host-effectful Wasm.
 - It will not install dependencies from imported packs.
 - It will not claim full web browsing. Explicit/current-information requests use
   configured SearXNG search results with source titles and URLs; the assistant

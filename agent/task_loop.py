@@ -832,7 +832,13 @@ class TaskCoordinator:
                 self.store.advance_step(task_id)
                 task = self.store.get(task_id) or task
                 continue
-            definition = self.registry.require(str(step["capability_id"]))
+            definition = self.registry.get(str(step["capability_id"]))
+            if definition is None:
+                failure = {"classification": "missing_capability", "reason": "planned_capability_no_longer_registered", "capability_id": str(step["capability_id"])}
+                self.store.update_step(task_id, step["step_id"], status="blocked", failure=failure)
+                self.store.set_failure_outcome(task_id, failure=failure, outcome={"status": "partial" if int(task["current_step"]) else "blocked"})
+                target = TaskState.PARTIALLY_COMPLETED if int(task["current_step"]) else TaskState.BLOCKED
+                return self.store.transition(task_id, target, event="task.capability_revoked", payload=failure)
             try:
                 resolved_inputs = self._resolve_step_inputs(task, step)
                 resolved_inputs = definition.input_contract.validate(resolved_inputs)

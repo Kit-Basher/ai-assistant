@@ -118,6 +118,7 @@ from agent.packs.remote_fetch import ALLOWED_REMOTE_KINDS
 from agent.packs.source_approval import SourceApprovalController
 from agent.packs.review_state_ux import build_pack_review_state_summary, render_pack_review_state
 from agent.packs.store import PackStore
+from agent.packs.capability_runtime import DynamicPackCapabilityRuntime, PackCapabilityStore
 from agent.actions.persistent_journal import PersistentManagedActionJournalStore
 from agent.compare_mode import compare_now_to_what_if
 from agent.report_followups import resource_followup
@@ -1023,13 +1024,119 @@ class Orchestrator:
             emit_log=self._emit_tool_log,
             component="orchestrator.tool_executor",
         )
+        self._pack_capability_store = PackCapabilityStore(db.db_path, self._pack_store.external_storage_root())
         self._capability_registry = self._build_conversation_capability_registry()
+        self._dynamic_pack_runtime = DynamicPackCapabilityRuntime(
+            store=self._pack_capability_store,
+            registry=self._capability_registry,
+            response_factory=self._pack_capability_response,
+        )
+        self._pack_registry_reconstruction = self._dynamic_pack_runtime.register_usable()
         self._request_understanding = RequestUnderstandingService(self._capability_registry)
         self._task_coordinator = TaskCoordinator(
             store=TaskStore(self.db),
             registry=self._capability_registry,
         )
         self._general_task_planner = GeneralTaskPlanner()
+
+    def _pack_capability_response(self, capability_id: str, display_name: str, data: dict[str, Any]) -> OrchestratorResponse:
+        value = data.get("result")
+        message = f"{display_name}: {value}"
+        return self._runtime_truth_response(
+            text=message,
+            route="pack_capability",
+            used_runtime_state=True,
+            used_tools=[capability_id],
+            payload={"type": "pack_capability_result", "capability_id": capability_id, "result": value, **data, "summary": message},
+            skip_post_response_hooks=True,
+        )
+
+    def refresh_pack_capabilities(self) -> dict[str, Any]:
+        """Atomically rebuild selection/action authority from durable exact state."""
+        registry = self._build_conversation_capability_registry()
+        runtime = DynamicPackCapabilityRuntime(
+            store=self._pack_capability_store, registry=registry,
+            response_factory=self._pack_capability_response,
+        )
+        report = runtime.register_usable()
+        self._capability_registry = registry
+        self._dynamic_pack_runtime = runtime
+        self._pack_registry_reconstruction = report
+        self._request_understanding = RequestUnderstandingService(registry)
+        self._task_coordinator = TaskCoordinator(store=TaskStore(self.db), registry=registry)
+        return report
+
+    def pack_capability_import(self, source_dir: str) -> dict[str, Any]:
+        row = self._pack_capability_store.import_local(source_dir)
+        self.refresh_pack_capabilities()
+        return self.pack_capability_status(str(row.get("record_id") or "")) or row
+
+    def pack_capability_mutation_preview(self, action: str, payload: Mapping[str, Any], *, actor_id: str, session_id: str, thread_id: str) -> dict[str, Any]:
+        if action == "gate" and str(payload.get("gate") or "") == "grants":
+            row = self._pack_capability_store.get(str(payload.get("record_id") or ""))
+            if row is None:
+                raise ValueError("pack_not_found")
+            requested = set(self._dynamic_pack_runtime.lifecycle(row).get("requested_permissions") or [])
+            granted = payload.get("value")
+            if not isinstance(granted, list) or any(not isinstance(item, str) for item in granted) or not set(granted) <= requested:
+                raise PermissionError("pack_permission_scope_not_requested")
+        return self._pack_capability_store.preview_mutation(action, payload, actor_id=actor_id, session_id=session_id, thread_id=thread_id)
+
+    def pack_capability_mutation_apply(self, plan_id: str, binding_digest: str, *, actor_id: str, session_id: str, thread_id: str) -> dict[str, Any]:
+        result = self._pack_capability_store.apply_mutation(plan_id, binding_digest, actor_id=actor_id, session_id=session_id, thread_id=thread_id)
+        report = self.refresh_pack_capabilities()
+        record = result.get("record")
+        if isinstance(record, dict) and record.get("record_id"):
+            result["record"] = self.pack_capability_status(str(record["record_id"])) or record
+        result["registry_reconstruction"] = report
+        return result
+
+    def pack_capability_gate(self, record_id: str, gate: str, value: Any = True) -> dict[str, Any]:
+        row = self._pack_capability_store.set_gate(record_id, gate, value)
+        report = self.refresh_pack_capabilities()
+        return {**(self.pack_capability_status(record_id) or row), "registry_reconstruction": report}
+
+    def pack_capability_remove(self, record_id: str) -> bool:
+        removed = self._pack_capability_store.remove(record_id)
+        self.refresh_pack_capabilities()
+        return removed
+
+    def pack_capability_status(self, record_id: str | None = None) -> dict[str, Any] | None:
+        rows = self._pack_capability_store.list()
+        if record_id:
+            rows = [row for row in rows if row["record_id"] == record_id]
+            if not rows:
+                return None
+        def public(row: dict[str, Any]) -> dict[str, Any]:
+            life = self._dynamic_pack_runtime.lifecycle(row)
+            return {
+                "record_id": row["record_id"], "pack_id": row["pack_id"], "version": row["version"],
+                "pack_class": row["pack_class"], "content_digest": row["content_digest"],
+                "review_approved": row["review_approved"], "enabled": row["enabled"],
+                "capabilities": [
+                    {"id": cap["capability_id"], "display_name": cap["display_name"], "description": cap["description"], "mode": cap["mode"], "contract_digest": cap["contract_digest"]}
+                    for cap in row["manifest"].get("capabilities") or []
+                ],
+                "lifecycle": life,
+                "last_invocation": row.get("last_invocation"),
+            }
+        result = [public(row) for row in rows]
+        if record_id:
+            return result[0]
+        worker_health = self._dynamic_pack_runtime.worker.health()
+        return {
+            "schema_version": "personal-agent.pack.v1",
+            "packs": result,
+            "count": len(result),
+            "registry_reconstruction": self._pack_registry_reconstruction,
+            "isolation_runtime": {
+                "available": worker_health.available,
+                "reason": worker_health.reason,
+                "engine": "wasmtime",
+                "namespace": "bubblewrap",
+                "default_authority": "pure_computation_only",
+            },
+        }
 
     @staticmethod
     def _verified_orchestrator_response(result: Any) -> bool:
@@ -1717,6 +1824,29 @@ class Orchestrator:
         if capability_id == "packs.use":
             if str(payload.get("pack_operation") or "list").strip().lower() == "list":
                 return self._assistant_capabilities_response(text)
+            normalized_pack_request = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+            request_tokens = set(normalized_pack_request.split())
+            known_rows = self._pack_capability_store.list()
+            referenced = []
+            for row in known_rows:
+                names = {
+                    str(row.get("pack_id") or "").lower(),
+                    str((row.get("manifest") or {}).get("display_name") or "").lower(),
+                }
+                name_tokens = {token for name in names for token in re.sub(r"[^a-z0-9]+", " ", name).split() if len(token) > 2}
+                if name_tokens and name_tokens <= request_tokens:
+                    referenced.append(row)
+            if len(referenced) == 1:
+                row = referenced[0]
+                life = self._dynamic_pack_runtime.lifecycle(row)
+                if not life["usable"]:
+                    reason = str(life.get("missing_gate") or "lifecycle_revalidation")
+                    message = f"I know that local pack, but its capabilities are not usable now. The next required gate is {reason.replace('_', ' ')}."
+                    return self._runtime_truth_response(
+                        text=message, route="pack_capability_unavailable", used_tools=["pack_capability_store"], ok=False,
+                        error_kind=f"pack_capability_{reason}",
+                        payload={"type": "pack_capability_unavailable", "pack_id": row["pack_id"], "version": row["version"], "missing_gate": reason, "automatic_pack_action": False, "summary": message},
+                    )
             response = self._external_pack_knowledge_response(user_id, text, capability_selected=True)
             return response if response is not None else self._assistant_capabilities_response(text)
         if capability_id == "conversation.history":

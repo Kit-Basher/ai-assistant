@@ -5,7 +5,22 @@ This is the current-state handover doc. Product intent lives in
 `PRODUCT_RUNTIME_SPEC.md`. Treat this file as a status snapshot, not the sole
 source of truth.
 
-## WP3 candidate truth (v0.2.12)
+## WP4 candidate truth (v0.2.15)
+
+- WP4 preserves the protected 22-capability native inventory and allows an
+  explicitly supplied, reviewed local pack to add exact digest-bound dynamic
+  `pack.*` capabilities through the same registry, chat path, and WP3 task loop.
+- Portable text remains non-executable. Declarative capabilities can only map
+  validated inputs into a fixed registered native contract. Executable packs
+  are pure-computation Wasm under a short-lived Bubblewrap/no-WASI Wasmtime
+  worker with no host-effect broker.
+- Import, review, grants, enablement, disable/revoke, update, and removal are
+  separate exact preview/confirmation mutations. Content changes invalidate
+  old authority and stored tasks fail closed rather than substituting versions.
+- Automatic remote acquisition, automatic lifecycle advancement, and
+  assistant-created packs remain WP5 exclusions.
+
+## Completed WP3 truth (v0.2.14)
 
 - WP3 adds a bounded general task coordinator above the protected 22-capability
   WP2 registry. It is not a second tool layer: every step invokes a registered,

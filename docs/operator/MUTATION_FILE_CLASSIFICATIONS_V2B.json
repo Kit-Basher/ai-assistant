@@ -1,6 +1,6 @@
 {
   "schema": "personal-agent.mutation-file-classification.v2b",
-  "reviewed_count": 165,
+  "reviewed_count": 169,
   "required_fields": [
     "path",
     "disposition",
@@ -2448,6 +2448,36 @@
       "contract_identity": "not_applicable"
     },
     {
+      "path": "agent/packs/capability_runtime.py",
+      "disposition": "central_authorized",
+      "capability": "packs.manage",
+      "entry_point": "loopback pack capability mutation preview/apply and startup reconstruction",
+      "actor": "bound local actor/session/thread and canonical runtime",
+      "target_resources": "exact digest-bound external capability-pack records and copied artifacts",
+      "mutation_type": "local import plus separate review, grant, enable, revoke, update, and removal gates",
+      "policy_path": "one-use expiring mutation plan -> exact binding check -> lifecycle revalidation -> CapabilityRegistry",
+      "executor": "PackCapabilityStore and DynamicPackCapabilityRuntime",
+      "confirmation_requirements": "exact action, content/state digest, actor, session, thread, expiry, and single-use plan",
+      "rollback_scope": "gate changes are reversible; removal preserves bounded database/audit truth according to lifecycle policy",
+      "audit_evidence": "tests/test_wp4_pack_runtime.py and scripts/pack_capability_proof.py",
+      "contract_identity": "personal-agent.pack.v1"
+    },
+    {
+      "path": "agent/packs/worker_runtime.py",
+      "disposition": "central_authorized",
+      "capability": "pack.external.pure_compute",
+      "entry_point": "dynamic CapabilityRegistry invocation hook only",
+      "actor": "validated registry invocation",
+      "target_resources": "one exact read-only Wasm artifact and ephemeral isolated worker scratch",
+      "mutation_type": "temporary worker process and scratch lifecycle only; no host-effect broker",
+      "policy_path": "exact artifact digest -> Bubblewrap namespaces -> no-import Wasmtime ABI -> core verifier",
+      "executor": "short-lived core-owned SandboxedPackWorker",
+      "confirmation_requirements": "pack lifecycle review, exact grants, enablement, health, and self-test before registry entry",
+      "rollback_scope": "kill worker process group and remove ephemeral scratch",
+      "audit_evidence": "actual escape, timeout, cancellation, orphan, and host-sentinel tests in tests/test_wp4_pack_runtime.py",
+      "contract_identity": "personal-agent.pack-worker.v1"
+    },
+    {
       "path": "agent/task_loop.py",
       "disposition": "central_authorized",
       "capability": "conversation.history",
@@ -2461,6 +2491,21 @@
       "rollback_scope": "task-record transaction rollback only; capability compensation exists only when explicitly registered",
       "audit_evidence": "tests/test_general_task_loop.py, tests/test_task_loop_properties.py, and tests/test_wp3_scenarios.py",
       "contract_identity": "personal-agent.task.v1"
+    },
+    {
+      "path": "scripts/pack_capability_proof.py",
+      "disposition": "offline_tool",
+      "capability": "developer.pack_capability_proof",
+      "entry_point": "explicit command-line main and canonical release gate",
+      "actor": "developer/release operator",
+      "target_resources": "generated redacted commit-bound WP4 proof report and temporary test state",
+      "mutation_type": "proof report generation and focused test subprocess",
+      "policy_path": "not imported by shipping runtime; required categories and candidate fingerprint fail closed",
+      "executor": "script-owned structural reconciler and pytest runner",
+      "confirmation_requirements": "explicit command or canonical release-gate invocation",
+      "rollback_scope": "ignored build report and temporary test state only",
+      "audit_evidence": "WP4 gate sensitivity and tests/test_wp4_pack_runtime.py",
+      "contract_identity": "personal-agent.pack-proof.v1"
     },
     {
       "path": "scripts/task_loop_proof.py",
@@ -2491,6 +2536,21 @@
       "rollback_scope": "temporary candidate state and generated report only",
       "audit_evidence": "WP3 before/after median and p95 reports",
       "contract_identity": "wp3-latency.v1"
+    },
+    {
+      "path": "scripts/wp4_latency_probe.py",
+      "disposition": "offline_tool",
+      "capability": "developer.performance_probe",
+      "entry_point": "explicit command-line main against an isolated loopback candidate",
+      "actor": "developer/release operator",
+      "target_resources": "temporary local benchmark pack, candidate API transcript state, and generated benchmark report",
+      "mutation_type": "exact preview/apply lifecycle of a temporary fixture followed by removal and bounded HTTP sampling",
+      "policy_path": "not imported by shipping runtime; explicit candidate URL and lifecycle confirmations",
+      "executor": "script-owned bounded HTTP sampler using production pack mutation endpoints",
+      "confirmation_requirements": "explicit invocation; candidate endpoints retain exact one-use plan binding",
+      "rollback_scope": "temporary candidate pack/state and ignored benchmark report only",
+      "audit_evidence": "WP4 isolated median/p95 report and external-pack cleanup check",
+      "contract_identity": "wp4-latency.v1"
     }
   ]
 }

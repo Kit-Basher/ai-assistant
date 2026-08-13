@@ -32,8 +32,12 @@ function UserPackRow({ badge, children, row }) {
   );
 }
 
-export default function PacksTab({ packsSnapshot }) {
+export default function PacksTab({ packsSnapshot, capabilitySnapshot, request, onRefresh }) {
   const [showDiagnosticPacks, setShowDiagnosticPacks] = useState(false);
+  const [localPath, setLocalPath] = useState("");
+  const [mutationPlan, setMutationPlan] = useState(null);
+  const [mutationAction, setMutationAction] = useState("import");
+  const [mutationStatus, setMutationStatus] = useState("");
   const view = buildPacksView(packsSnapshot);
   const snapshot = packsSnapshot && typeof packsSnapshot === "object" ? packsSnapshot : {};
   const installedRows = Array.isArray(snapshot.packs) ? snapshot.packs : [];
@@ -43,6 +47,36 @@ export default function PacksTab({ packsSnapshot }) {
   const needsSetup = installedRows.filter((row) => row?.usable !== true && !isDiagnosticPack(row));
   const availableToPreview = availableRows.filter((row) => !isDiagnosticPack(row));
   const diagnosticRows = [...installedRows, ...availableRows].filter(isDiagnosticPack);
+  const dynamicRows = Array.isArray(capabilitySnapshot?.packs) ? capabilitySnapshot.packs : [];
+
+  const previewMutation = async (action, mutationPayload) => {
+    try {
+      const payload = await request("POST", `/packs/capabilities/${action}/plan`, { ...mutationPayload, actor_id: "webui", session_id: "webui", thread_id: "pack-admin" });
+      setMutationPlan(payload.plan || null);
+      setMutationAction(action);
+      setMutationStatus(payload.message || "Preview ready.");
+    } catch (error) {
+      setMutationStatus(`Preview refused: ${String(error?.message || error)}`);
+    }
+  };
+
+  const previewImport = async () => {
+    const path = localPath.trim();
+    if (!path) return setMutationStatus("Choose a local pack directory first.");
+    return previewMutation("import", { path });
+  };
+
+  const applyPreview = async () => {
+    if (!mutationPlan) return;
+    try {
+      await request("POST", `/packs/capabilities/${mutationAction}/apply`, { plan_id: mutationPlan.plan_id, binding_digest: mutationPlan.binding_digest, confirmed: true, actor_id: "webui", session_id: "webui", thread_id: "pack-admin" });
+      setMutationStatus("Applied exactly the previewed gate. Any remaining gates are still required.");
+      setMutationPlan(null);
+      if (onRefresh) await onRefresh();
+    } catch (error) {
+      setMutationStatus(`Import refused: ${String(error?.message || error)}`);
+    }
+  };
 
   return (
     <section className="grid">
@@ -58,6 +92,43 @@ export default function PacksTab({ packsSnapshot }) {
           />
           Show diagnostic packs
         </label>
+      </div>
+
+      <div className="card">
+        <h2>Local capability-pack runtime</h2>
+        <p className="help-text">Portable text is never executable. Declarative packs may call only declared native contracts. Executable packs use an isolated pure-computation worker with no host files or network.</p>
+        <p className="status-line">
+          Executable isolation: {capabilitySnapshot?.isolation_runtime?.available ? "available" : `unavailable (${capabilitySnapshot?.isolation_runtime?.reason || "not verified"})`} · Wasmtime inside Bubblewrap · pure computation only
+        </p>
+        <label>
+          Local pack directory
+          <input value={localPath} onChange={(event) => setLocalPath(event.target.value)} placeholder="/path/to/local/pack" />
+        </label>
+        <div className="row-actions">
+          <button type="button" onClick={previewImport}>Preview import</button>
+          <button className="button-primary" type="button" disabled={!mutationPlan} onClick={applyPreview}>Confirm exact preview</button>
+        </div>
+        {mutationPlan ? <p className="help-text">{mutationPlan.preview} Expires in five minutes; approval and enablement remain separate.</p> : null}
+        <p className="status-line" aria-live="polite">{mutationStatus || `${dynamicRows.length} local capability-pack version(s) recorded.`}</p>
+        <div className="model-list">
+          {dynamicRows.map((row) => (
+            <DetailRow
+              key={row.record_id}
+              title={`${row.pack_id} ${row.version}`}
+              badge={stateBadge(row.lifecycle?.usable ? "Usable" : "Not usable", row.lifecycle?.usable ? "health-ok" : "health-degraded")}
+              metaLines={[`${row.pack_class} · ${row.capabilities?.length || 0} capability(s)`, `Next gate: ${row.lifecycle?.missing_gate || "none"}`, `Permissions: ${(row.lifecycle?.granted_permissions || []).join(", ") || "none"}`, `Last invocation: ${row.last_invocation?.outcome || "none"}`]}
+            >
+              {(row.capabilities || []).map((capability) => <p className="help-text" key={capability.id}>{capability.display_name}: {capability.description}</p>)}
+              <div className="row-actions">
+                {!row.review_approved ? <button type="button" onClick={() => previewMutation("gate", { record_id: row.record_id, gate: "review_approved", value: true })}>Preview review approval</button> : null}
+                {row.review_approved && row.lifecycle?.missing_gate === "permission" ? <button type="button" onClick={() => previewMutation("gate", { record_id: row.record_id, gate: "grants", value: row.lifecycle?.requested_permissions || [] })}>Preview exact grants</button> : null}
+                {row.review_approved && !row.enabled ? <button type="button" onClick={() => previewMutation("gate", { record_id: row.record_id, gate: "enabled", value: true })}>Preview enable</button> : null}
+                {row.enabled ? <button type="button" onClick={() => previewMutation("gate", { record_id: row.record_id, gate: "enabled", value: false })}>Preview disable</button> : null}
+                <button type="button" onClick={() => previewMutation("remove", { record_id: row.record_id })}>Preview removal</button>
+              </div>
+            </DetailRow>
+          ))}
+        </div>
       </div>
 
       <div className="grid two">

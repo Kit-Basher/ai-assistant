@@ -1,0 +1,23 @@
+{
+  "schema_version": "personal-agent.pack.v1",
+  "id": "reference-doubler",
+  "version": "1.0.0",
+  "pack_class": "sandboxed_executable",
+  "display_name": "Reference Doubler",
+  "description": "Pure-computation executable worker proof fixture.",
+  "capabilities": [{
+    "schema_version": "personal-agent.pack-capability.v1",
+    "name": "double",
+    "display_name": "Reference double",
+    "description": "Double an integer in the isolated pure-computation worker",
+    "examples": ["multiply a supplied integer by two", "double this number in the isolated helper"],
+    "input_schema": {"type": "object", "properties": {"value": {"type": "integer"}}, "required": ["value"]},
+    "output_schema": {"type": "object", "properties": {"result": {"type": "integer"}}, "required": ["result"]},
+    "mode": "read_only",
+    "task_composable": true,
+    "permissions": ["pure_compute"],
+    "invocation": {"kind": "wasm", "abi": "personal-agent.pack-worker.v1", "module": "module.wasm", "export": "invoke", "input_field": "value"},
+    "verifier": {"kind": "integer_result", "field": "result"},
+    "self_test_input": {"value": 2}
+  }]
+}

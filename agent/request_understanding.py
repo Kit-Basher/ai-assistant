@@ -1140,6 +1140,22 @@ class RequestUnderstandingService:
             normalized,
             (extracted_inputs or {}).get(top.capability_id),
         )
+        if top.capability_id.startswith("pack."):
+            # Pack argument extraction is schema-driven after semantic
+            # selection. It cannot change the capability id or introduce an
+            # authority field. Initial WP4 executable ABI accepts bounded
+            # scalar inputs; declarative mappings use the same typed fields.
+            for name, expected in definition.input_contract.properties.items():
+                if name in inputs or name in {"user_id", "text"}:
+                    continue
+                if expected is int:
+                    match = re.search(r"(?<![\w.])-?\d+\b", original)
+                    if match:
+                        inputs[name] = int(match.group(0))
+                elif expected is str:
+                    quoted = next((m.group("value") for m in _QUOTED_VALUE_RE.finditer(original)), None)
+                    if quoted:
+                        inputs[name] = quoted
         try:
             validated_inputs = definition.input_contract.validate(inputs)
         except ValueError as exc:

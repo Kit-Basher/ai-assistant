@@ -1,5 +1,10 @@
 # Pack Gold Standard
 
+This is the canonical target for **portable text packs**. WP4 declarative and
+sandboxed executable capability packs use the separate strict contracts in
+`docs/design/SAFE_PACK_CAPABILITY_RUNTIME_WP4.md`; executable bytes are never
+normalized into or executed from this text format.
+
 This document is the canonical internal authoring and normalization target for external skill packs.
 It describes the shape the system should prefer when reducing safe external content into a single
 portable internal pack.

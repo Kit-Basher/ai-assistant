@@ -180,6 +180,20 @@ class CapabilityRegistry:
             raise ValueError(f"capability_resume_policy_invalid:{capability_id}")
         self._items[capability_id] = definition
 
+    def unregister_external(self, capability_id: str) -> bool:
+        """Remove only dynamically registered external authority.
+
+        Native inventory entries cannot be removed through the pack lifecycle.
+        """
+        key = str(capability_id or "").strip().lower()
+        definition = self._items.get(key)
+        if definition is None:
+            return False
+        if definition.provenance is not CapabilityProvenance.PACK:
+            raise PermissionError("native_capability_cannot_be_unregistered")
+        del self._items[key]
+        return True
+
     def get(self, capability_id: str) -> CapabilityDefinition | None:
         return self._items.get(str(capability_id or "").strip().lower())
 

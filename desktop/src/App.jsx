@@ -338,6 +338,7 @@ export default function App() {
   const [llmHealthMessage, setLlmHealthMessage] = useState("");
   const [llmHealthRunning, setLlmHealthRunning] = useState(false);
   const [packsState, setPacksState] = useState(null);
+  const [packCapabilitiesState, setPackCapabilitiesState] = useState(null);
   const [capabilityStatus, setCapabilityStatus] = useState(null);
   const [autoconfigPlan, setAutoconfigPlan] = useState(null);
   const [autoconfigStatus, setAutoconfigStatus] = useState("");
@@ -466,7 +467,8 @@ export default function App() {
         registrySnapshotsPayload,
         permissionsPayload,
         auditPayload,
-        capabilityStatusPayload
+        capabilityStatusPayload,
+        packCapabilitiesPayload
       ] = await Promise.all([
         request("GET", "/providers"),
         request("GET", "/models"),
@@ -488,7 +490,8 @@ export default function App() {
         request("GET", "/llm/registry/snapshots?limit=20").catch(() => null),
         request("GET", "/permissions").catch(() => null),
         request("GET", "/audit?limit=20").catch(() => null),
-        request("GET", "/capabilities?advanced=1").catch(() => null)
+        request("GET", "/capabilities?advanced=1").catch(() => null),
+        request("GET", "/packs/capabilities").catch(() => null)
       ]);
 
       const providerRows = providersPayload.providers || [];
@@ -508,6 +511,9 @@ export default function App() {
       }
       if (capabilityStatusPayload && capabilityStatusPayload.ok) {
         setCapabilityStatus(capabilityStatusPayload);
+      }
+      if (packCapabilitiesPayload && packCapabilitiesPayload.ok) {
+        setPackCapabilitiesState(packCapabilitiesPayload.result);
       }
       if (telegramPayload && telegramPayload.ok) {
         setTelegramConfigured(telegramPayload.configured === true);
@@ -2032,7 +2038,7 @@ export default function App() {
       id: "packs",
       label: "Packs",
       group: "Packs",
-      content: <PacksTab packsSnapshot={packsState} />
+      content: <PacksTab packsSnapshot={packsState} capabilitySnapshot={packCapabilitiesState} request={request} onRefresh={refreshAdminState} />
     },
     {
       id: "operations",

@@ -6,7 +6,7 @@ Product intent: [`docs/product/PROJECT_INTENT.md`](/home/c/personal-agent/docs/p
 
 Lifecycle source of truth: [`docs/design/PACK_LIFECYCLE.md`](/home/c/personal-agent/docs/design/PACK_LIFECYCLE.md).
 
-External and generated skill packs do not run arbitrary code. Generated packs remain text-only review artifacts unless the core runtime implements and gates a managed adapter.
+External and generated skill packs do not run arbitrary host code. Generated packs remain text-only review artifacts unless the core runtime implements and gates a managed adapter. WP4 separately permits explicitly supplied, reviewed pure-computation Wasm through the no-import isolated worker described in `SAFE_PACK_CAPABILITY_RUNTIME_WP4.md`; it cannot call these adapters or acquire host authority.
 
 ## External Pack Lifecycle Contract
 

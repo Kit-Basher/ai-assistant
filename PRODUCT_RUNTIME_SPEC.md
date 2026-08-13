@@ -137,12 +137,13 @@ the project intent document, project intent wins.
   - bounded directory creation
 - External pack ingestion is bounded:
   - quarantined first
-  - ingress accepts an explicitly supplied local text-pack directory only
+  - ingress accepts an explicitly supplied local pack directory only
   - static-scanned before any normalization
-  - portable text skills only in this pass
+  - portable text, strict declarative capabilities, and pure-computation
+    WebAssembly capabilities use distinct versioned contracts
   - canonical content identity is authoritative for normalized packs
-  - imported content remains non-executable and gets no granted permissions by
-    default
+  - imported content receives no granted permissions or action authority by
+    default; executable bytes run only after every gate in the isolated worker
 - External packs are not bundled active abilities. Starter catalogs are
   discoverable sources only, and a pack becomes usable only after the
   appropriate preview, quarantine/import, inspection, approval, configuration,
@@ -151,7 +152,7 @@ the project intent document, project intent wins.
   - arbitrary shell
   - unrestricted disk access
   - delete/remove flows
-  - foreign code/plugin pack execution
+  - in-process foreign code or unrestricted plugin execution
 
 ## 7. Mutation / Approval Model
 - Read-only actions execute immediately.
@@ -241,6 +242,11 @@ the project intent document, project intent wins.
 - Supported today:
   - `SKILL.md`-centered portable text skills
   - optional `references/`, `assets/`, `AGENTS.md`, and metadata files
+  - `personal-agent.pack.v1` declarative capabilities limited to static calls
+    to registered native contracts with bounded input mapping
+  - `personal-agent.pack.v1` executable pure computation through
+    `personal-agent.pack-worker.v1`, Bubblewrap namespaces, and no-WASI
+    Wasmtime; no host effects are brokered
 - Remote archive/repository ingress is not supported today. Catalog entries may
   describe remote sources, but they cannot install or enable content.
   - `github_archive`
@@ -254,11 +260,16 @@ the project intent document, project intent wins.
   identity; upstream content changes are treated as new versions and compared
   explicitly.
 - Discovery may surface likely portable text skills, experience packs, or
-  likely native/plugin packs, but only portable text skills are currently
-  compatible with safe import.
+  likely native/plugin packs, but WP4 capability-pack ingress remains an
+  explicitly supplied local-directory operation; discovery never installs it.
 - Unsupported/native/plugin packs are blocked or reduced to safe text/assets
   only when possible.
-- No imported pack gets executable runtime privileges in this pass.
+- No imported pack executes in the API process. Executable capability packs are
+  pure-computation Wasm only, with no imports, network, host filesystem,
+  environment, secrets, service control, subprocess, or database authority.
+- `GET /packs/capabilities` reports exact lifecycle and isolation truth.
+  `/packs/capabilities/{import,gate,remove}/plan` and `/apply` enforce separate,
+  expiring, actor/session/thread/digest-bound mutations.
 - Missing capability handling should not dead-end: when no installed or
   approved catalog pack can satisfy a user request, the assistant should say
   what is missing and offer the next safe step, including scaffold preview where
@@ -267,15 +278,15 @@ the project intent document, project intent wins.
 ## 10. Out Of Scope
 - Arbitrary autonomous shell behavior.
 - Unrestricted filesystem mutation.
-- Foreign code or plugin-pack execution.
+- In-process foreign code, unrestricted plugin execution, or arbitrary host
+  Python/JavaScript/shell.
 - Automatic model switching or installing.
 - Automatic proposal adoption.
 - Automatic external-pack trust, approval, or background sync.
 - Background full-disk indexing or unrestricted scanning.
 - Legacy root/system packaging.
 - Duplicate recommendation or controller paths.
-- Executable/declarative pack workers, automatic pack acquisition, and
-  assistant-created capabilities (deferred to later work packages).
+- Automatic pack acquisition and assistant-created capabilities (WP5).
 
 ## 11. Release Confidence
 - The canonical release gate is `python scripts/release_gate.py`.
@@ -283,6 +294,9 @@ the project intent document, project intent wins.
   task-composable capabilities with required state, approval, restart,
   verification, adversarial, and scenario proofs for the current source
   fingerprint.
+- It also runs `scripts/pack_capability_proof.py`, tying dynamic pack contract,
+  lifecycle, chat/task, revocation, redaction, timeout and real worker-isolation
+  evidence to the candidate fingerprint.
 - The fast pre-check inside that gate is `python scripts/release_smoke.py`.
 - Run it before calling a build releasable and after risky install/upgrade work.
 - It is intended to prove the coherent product path plus the main

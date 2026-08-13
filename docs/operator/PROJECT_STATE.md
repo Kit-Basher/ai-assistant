@@ -5,9 +5,9 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Version: `v0.2.14` candidate (Work Package 3)
-- Baseline: completed WP2 commit `ddff7a03017d5c6d23e5d7d076a22c374bcb75f2`
-- Working live runtime while the candidate is proved: `v0.2.13`
+- Version: `v0.2.15` candidate (Work Package 4)
+- Baseline: completed WP3 commit `ce72b1d3bc12747e80f461a3086e376fbfb705fe`
+- Working live runtime while the candidate is proved: `v0.2.14`
 - Capability truth: the live registry plus
   `config/native_capabilities.json`, enforced by
   `scripts/native_capability_proof.py`
@@ -15,13 +15,18 @@ marketing copy and it is not a final release claim.
 - Task authority: the live registry remains sole action authority; the bounded
   coordinator adds durable sequencing, exact task approval, verifier evidence,
   restart reconciliation, and `/tasks`/Web UI control without new action tools.
-- Release status: candidate only until all WP3 gates, isolated verification,
+- Pack authority: reviewed exact local declarative and pure-computation Wasm
+  packs may add dynamic `pack.*` entries only through the live registry. Wasm
+  runs outside the API process under Bubblewrap plus no-WASI Wasmtime.
+- Release status: candidate only until all WP4 gates, isolated verification,
   exact-SHA promotion, and live verification pass.
 
 See `docs/design/NATIVE_CAPABILITY_CENSUS_WP2.md` for the census,
 reconciliation, proof profiles, surface mappings, and explicit unsupported
 boundaries. See `docs/design/GENERAL_TASK_LOOP_WP3.md` for the WP3 state,
 schema, approval, recovery, API/UI, and WP4/WP5 exclusion contract.
+See `docs/design/SAFE_PACK_CAPABILITY_RUNTIME_WP4.md` for pack contracts,
+lifecycle binding, worker containment, proof, and explicit WP5 exclusions.
 
 ## Historical checkpoints
 
