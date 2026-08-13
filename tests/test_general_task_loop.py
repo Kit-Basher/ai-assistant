@@ -358,6 +358,32 @@ def test_messy_capability_and_machine_status_goals_stay_on_grounded_registry_pat
         assert status["meta"]["used_llm"] is False
 
 
+@pytest.mark.parametrize(
+    "wording",
+    (
+        "preview creating {target}",
+        "please make {target}",
+        "add {target} for the next project",
+    ),
+)
+def test_nonexistent_path_creation_uses_mutation_capability_not_file_read(wording: str) -> None:
+    """A future target's nonexistence must not change the selected action."""
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        target = root / "not-created"
+        runtime = AgentRuntime(_config(str(root / "registry.json"), str(root / "agent.db"), perception_roots=(raw,)))
+        response = _chat(
+            runtime,
+            wording.format(target=target),
+            user="create-target",
+            thread=f"create-target:{wording.split()[0]}",
+        )
+        understanding = response["setup"]["request_understanding"]
+        assert understanding["selected_capability_id"] == "filesystem.create_directory"
+        assert understanding["approval_required"] is True
+        assert target.exists() is False
+
+
 def test_explicit_sequence_with_available_and_missing_goal_returns_verified_partial_handoff() -> None:
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)

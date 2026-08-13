@@ -208,8 +208,17 @@ def _semantic_domain_boost(capability_id: str, tokens: set[str]) -> float:
     filesystem_search_action = has("find", "locate", "search", "where") or has_fuzzy(
         "find", "locate", "search", "where"
     )
-    filesystem_read_action = has("read", "open", "preview", "text") or has_fuzzy(
-        "read", "open", "preview", "text"
+    filesystem_create_action = has("create", "make", "add") or has_fuzzy(
+        "create", "make", "add"
+    )
+    # "Preview" describes the approval stage as often as it describes reading
+    # a file.  Mutation action language therefore owns the verb polarity; the
+    # pathname is a typed target, not evidence that an existing file should be
+    # opened.  This keeps capability selection separate from target existence.
+    filesystem_read_action = (
+        has("read", "open", "text")
+        or (has("preview") and not filesystem_create_action)
+        or has_fuzzy("read", "open", "text")
     )
     if capability_id.startswith("filesystem.") and filesystem_domain:
         score += 0.14
@@ -286,7 +295,10 @@ def _semantic_domain_boost(capability_id: str, tokens: set[str]) -> float:
         score += 0.56
     if capability_id == "system.shell.inspect" and has("python", "pip", "executable", "command", "kernel", "uname", "shell", "environment", "binary", "version") and has("show", "check", "inspect", "which", "where", "version"):
         score += 0.36
-    if capability_id == "filesystem.create_directory" and has("create", "make", "add") and has("directory", "folder"):
+    if capability_id == "filesystem.create_directory" and filesystem_create_action and (
+        has("directory", "folder")
+        or (filesystem_domain and not has("file", "files", "document"))
+    ):
         score += 0.44
     if capability_id == "system.package.install" and has("install", "add") and (
         has("package", "utility", "tool", "apt", "pip")
