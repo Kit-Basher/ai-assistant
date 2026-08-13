@@ -60,6 +60,36 @@ def main() -> int:
             body, elapsed = chat(args.base_url, f"use Benchmark Doubler to multiply {index + 2} by two", f"wp4-pack-{index}"); values.append(elapsed)
             timing = (body.get("meta") or {}).get("chat_timing_ms") or {}; selection.append(float(timing.get("request_understanding_ms") or 0)); worker.append(float(((body.get("setup") or {}).get("worker") or {}).get("elapsed_ms") or 0))
         results["executable_chat"] = {"end_to_end": summary(values), "selection": summary(selection), "worker_cold": summary(worker), "worker_processes_per_invocation": 1}
+        values = []; selection = []; task_states = set(); planning_generations = []
+        for index in range(samples):
+            body, elapsed = chat(
+                args.base_url,
+                f"Inspect the current system health and then use Benchmark Doubler to double {index + 2}.",
+                f"wp4-mixed-{index}",
+            )
+            task = (body.get("setup") or {}).get("task") or {}
+            steps = task.get("steps") or []
+            if (
+                str((body.get("meta") or {}).get("route")) != "task_loop"
+                or task.get("state") != "succeeded"
+                or [row.get("capability_id") for row in steps]
+                != ["system.status", "pack.benchmark-doubler.double"]
+                or not all(row.get("verified") is True for row in steps)
+            ):
+                raise RuntimeError("mixed_native_pack_task_not_verified")
+            values.append(elapsed)
+            timing = (body.get("meta") or {}).get("chat_timing_ms") or {}
+            selection.append(float(timing.get("request_understanding_ms") or 0))
+            task_states.add(str(task.get("state")))
+            planning_generations.append(int((body.get("meta") or {}).get("planning_generations") or 0))
+        results["mixed_native_pack_task"] = {
+            "end_to_end": summary(values),
+            "selection": summary(selection),
+            "states": sorted(task_states),
+            "planning_generations_max": max(planning_generations, default=0),
+            "verified_steps_per_task": 2,
+            "worker_processes_per_task": 1,
+        }
         mutate(args.base_url, "remove", {"record_id": rid})
         declarative = Path(directory) / "declarative"; declarative.mkdir()
         declaration = {"schema_version":"personal-agent.pack.v1","id":"benchmark-health","version":"1","pack_class":"declarative","description":"Temporary exact-candidate declarative benchmark fixture","capabilities":[{"schema_version":"personal-agent.pack-capability.v1","name":"health_report","description":"Report current system health through native status","examples":["summarize machine health with benchmark helper","inspect system status through benchmark add-on"],"input_schema":{"type":"object","properties":{},"required":[]},"output_schema":{"type":"object","properties":{"result":{"type":"string"}},"required":["result"]},"permissions":[],"invocation":{"kind":"registered_capability","capability_id":"system.status","inputs":{}},"verifier":{"kind":"nonempty"},"self_test_input":{}}]}

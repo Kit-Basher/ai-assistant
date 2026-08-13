@@ -5,7 +5,7 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Version: `v0.2.15` candidate (Work Package 4)
+- Version: `v0.2.16` candidate (Work Package 4)
 - Baseline: completed WP3 commit `ce72b1d3bc12747e80f461a3086e376fbfb705fe`
 - Working live runtime while the candidate is proved: `v0.2.14`
 - Capability truth: the live registry plus
