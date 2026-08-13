@@ -454,6 +454,31 @@ def test_task_chat_status_and_unrelated_casual_turn_do_not_advance_task() -> Non
         assert not target.exists()
 
 
+def test_task_chat_status_recalls_latest_terminal_task_without_reactivating_it() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        runtime = AgentRuntime(_config(str(root / "registry.json"), str(root / "agent.db"), perception_roots=(raw,)))
+        finished = _chat(
+            runtime,
+            "check system health; then show installed local models",
+            user="terminal-status",
+            thread="terminal-status:t",
+        )
+        task = finished["setup"]["task"]
+        assert task["state"] == TaskState.SUCCEEDED.value
+        status = _chat(
+            runtime,
+            "please show the current task plan and progress",
+            user="terminal-status",
+            thread="terminal-status:t",
+        )
+        assert status["meta"]["route"] == "task_control"
+        recalled = status["setup"]["task"]
+        assert recalled["task_id"] == task["task_id"]
+        assert recalled["state"] == TaskState.SUCCEEDED.value
+        assert len(recalled["steps"]) == 2
+
+
 def test_production_chat_verified_directory_mutation_requires_exact_approval() -> None:
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)

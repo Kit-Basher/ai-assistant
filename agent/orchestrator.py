@@ -2012,10 +2012,20 @@ class Orchestrator:
         thread_id: str,
         session_id: str,
     ) -> OrchestratorResponse | None:
+        control = self._task_control_kind(text)
         task = self._task_coordinator.store.active_for_thread(actor_id=user_id, thread_id=thread_id)
         if task is None:
-            return None
-        control = self._task_control_kind(text)
+            # Status is observational and remains useful after termination.
+            # Resolve only the most recent task bound to this actor/thread; a
+            # terminal task is never made active again and no control action
+            # can advance it. Other controls deliberately retain the active-
+            # task requirement.
+            if control != "status":
+                return None
+            recent = self._task_coordinator.store.list(actor_id=user_id, thread_id=thread_id, limit=1)
+            task = recent[0] if recent else None
+            if task is None:
+                return None
         if control is None:
             current_index = int(task.get("current_step") or 0)
             steps = task.get("steps") if isinstance(task.get("steps"), list) else []
