@@ -501,7 +501,16 @@ def _structured_capability_inputs(
             result["provider_id"] = provider_match
 
     elif capability_id == "models.switch":
-        result["promote_default"] = "default" in tokens
+        ordered_tokens = normalized.split()
+        default_positions = [index for index, token in enumerate(ordered_tokens) if token == "default"]
+        default_is_negated = any(
+            {"not", "never", "without", "dont", "don't"}
+            & set(ordered_tokens[max(0, index - 5):index])
+            for index in default_positions
+        )
+        model_action = "test" if "test" in tokens else "make_default" if default_positions and not default_is_negated else "temporary_switch"
+        result["model_action"] = model_action
+        result["promote_default"] = model_action == "make_default"
         if "best" in tokens and "local" in tokens:
             result["model_target"] = "__best_local__"
         model_tokens = re.findall(r"\b(?:ollama|openrouter|openai):[A-Za-z0-9][A-Za-z0-9._:/-]*|\b[A-Za-z][A-Za-z0-9._-]*:[A-Za-z0-9][A-Za-z0-9._:-]*", original)

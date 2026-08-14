@@ -5,7 +5,7 @@ This is the current-state handover doc. Product intent lives in
 `PRODUCT_RUNTIME_SPEC.md`. Treat this file as a status snapshot, not the sole
 source of truth.
 
-## WP4.5 candidate truth (v0.2.19)
+## WP4.5 candidate truth (v0.2.20)
 
 - Structured Ollama observation, registry configuration, Model Manager history,
   and Scout advice are reconciled without presenting remote/history rows as
@@ -17,7 +17,7 @@ source of truth.
   probes. Runtime status uses an aged observed snapshot; explicit refresh keeps
   bounded live probing available.
 - See `docs/design/MODEL_TRUTH_AND_LATENCY_WP4_5.md` and
-  `docs/releases/v0.2.19.md`.
+  `docs/releases/v0.2.20.md`.
 
 ## Completed WP4 truth (v0.2.16)
 

@@ -202,7 +202,11 @@ def test_production_chat_resolves_spaced_canonical_model_identity_without_switch
             "registered_not_observed": [],
             "remote_registered": [],
         }
-        with patch.object(truth, "model_runtime_truth", return_value=fixture):
+        with patch.object(truth, "model_runtime_truth", return_value=fixture), patch.object(
+            truth,
+            "test_chat_model_target",
+            return_value=(True, {"provider": "ollama", "model_id": "ollama:qwen2.5:3b-instruct"}),
+        ):
             response = _chat(
                 runtime,
                 "test qwen2.5 3b for me but do not change my default",
@@ -212,4 +216,43 @@ def test_production_chat_resolves_spaced_canonical_model_identity_without_switch
         message = str(response.get("message") or "")
         assert "couldn't find that model" not in message.lower()
         assert "ollama:qwen2.5:3b-instruct" in message.lower()
+        assert "without switching" in message.lower()
         assert runtime.get_defaults().get("default_model") == before
+
+
+def test_production_pending_model_change_accepts_explicit_combined_denial():
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        runtime = AgentRuntime(_config(str(root / "registry.json"), str(root / "agent.db")))
+        truth = runtime.runtime_truth_service()
+        added, result = runtime.add_provider_model(
+            "ollama", {"model": "qwen2.5:3b-instruct", "capabilities": ["chat"], "available": True}
+        )
+        assert added, result
+        fixture = {
+            "ok": True,
+            "selection": {"provider": "ollama", "default_model": "ollama:Gemma:latest", "effective_model": "ollama:Gemma:latest"},
+            "installed": [{
+                "canonical_id": "ollama:qwen2.5:3b-instruct",
+                "provider": "ollama",
+                "provider_native_id": "qwen2.5:3b-instruct",
+                "ready": True,
+                "chat_eligible": True,
+            }],
+        }
+        with patch.object(truth, "model_runtime_truth", return_value=fixture):
+            preview = _chat(
+                runtime,
+                "make ollama:qwen2.5:3b-instruct my default",
+                user="wp45-deny",
+                thread="wp45-deny:t",
+            )
+            denied = _chat(
+                runtime,
+                "no, cancel that model change",
+                user="wp45-deny",
+                thread="wp45-deny:t",
+            )
+        assert "say yes" in str(preview.get("message") or "").lower()
+        assert "cancelled" in str(denied.get("message") or "").lower()
+        assert runtime.get_defaults().get("default_model") != "ollama:qwen2.5:3b-instruct"

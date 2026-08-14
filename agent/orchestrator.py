@@ -1357,6 +1357,7 @@ class Orchestrator:
                             "remote_only": bool,
                             "provider_id": str,
                             "model_target": str,
+                            "model_action": str,
                             "model_tier": str,
                             "promote_default": bool,
                             "scout_view": str,
@@ -1743,6 +1744,9 @@ class Orchestrator:
         if capability_id.startswith("models."):
             if capability_id == "models.switch":
                 target = str(payload.get("model_target") or "").strip()
+                model_action = str(payload.get("model_action") or "temporary_switch").strip().lower()
+                if model_action == "test":
+                    return self._model_controller_test_response(user_id, text)
                 if target == "__best_local__":
                     return self._switch_better_local_model_response(user_id)
                 # The understanding contract carries exact provider-native IDs
@@ -24787,6 +24791,24 @@ class Orchestrator:
         }
 
     @staticmethod
+    def _looks_like_pending_denial(text: str | None) -> bool:
+        normalized = normalize_setup_text(text).replace("/", " ")
+        tokens = normalized.split()
+        if not tokens:
+            return False
+        if tokens[0] in {"no", "n", "cancel", "deny", "reject", "stop"}:
+            return True
+        if len(tokens) >= 2 and tokens[:2] == ["never", "mind"]:
+            return True
+        for index, token in enumerate(tokens):
+            if token not in {"cancel", "deny", "reject", "stop"}:
+                continue
+            preceding = set(tokens[max(0, index - 3):index])
+            if not preceding & {"not", "never", "dont", "don't"}:
+                return True
+        return False
+
+    @staticmethod
     def _looks_like_plan_revise_request(text: str | None) -> bool:
         normalized = " ".join(str(text or "").strip().lower().split())
         return normalized in {
@@ -24882,7 +24904,7 @@ class Orchestrator:
                 },
                 skip_post_response_hooks=True,
             )
-        if normalized in {"no", "n"}:
+        if self._looks_like_pending_denial(normalized):
             cancelled = self._clear_pending_confirmation(user_id, status=PENDING_STATUS_ABORTED)
             self._cancel_pending_confirmation_plan(cancelled)
             self._record_runtime_event(

@@ -156,21 +156,22 @@ def main() -> int:
             status, preview, _ = chat(base, "make ollama:qwen2.5:3b-instruct my default", "switch-deny")
             status2, denied, _ = chat(base, "no cancel that", "switch-deny")
             results.append({"name": "switch_preview_denial", "passed": status == 200 and status2 == 200 and any(term in str(denied.get("message") or "").lower() for term in ("cancel", "denied", "not"))})
-            status, test_preview, _ = chat(
+            before_test_defaults = json.loads(registry_path.read_text(encoding="utf-8")).get("defaults", {})
+            status, test_result, _ = chat(
                 base,
                 "test qwen2.5 3b for me but do not change my default",
                 "test-deny",
             )
-            status2, test_denied, _ = chat(base, "no, cancel that test", "test-deny")
-            test_message = str(test_preview.get("message") or "").lower()
+            after_test_defaults = json.loads(registry_path.read_text(encoding="utf-8")).get("defaults", {})
+            test_message = str(test_result.get("message") or "").lower()
             results.append({
-                "name": "human_spaced_model_test_preview_denial",
+                "name": "human_spaced_model_test_without_default_change",
                 "passed": (
                     status == 200
-                    and status2 == 200
                     and "ollama:qwen2.5:3b-instruct" in test_message
                     and "couldn't find that model" not in test_message
-                    and any(term in str(test_denied.get("message") or "").lower() for term in ("cancel", "denied", "not"))
+                    and "without switching" in test_message
+                    and before_test_defaults == after_test_defaults
                 ),
             })
             status, generic, generic_ms = chat(base, "In one short sentence, explain why leaves look green.", "generic")
