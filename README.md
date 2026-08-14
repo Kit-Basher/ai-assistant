@@ -18,7 +18,7 @@ in BotFather, update the Personal Agent secret store, and restart
 the embedded Telegram poller in `personal-agent-api.service`.
 
 ## Current Product Truth
-Current release candidate: v0.2.18. It preserves the existing authorization,
+Current release candidate: v0.2.19. It preserves the existing authorization,
 Telegram, memory, filesystem, model-management, pack, and Web UI foundations
 while adding a bounded, durable plan-act-verify coordinator above the live
 capability registry. Simple requests retain the direct WP1/WP2 path; substantial
@@ -29,7 +29,7 @@ without in-process foreign code or host authority. WP4.5 adds one reconciled
 physical/registered/history model view, comparable installed-model evidence,
 an advisory-only recommendation, and removes synchronous readiness probes from
 deterministic chat delivery. See
-[`docs/releases/v0.2.18.md`](docs/releases/v0.2.18.md). Release tags are not
+[`docs/releases/v0.2.19.md`](docs/releases/v0.2.19.md). Release tags are not
 created automatically by audit tooling.
 
 The user interacts with the assistant layer. The assistant interprets intent,

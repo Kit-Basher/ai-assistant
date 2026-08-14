@@ -312,7 +312,12 @@ class ModelRuntimeTruth:
             if provider == "ollama" and canonical_id in installed_by_id:
                 row = installed_by_id[canonical_id]
                 row["registered"] = True
-                row["routable"] = bool(registry_row.get("routable", row.get("routable")))
+                # The legacy inventory synthesizes ``routable=false`` when no
+                # explicit routing field exists.  It is not a stronger source
+                # than a current physical observation plus this run's model
+                # evaluation, so do not let that compatibility default turn a
+                # proven local model into a contradictory ready-but-unroutable
+                # row.  Benchmark failures below still fail the model closed.
                 row["ready"] = bool(registry_row.get("available", row.get("ready")))
                 row["aliases"] = sorted({*row.get("aliases", []), raw_id})
                 continue

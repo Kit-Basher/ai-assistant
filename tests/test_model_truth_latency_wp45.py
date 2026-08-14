@@ -60,7 +60,7 @@ def test_canonical_identity_normalizes_provider_case_and_latest_alias():
 def test_physical_inventory_collapses_same_digest_and_separates_remote_history():
     runtime = _Runtime(
         rows=[
-            {"id": "ollama:gemma", "provider": "ollama", "model_name": "gemma", "available": True, "routable": True},
+            {"id": "ollama:gemma", "provider": "ollama", "model_name": "gemma", "available": True, "routable": False},
             {"id": "openrouter:remote/model", "provider": "openrouter", "model_name": "remote/model", "available": False},
         ]
     )
@@ -70,6 +70,8 @@ def test_physical_inventory_collapses_same_digest_and_separates_remote_history()
     assert payload["counts"]["physically_installed"] == 1
     assert len(payload["installed"][0]["aliases"]) >= 2
     assert payload["installed"][0]["effective"] is True
+    assert payload["installed"][0]["ready"] is True
+    assert payload["installed"][0]["routable"] is True
     assert len(payload["remote_registered"]) == 1
 
 
