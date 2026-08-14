@@ -24796,12 +24796,16 @@ class Orchestrator:
         tokens = normalized.split()
         if not tokens:
             return False
-        if tokens[0] in {"no", "n", "cancel", "deny", "reject", "stop"}:
+        if tokens[0] in {"no", "n", "cancel", "deny", "reject"}:
+            return True
+        if tokens[0] == "stop" and (
+            len(tokens) == 1 or tokens[1] in {"that", "it", "this", "task", "plan", "action"}
+        ):
             return True
         if len(tokens) >= 2 and tokens[:2] == ["never", "mind"]:
             return True
         for index, token in enumerate(tokens):
-            if token not in {"cancel", "deny", "reject", "stop"}:
+            if token not in {"cancel", "deny", "reject"}:
                 continue
             preceding = set(tokens[max(0, index - 3):index])
             if not preceding & {"not", "never", "dont", "don't"}:
