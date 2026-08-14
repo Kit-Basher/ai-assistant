@@ -34,6 +34,9 @@ WP3_TASK_LOOP_TEST_NODES: tuple[str, ...] = (
 WP4_PACK_RUNTIME_TEST_NODES: tuple[str, ...] = (
     "tests/test_wp4_pack_runtime.py",
 )
+WP45_MODEL_TRUTH_TEST_NODES: tuple[str, ...] = (
+    "tests/test_model_truth_latency_wp45.py",
+)
 
 PY_COMPILE_TARGETS: tuple[str, ...] = (
     "agent/api_server.py",
@@ -84,6 +87,11 @@ PY_COMPILE_TARGETS: tuple[str, ...] = (
     "agent/packs/worker_process.py",
     "scripts/pack_capability_proof.py",
     "scripts/wp4_latency_probe.py",
+    "agent/llm/model_runtime_truth.py",
+    "scripts/model_runtime_evaluation.py",
+    "scripts/model_truth_latency_proof.py",
+    "scripts/wp45_latency_probe.py",
+    "scripts/wp45_isolated_candidate.py",
 )
 
 def _pytest_command(test_nodes: tuple[str, ...]) -> tuple[str, ...]:
@@ -95,6 +103,7 @@ RELEASE_GATE_COMMANDS: tuple[tuple[str, ...], ...] = (
     (sys.executable, "scripts/native_capability_proof.py", "--execute-tests"),
     (sys.executable, "scripts/task_loop_proof.py", "--execute-tests"),
     (sys.executable, "scripts/pack_capability_proof.py", "--execute-tests", "--sensitivity"),
+    (sys.executable, "scripts/model_truth_latency_proof.py", "--execute-tests", "--sensitivity"),
     ("bash", "scripts/build_webui.sh"),
     (
         "node",
@@ -105,7 +114,7 @@ RELEASE_GATE_COMMANDS: tuple[tuple[str, ...], ...] = (
         "desktop/tests/stateUiHelpers.test.js",
         "desktop/tests/taskUiHelpers.test.js",
     ),
-    _pytest_command((*MAIN_TEST_NODES, *WP1_UNIFIED_ROUTING_TEST_NODES, *WP2_NATIVE_CAPABILITY_TEST_NODES, *WP3_TASK_LOOP_TEST_NODES, *WP4_PACK_RUNTIME_TEST_NODES)),
+    _pytest_command((*MAIN_TEST_NODES, *WP1_UNIFIED_ROUTING_TEST_NODES, *WP2_NATIVE_CAPABILITY_TEST_NODES, *WP3_TASK_LOOP_TEST_NODES, *WP4_PACK_RUNTIME_TEST_NODES, *WP45_MODEL_TRUTH_TEST_NODES)),
     _pytest_command(EXTENDED_TEST_NODES),
     ("git", "diff", "--check"),
 )

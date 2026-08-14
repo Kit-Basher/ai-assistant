@@ -1,6 +1,6 @@
 {
   "schema": "personal-agent.mutation-file-classification.v2b",
-  "reviewed_count": 169,
+  "reviewed_count": 173,
   "required_fields": [
     "path",
     "disposition",
@@ -2551,6 +2551,66 @@
       "rollback_scope": "temporary candidate pack/state and ignored benchmark report only",
       "audit_evidence": "WP4 isolated median/p95 report and external-pack cleanup check",
       "contract_identity": "wp4-latency.v1"
+    },
+    {
+      "path": "scripts/model_runtime_evaluation.py",
+      "disposition": "offline_tool",
+      "capability": "developer.model_evaluation",
+      "entry_point": "explicit command-line main on the release host",
+      "actor": "developer/release operator",
+      "target_resources": "bounded generated evidence reports and transient provider model loads",
+      "mutation_type": "sequential read-only model evaluation, report generation, and provider unload request",
+      "policy_path": "not imported by shipping runtime; no default, override, install, or delete operation exists",
+      "executor": "script-owned production model adapter and bounded Ollama metrics probe",
+      "confirmation_requirements": "explicit command invocation",
+      "rollback_scope": "generated report files and transient model load state only",
+      "audit_evidence": "WP4.5 evaluation report, default/override hash comparison, and zero-download/delete assertions",
+      "contract_identity": "personal-agent.model-evaluation.v1"
+    },
+    {
+      "path": "scripts/model_truth_latency_proof.py",
+      "disposition": "offline_tool",
+      "capability": "developer.model_truth_latency_proof",
+      "entry_point": "explicit command-line main and canonical release gate",
+      "actor": "developer/release operator",
+      "target_resources": "generated redacted candidate-bound WP4.5 proof reports",
+      "mutation_type": "proof report generation and deliberate in-memory sensitivity mutations",
+      "policy_path": "not imported by shipping runtime; sensitivity mutations never write runtime state",
+      "executor": "script-owned structural proof runner",
+      "confirmation_requirements": "explicit command or canonical release-gate invocation",
+      "rollback_scope": "ignored build report only",
+      "audit_evidence": "WP4.5 proof totals and omitted-model, stale-evidence, and latency sensitivity checks",
+      "contract_identity": "personal-agent.model-truth-latency-proof.v1"
+    },
+    {
+      "path": "scripts/wp45_isolated_candidate.py",
+      "disposition": "offline_tool",
+      "capability": "developer.isolated_candidate_verification",
+      "entry_point": "explicit command-line main against temporary state and a temporary port",
+      "actor": "developer/release operator",
+      "target_resources": "temporary copied state/config, candidate process, test transcripts, and ignored report",
+      "mutation_type": "isolated candidate lifecycle and bounded test conversation writes",
+      "policy_path": "never targets the installed service; verifies no selected/default/override or model-artifact mutation",
+      "executor": "script-owned temporary API process and production HTTP clients",
+      "confirmation_requirements": "explicit command invocation",
+      "rollback_scope": "terminate candidate and remove temporary directory, port, and copied state",
+      "audit_evidence": "WP4.5 isolated scenario report including port-closed and zero-model-mutation assertions",
+      "contract_identity": "personal-agent.wp45-isolated-candidate.v1"
+    },
+    {
+      "path": "scripts/wp45_latency_probe.py",
+      "disposition": "offline_tool",
+      "capability": "developer.performance_probe",
+      "entry_point": "explicit command-line main against an explicit loopback API",
+      "actor": "developer/release operator",
+      "target_resources": "bounded chat benchmark transcripts and ignored timing report",
+      "mutation_type": "HTTP timing observations plus candidate-only conversation rows",
+      "policy_path": "not imported by shipping runtime; explicit URL and sample count are bounded",
+      "executor": "script-owned curl-compatible body-complete sampler",
+      "confirmation_requirements": "explicit command invocation",
+      "rollback_scope": "temporary candidate state and generated report only",
+      "audit_evidence": "WP4.5 raw TTFB/body-complete/body-after-first-byte reports",
+      "contract_identity": "personal-agent.wp45-latency.v1"
     }
   ]
 }

@@ -2580,6 +2580,10 @@ class AgentRuntime:
             )
             self.router.set_external_health_state(self._health_monitor.state)
             self._refresh_semantic_memory_service()
+            truth_service = getattr(self, "_runtime_truth_service", None)
+            invalidate_truth_cache = getattr(truth_service, "_invalidate_snapshot_cache", None)
+            if callable(invalidate_truth_cache):
+                invalidate_truth_cache()
 
     def _refresh_semantic_memory_service(self) -> None:
         router = self.router
@@ -4569,49 +4573,32 @@ class AgentRuntime:
         except Exception:
             return False
 
+    def _direct_runtime_frontdoor_compatibility(self) -> bool:
+        """Compatibility for unit/tools that instantiate without run_server()."""
+        truth = self.runtime_truth_service()
+        ready_payload = truth.ready_status() if callable(getattr(truth, "ready_status", None)) else {}
+        return bool(ready_payload.get("ready", False)) if isinstance(ready_payload, dict) else False
+
     def assistant_frontdoor_active(self) -> bool:
+        # This predicate selects architecture, not dependency health. Performing
+        # provider probes here delayed every deterministic chat response by the
+        # provider timeout. Health is checked only if a selected capability needs
+        # the model; the unified deterministic front door stays available while a
+        # provider is degraded so it can explain that state honestly.
         try:
-            truth = self.runtime_truth_service()
-            if truth is None:
-                return False
-            ready_payload = truth.ready_status() if callable(getattr(truth, "ready_status", None)) else {}
-            if isinstance(ready_payload, dict) and bool(ready_payload.get("ready", False)):
-                return True
-            current = truth.current_chat_target_status()
-            current_row = current if isinstance(current, dict) else {}
-            if bool(current_row.get("ready", False)):
-                return True
-            if str(current_row.get("provider") or "").strip() or str(current_row.get("model") or "").strip():
-                return True
-            target_truth = (
-                truth.chat_target_truth()
-                if callable(getattr(truth, "chat_target_truth", None))
-                else {}
-            )
-            target_row = target_truth if isinstance(target_truth, dict) else {}
+            defaults = self.get_defaults()
             if any(
-                str(target_row.get(key) or "").strip()
-                for key in ("configured_model", "effective_model", "configured_provider", "effective_provider")
+                str(defaults.get(key) or "").strip()
+                for key in ("default_provider", "default_model", "resolved_default_model")
             ):
                 return True
-            inventory = (
-                truth.model_inventory_status()
-                if callable(getattr(truth, "model_inventory_status", None))
-                else {}
-            )
-            models = inventory.get("models") if isinstance(inventory, dict) and isinstance(inventory.get("models"), list) else []
-            if not models:
-                readiness = (
-                    truth.model_readiness_status()
-                    if callable(getattr(truth, "model_readiness_status", None))
-                    else {}
-                )
-                models = (
-                    readiness.get("models")
-                    if isinstance(readiness, dict) and isinstance(readiness.get("models"), list)
-                    else []
-                )
-            return any(isinstance(row, dict) for row in models)
+            # Directly instantiated compatibility/test runtimes do not pass
+            # through startup warmup and historically use mocked ready truth.
+            # Installed services always complete warmup before accepting chat,
+            # so this branch cannot put a provider probe on their request path.
+            if not bool(getattr(self, "_startup_warmup_started", False)):
+                return self._direct_runtime_frontdoor_compatibility()
+            return False
         except Exception:
             return False
 
@@ -5405,13 +5392,43 @@ class AgentRuntime:
         }
 
     def models(self) -> dict[str, Any]:
-        snapshot = self._router.doctor_snapshot()
+        truth = self.runtime_truth_service().model_runtime_truth(refresh=False)
+        selection = truth.get("selection") if isinstance(truth.get("selection"), dict) else {}
+        installed = [
+            {
+                **dict(row),
+                "id": str(row.get("canonical_id") or ""),
+                "model": str(row.get("provider_native_id") or ""),
+                "available": bool(row.get("ready", False)),
+                "local": True,
+                "health": {
+                    "status": "ok" if bool(row.get("ready", False)) else "unavailable",
+                    "last_error_kind": None if bool(row.get("ready", False)) else str(row.get("eligibility_reason") or "unavailable"),
+                },
+            }
+            for row in (truth.get("installed") if isinstance(truth.get("installed"), list) else [])
+            if isinstance(row, dict)
+        ]
         return {
-            "providers": snapshot.get("providers") or [],
-            "models": snapshot.get("models") or [],
-            "routing_mode": snapshot.get("routing_mode"),
-            "defaults": snapshot.get("defaults") or {},
-            "circuits": snapshot.get("circuits") or {},
+            "ok": bool(truth.get("ok", False)),
+            "contract": truth.get("contract"),
+            "models": installed,
+            "installed_models": installed,
+            "installed_unavailable": [row for row in installed if not bool(row.get("available", False))],
+            "registered_not_observed": list(truth.get("registered_not_observed") or []),
+            "remote_catalog": list(truth.get("remote_registered") or []),
+            "history_only": list(truth.get("history_only") or []),
+            "selection": dict(selection),
+            "defaults": {
+                "default_provider": selection.get("provider"),
+                "default_model": selection.get("default_model"),
+                "effective_model": selection.get("effective_model"),
+                "temporary_override": selection.get("temporary_override"),
+                "allow_remote_fallback": selection.get("remote_fallback"),
+            },
+            "observation": dict(truth.get("observation") or {}),
+            "counts": dict(truth.get("counts") or {}),
+            "source": "canonical_model_runtime_truth",
         }
 
     def model_lifecycle_status(self) -> dict[str, Any]:
@@ -24600,6 +24617,10 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if path == "/models":
                 self._send_json(200, self.runtime.models())
                 return
+            if path == "/llm/models/truth":
+                truth = self.runtime.runtime_truth_service().model_runtime_truth(refresh=False)
+                self._send_json(200 if bool(truth.get("ok", False)) else 503, truth)
+                return
             if path == "/llm/models/lifecycle":
                 self._send_json(200, self.runtime.model_lifecycle_status())
                 return
@@ -24902,6 +24923,12 @@ class APIServerHandler(BaseHTTPRequestHandler):
                     max_bytes_per_file=payload.get("max_bytes_per_file", 8192),
                 )
                 self._send_json(self._filesystem_http_status(body), body)
+                return
+            if path == "/llm/models/truth/refresh":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                truth = self.runtime.runtime_truth_service().model_runtime_truth(refresh=True)
+                self._send_json(200 if bool(truth.get("ok", False)) else 503, truth)
                 return
             if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "control":
                 ok, body = self.runtime.task_control(urllib.parse.unquote(parts[1]), payload)

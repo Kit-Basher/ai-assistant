@@ -6,6 +6,7 @@ import DebugTab from "./components/DebugTab";
 import FilesTab from "./components/FilesTab";
 import CapabilityStatusTab from "./components/CapabilityStatusTab";
 import ModelScoutTab from "./components/ModelScoutTab";
+import ModelTruthTab from "./components/ModelTruthTab";
 import PacksTab from "./components/PacksTab";
 import OperationsTab from "./components/OperationsTab";
 import OptionalCapabilitiesTab from "./components/OptionalCapabilitiesTab";
@@ -264,6 +265,8 @@ export default function App() {
 
   const [providers, setProviders] = useState([]);
   const [models, setModels] = useState([]);
+  const [modelTruth, setModelTruth] = useState(null);
+  const [modelTruthRefreshing, setModelTruthRefreshing] = useState(false);
   const [routingMode, setRoutingMode] = useState("auto");
   const [defaultProvider, setDefaultProvider] = useState("");
   const [defaultModel, setDefaultModel] = useState("");
@@ -468,7 +471,8 @@ export default function App() {
         permissionsPayload,
         auditPayload,
         capabilityStatusPayload,
-        packCapabilitiesPayload
+        packCapabilitiesPayload,
+        modelTruthPayload
       ] = await Promise.all([
         request("GET", "/providers"),
         request("GET", "/models"),
@@ -491,7 +495,8 @@ export default function App() {
         request("GET", "/permissions").catch(() => null),
         request("GET", "/audit?limit=20").catch(() => null),
         request("GET", "/capabilities?advanced=1").catch(() => null),
-        request("GET", "/packs/capabilities").catch(() => null)
+        request("GET", "/packs/capabilities").catch(() => null),
+        request("GET", "/llm/models/truth").catch(() => null)
       ]);
 
       const providerRows = providersPayload.providers || [];
@@ -499,6 +504,7 @@ export default function App() {
 
       setProviders(providerRows);
       setModels(modelRows);
+      if (modelTruthPayload) setModelTruth(modelTruthPayload);
       setRoutingMode(defaultsPayload.routing_mode || "auto");
       setDefaultProvider(defaultsPayload.default_provider || "");
       setDefaultModel(defaultsPayload.default_model || "");
@@ -876,6 +882,19 @@ export default function App() {
       await refreshRuntimeState();
     } catch (error) {
       appendLog({ endpoint: "/models/refresh", ok: false, detail: asErrorText(error) });
+    }
+  };
+
+  const refreshModelTruth = async () => {
+    setModelTruthRefreshing(true);
+    try {
+      const payload = await request("POST", "/llm/models/truth/refresh", {});
+      setModelTruth(payload);
+      appendLog({ endpoint: "/llm/models/truth/refresh", ok: true, detail: "Refreshed physical model evidence" });
+    } catch (error) {
+      appendLog({ endpoint: "/llm/models/truth/refresh", ok: false, detail: asErrorText(error) });
+    } finally {
+      setModelTruthRefreshing(false);
     }
   };
 
@@ -1377,28 +1396,45 @@ export default function App() {
     setModelScoutRunning(true);
     setModelScoutMessage("Refreshing canonical recommendations...");
     try {
-      const [checkPayload, lifecyclePayload] = await Promise.all([
-        request("POST", "/llm/models/check", { purposes: MODEL_SCOUT_PURPOSES }),
-        request("GET", "/llm/models/lifecycle")
-      ]);
-      const nextSuggestions = buildCanonicalScoutSuggestions({
-        checkPayload,
-        providerRows: providers
+      const truth = await request("POST", "/llm/models/truth/refresh", {});
+      const evaluationRows = Array.isArray(truth?.evaluation?.evaluated_models)
+        ? truth.evaluation.evaluated_models
+        : [];
+      const ranking = Array.isArray(truth?.recommendation?.ranking) ? truth.recommendation.ranking : [];
+      const byName = new Map(evaluationRows.map((row) => [String(row.model || ""), row]));
+      const nextSuggestions = ranking.map((name, index) => {
+        const row = byName.get(name) || {};
+        return {
+          id: `host-eval:${name}`,
+          purposeLabel: index === 0 ? "Recommended default" : "Installed comparison",
+          canonical_model_id: name.startsWith("ollama:") ? name : `ollama:${name}`,
+          local: true,
+          score: Number(row?.score?.rate || 0),
+          tier: null,
+          reason: `host evaluation ${row?.score?.passed || 0}/${row?.score?.total || 0}`,
+          whyBetter: [`median ${Math.round(Number(row?.latency?.median_ms || 0))} ms`],
+          tradeoffs: Number(row?.stability?.errors || 0) ? [`${row.stability.errors} provider error(s)`] : []
+        };
       });
-      setModelScoutStatus(
-        buildCanonicalScoutStatus({
-          checkPayload,
-          lifecyclePayload
-        })
-      );
+      setModelScoutStatus({
+        mode: "advisory_host_evaluation",
+        currentModel: truth?.selection?.effective_model || null,
+        recommendationCount: nextSuggestions.length,
+        availableCount: Number(truth?.counts?.installed_chat_eligible || 0),
+        providerCounts: { ollama: Number(truth?.counts?.physically_installed || 0) },
+        lifecycleCounts: truth?.manager?.counts || {},
+        warnings: truth?.observation?.stale ? ["physical observation is stale"] : [],
+        lastRunAt: truth?.scout?.last_run_at || null
+      });
       setModelScoutSuggestions(nextSuggestions);
+      setModelTruth(truth);
       setModelScoutMessage(`Recommendations refreshed: ${nextSuggestions.length} candidate(s).`);
-      appendLog({ endpoint: "/llm/models/check", ok: true, detail: `recommendations=${nextSuggestions.length}` });
+      appendLog({ endpoint: "/llm/models/truth/refresh", ok: true, detail: `recommendations=${nextSuggestions.length}` });
       await refreshReadyState();
     } catch (error) {
       const detail = asErrorText(error);
       setModelScoutMessage(`Recommendation refresh failed: ${detail}`);
-      appendLog({ endpoint: "/llm/models/check", ok: false, detail });
+      appendLog({ endpoint: "/llm/models/truth/refresh", ok: false, detail });
     } finally {
       setModelScoutRunning(false);
     }
@@ -2186,6 +2222,18 @@ export default function App() {
           setPermissionsConfig={setPermissionsConfig}
           updatePermissionAction={updatePermissionAction}
           updatePermissionConstraint={updatePermissionConstraint}
+        />
+      )
+    },
+    {
+      id: "model_truth",
+      label: "Installed model truth",
+      group: "Models",
+      content: (
+        <ModelTruthTab
+          snapshot={modelTruth}
+          onRefresh={refreshModelTruth}
+          refreshing={modelTruthRefreshing}
         />
       )
     },

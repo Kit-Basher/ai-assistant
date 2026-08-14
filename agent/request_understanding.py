@@ -255,16 +255,20 @@ def _semantic_domain_boost(capability_id: str, tokens: set[str]) -> float:
     model_inventory_signal = has("active", "current", "using", "configured", "setup", "installed", "available", "ready", "answering", "now", "name", "inventory", "status", "health", "policy", "cap", "choose") or has_fuzzy(
         "active", "current", "using", "configured", "setup", "installed", "available", "ready", "answering", "inventory", "status", "health"
     ) or (has("why") and has("switch"))
-    if model_domain and capability_id == "models.inventory" and (model_inventory_signal or has("local", "cloud") or {"set", "up"}.issubset(tokens)):
+    model_recommendation_signal = has("best", "better", "stronger", "worth", "recommend", "recommendation", "should", "upgrade", "candidate")
+    provider_guidance_signal = has("gpu", "vram", "hardware", "debian") and has("provider", "setup", "support", "llama", "ollama")
+    if model_domain and capability_id == "models.inventory" and not model_recommendation_signal and (model_inventory_signal or has("local", "cloud") or {"set", "up"}.issubset(tokens)):
         score += 0.40 if (has("provider", "providers", "openrouter", "ollama") or has_fuzzy("provider", "providers", "openrouter", "ollama")) and (has("status", "health") or has_fuzzy("status", "health")) else 0.24
+    if model_domain and capability_id == "models.inventory" and provider_guidance_signal:
+        score += 0.54
     if model_domain and capability_id == "models.inventory" and has("install", "acquire", "download", "pull") and has("can", "could", "available", "support"):
         score += 0.44
     if model_domain and capability_id == "models.scout" and (has("scout") or has_fuzzy("scout")):
         score += 0.40
     elif model_domain and capability_id == "models.scout" and has("discover", "discovery", "catalog", "hugging", "huggingface"):
         score += 0.34
-    elif model_domain and capability_id == "models.scout" and has("best", "better", "stronger", "worth", "recommend", "recommendation", "should", "upgrade", "candidate"):
-        score += 0.26
+    elif model_domain and capability_id == "models.scout" and model_recommendation_signal and not provider_guidance_signal:
+        score += 0.40
     if (
         model_domain
         and capability_id == "models.switch"
@@ -521,6 +525,7 @@ def _structured_capability_inputs(
         recommendation_question = bool(
             tokens & {"recommend", "recommendation", "should", "best", "better"}
             and tokens & {"model", "models"}
+            and not tokens & {"provider", "providers", "setup", "support", "llama.cpp"}
         )
         remote_role = None
         if recommendation_question and tokens & {"cloud", "remote", "cheap", "budget", "premium"}:
@@ -533,9 +538,13 @@ def _structured_capability_inputs(
             else:
                 remote_role = "cheap_cloud"
             result["scout_role"] = remote_role
-        if tokens & {"discover", "discovery", "catalog", "download", "hugging", "huggingface"}:
+        if tokens & {"discover", "discovery", "catalog", "download", "hugging", "huggingface"} or (
+            "scout" in tokens and tokens & {"new", "upgrade"}
+        ):
             result["scout_view"] = "discovery"
-        elif remote_role or tokens & {"strategy", "policy", "approach", "method"} or (
+        elif recommendation_question and not remote_role and not tokens & {"coding", "research", "reasoning", "vision"}:
+            result["scout_view"] = "evaluation"
+        elif recommendation_question or remote_role or tokens & {"strategy", "policy", "approach", "method"} or (
             "scout" in tokens and tokens & {"what", "sees", "status", "show"}
         ) or (
             tokens & {"what", "which", "why"} and tokens & {"should", "use", "recommend"}

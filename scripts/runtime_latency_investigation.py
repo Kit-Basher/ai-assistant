@@ -209,6 +209,16 @@ def main() -> int:
             timeout=args.timeout,
         ),
     )
+    presence_chat = _samples(
+        "presence_chat_body_complete",
+        20,
+        lambda i: _request_json(
+            "POST",
+            f"{base}/chat",
+            payload=_chat_payload("u here?", suffix=f"presence-{i}"),
+            timeout=args.timeout,
+        ),
+    )
     telegram_status_chat = _samples(
         "telegram_status_chat",
         5,
@@ -259,6 +269,7 @@ def main() -> int:
         search_hit,
         package_direct,
         runtime_status_chat,
+        presence_chat,
         telegram_status_chat,
         search_status_chat,
         package_plan,
@@ -270,7 +281,8 @@ def main() -> int:
         "state_warm": {"median_ms": 250, "p95_ms": 750},
         "search_status_cache_hit": {"median_ms": 50, "p95_ms": 150},
         "direct_package_state": {"median_ms": 100, "p95_ms": 250},
-        "runtime_status_chat": {"median_ms": 3000, "p95_ms": 4500},
+        "presence_chat_body_complete": {"median_ms": 150, "p95_ms": 250},
+        "runtime_status_chat": {"median_ms": 500, "p95_ms": 1000},
         "telegram_status_chat": {"median_ms": 3000, "p95_ms": 4500},
         "search_status_chat": {"median_ms": 3000, "p95_ms": 4500},
         "package_plan_preview": {"median_ms": 1800, "p95_ms": 3500},
@@ -278,6 +290,8 @@ def main() -> int:
     }
     pass_count = 0
     warn_count = 0
+    blocking_latency_names = {"presence_chat_body_complete", "runtime_status_chat"}
+    release_blockers: list[str] = []
     for check in checks:
         name = str(check["name"])
         dist = check.get("distribution") if isinstance(check.get("distribution"), dict) else {}
@@ -287,6 +301,8 @@ def main() -> int:
             if int(dist.get("median_ms") or 0) > int(budget["median_ms"]) or int(dist.get("p95_ms") or 0) > int(budget["p95_ms"]):
                 status = "WARN"
                 warnings.append(name)
+                if name in blocking_latency_names:
+                    release_blockers.append(name)
         check["budget"] = budget
         check["status"] = status
         if status == "PASS":
@@ -311,7 +327,8 @@ def main() -> int:
         "plan_store_scale": scale,
         "dominant_span": {"name": dominant, "max_ms": dominant_ms},
         "warnings": warnings,
-        "release_blockers": 0,
+        "release_blockers": len(release_blockers),
+        "blocking_latency_failures": release_blockers,
         "classification": {
             "authorization_affected": False,
             "primary_uninstall_enabled": False,
@@ -321,12 +338,12 @@ def main() -> int:
     }
     evidence_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    print(f"PASS={pass_count} WARN={warn_count} FAIL=0")
+    print(f"PASS={pass_count} WARN={warn_count} FAIL={len(release_blockers)}")
     print(f"COLD_START_MEDIAN_MS={ready_cold['distribution']['median_ms']}")
     print(f"WARM_STATUS_P95_MS={ready_warm['distribution']['p95_ms']}")
     print(f"CONFIRM_LOOKUP_P95_MS={confirmation_lookup['distribution']['p95_ms']}")
     print(f"DOMINANT_SPAN={dominant}")
-    print("RELEASE_BLOCKERS=0")
+    print(f"RELEASE_BLOCKERS={len(release_blockers)}")
     print(f"EVIDENCE={evidence_path}")
     for check in checks:
         dist = check["distribution"]
@@ -339,7 +356,7 @@ def main() -> int:
             f"PASS: plan_store_scale size={row['size']} "
             f"reload_ms={row['reload_ms']} lookup_p95={row['lookup']['p95_ms']}"
         )
-    return 0
+    return 1 if release_blockers else 0
 
 
 if __name__ == "__main__":

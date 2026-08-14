@@ -18,15 +18,18 @@ in BotFather, update the Personal Agent secret store, and restart
 the embedded Telegram poller in `personal-agent-api.service`.
 
 ## Current Product Truth
-Current release candidate: v0.2.16. It preserves the existing authorization,
+Current release candidate: v0.2.17. It preserves the existing authorization,
 Telegram, memory, filesystem, model-management, pack, and Web UI foundations
 while adding a bounded, durable plan-act-verify coordinator above the live
 capability registry. Simple requests retain the direct WP1/WP2 path; substantial
 goals may sequence only registered capabilities, pause at exact approval
 boundaries, and complete only with verifier evidence. Reviewed local declarative
 and pure-computation WebAssembly packs can now add dynamic registry capabilities
-without in-process foreign code or host authority. See
-[`docs/releases/v0.2.16.md`](docs/releases/v0.2.16.md). Release tags are not
+without in-process foreign code or host authority. WP4.5 adds one reconciled
+physical/registered/history model view, comparable installed-model evidence,
+an advisory-only recommendation, and removes synchronous readiness probes from
+deterministic chat delivery. See
+[`docs/releases/v0.2.17.md`](docs/releases/v0.2.17.md). Release tags are not
 created automatically by audit tooling.
 
 The user interacts with the assistant layer. The assistant interprets intent,
@@ -46,6 +49,12 @@ It can inspect the current model/runtime, recommend better model choices, read
 and search safe parts of the filesystem, run a small set of bounded shell
 operations, safely ingest downloaded text-based skill packs, and carry out
 explicit controller actions such as testing or switching models.
+
+`GET /llm/models/truth` is the compact current model view. It separates models
+physically observed through Ollama from registered-but-unobserved rows, remote
+catalog candidates, and Manager history. `POST /llm/models/truth/refresh` is a
+bounded loopback refresh. A recommendation never changes the active/default
+model; switching still requires the existing exact preview and confirmation.
 
 It is not a guessy autonomous agent. It does not invent state, does not expose
 arbitrary shell execution, and does not mutate local or system state without an

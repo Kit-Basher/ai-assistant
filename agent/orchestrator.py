@@ -1759,6 +1759,8 @@ class Orchestrator:
                 )
             if capability_id == "models.scout":
                 scout_view = str(payload.get("scout_view") or "recommendations").strip().lower()
+                if scout_view == "evaluation":
+                    return self._installed_model_evaluation_response()
                 if scout_view == "discovery":
                     return self._model_scout_discovery_response(text)
                 if scout_view == "inventory":
@@ -9835,6 +9837,26 @@ class Orchestrator:
             task_type=str(task_request.get("task_type") or "chat").strip().lower() or "chat",
             requested_remote_role=requested_remote_role,
         )
+        requested_task_type = str(task_request.get("task_type") or "chat").strip().lower() or "chat"
+        model_truth_fn = getattr(truth, "model_runtime_truth", None)
+        host_truth = model_truth_fn(refresh=False) if callable(model_truth_fn) else {}
+        host_evaluation = host_truth.get("evaluation") if isinstance(host_truth, dict) and isinstance(host_truth.get("evaluation"), dict) else {}
+        host_recommendation = host_truth.get("recommendation") if isinstance(host_truth, dict) and isinstance(host_truth.get("recommendation"), dict) else {}
+        installed_ids = {
+            str(row.get("canonical_id") or "").strip().lower()
+            for row in (host_truth.get("installed") if isinstance(host_truth.get("installed"), list) else [])
+            if isinstance(row, dict)
+        }
+        recommended_native = str(host_recommendation.get("default_general_assistant") or "").strip()
+        recommended_id = recommended_native if recommended_native.startswith("ollama:") else f"ollama:{recommended_native}"
+        if (
+            requested_task_type == "chat"
+            and not requested_remote_role
+            and host_evaluation.get("status") == "current"
+            and recommended_native
+            and recommended_id.lower() in installed_ids
+        ):
+            return self._installed_model_evaluation_response()
         try:
             payload = payload_fn(task_request=task_request, included_role_keys=included_role_keys)
         except TypeError:
@@ -10217,6 +10239,94 @@ class Orchestrator:
                 "policy": dict(policy),
                 "advisory_only": advisory_only,
                 "source": "runtime_truth.model_scout_v2",
+            },
+        )
+
+    def _installed_model_evaluation_response(self) -> OrchestratorResponse:
+        """Render the one canonical, current host evaluation without mutating selection."""
+        truth = self._runtime_truth()
+        model_truth_fn = getattr(truth, "model_runtime_truth", None) if truth is not None else None
+        host_truth = model_truth_fn(refresh=False) if callable(model_truth_fn) else {}
+        host_evaluation = (
+            host_truth.get("evaluation")
+            if isinstance(host_truth, dict) and isinstance(host_truth.get("evaluation"), dict)
+            else {}
+        )
+        host_recommendation = (
+            host_truth.get("recommendation")
+            if isinstance(host_truth, dict) and isinstance(host_truth.get("recommendation"), dict)
+            else {}
+        )
+        recommended_native = str(host_recommendation.get("default_general_assistant") or "").strip()
+        if host_evaluation.get("status") != "current" or not recommended_native:
+            reason = str(host_evaluation.get("reason") or host_evaluation.get("status") or "no_current_evaluation")
+            message = (
+                "I do not have a current apples-to-apples installed-model evaluation. "
+                f"The evidence state is {reason}; refresh and run the bounded evaluation before choosing a default."
+            )
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_runtime_state=True,
+                used_tools=["model_scout", "model_runtime_evaluation"],
+                payload={
+                    "type": "model_scout",
+                    "mode": "host_evaluation",
+                    "summary": message,
+                    "evaluation": host_evaluation,
+                    "advisory_only": True,
+                    "switch_performed": False,
+                    "source": "runtime_truth.model_runtime_truth+installed_model_evaluation",
+                },
+            )
+        recommended_id = recommended_native if recommended_native.startswith("ollama:") else f"ollama:{recommended_native}"
+        selection = host_truth.get("selection") if isinstance(host_truth.get("selection"), dict) else {}
+        current_model = str(selection.get("effective_model") or selection.get("default_model") or "").strip() or None
+        evaluated = host_evaluation.get("evaluated_models") if isinstance(host_evaluation.get("evaluated_models"), list) else []
+        by_name = {
+            str(row.get("model") or "").strip().lower(): row
+            for row in evaluated
+            if isinstance(row, dict)
+        }
+        recommended_row = by_name.get(recommended_native.removeprefix("ollama:").lower(), {})
+        current_native = (
+            str(current_model or "").split(":", 1)[1]
+            if str(current_model or "").lower().startswith("ollama:")
+            else str(current_model or "")
+        )
+        current_row = by_name.get(current_native.lower(), {})
+        rec_score = recommended_row.get("score") if isinstance(recommended_row.get("score"), dict) else {}
+        rec_latency = recommended_row.get("latency") if isinstance(recommended_row.get("latency"), dict) else {}
+        current_score = current_row.get("score") if isinstance(current_row.get("score"), dict) else {}
+        current_latency = current_row.get("latency") if isinstance(current_row.get("latency"), dict) else {}
+        observed_at = str(host_evaluation.get("observed_at") or "unknown")
+        message = (
+            f"Current default/effective model: {current_model or 'not verified'}. "
+            f"The current installed-model evaluation recommends {recommended_id}: "
+            f"{int(rec_score.get('passed') or 0)}/{int(rec_score.get('total') or 0)} deterministic cases, "
+            f"median {float(rec_latency.get('median_ms') or 0):.0f} ms. "
+            f"The current model scored {int(current_score.get('passed') or 0)}/{int(current_score.get('total') or 0)} "
+            f"with median {float(current_latency.get('median_ms') or 0):.0f} ms. "
+            f"Evidence observed {observed_at}. This is advisory only; no model was switched. "
+            "A temporary or default change still needs a separate exact preview and your confirmation."
+        )
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_runtime_state=True,
+            used_tools=["model_scout", "model_runtime_evaluation"],
+            payload={
+                "type": "model_scout",
+                "mode": "host_evaluation",
+                "summary": message,
+                "active_model": current_model,
+                "recommended_model": recommended_id,
+                "recommended_candidate": {"model_id": recommended_id, "provider_id": "ollama", "usable_now": True},
+                "task_recommendation": {"model_id": recommended_id, "provider_id": "ollama", "usable_now": True},
+                "evaluation": host_evaluation,
+                "advisory_only": True,
+                "switch_performed": False,
+                "source": "runtime_truth.model_runtime_truth+installed_model_evaluation",
             },
         )
 
@@ -15660,7 +15770,41 @@ class Orchestrator:
                 reason="runtime_truth_service_unavailable",
                 skip_post_response_hooks=True,
             )
-        current = truth.current_chat_target_status()
+        model_truth_fn = getattr(truth, "model_runtime_truth", None)
+        model_truth = model_truth_fn(refresh=False) if callable(model_truth_fn) else {}
+        selection = model_truth.get("selection") if isinstance(model_truth, dict) and isinstance(model_truth.get("selection"), dict) else {}
+        installed = model_truth.get("installed") if isinstance(model_truth, dict) and isinstance(model_truth.get("installed"), list) else []
+        effective_id = str(selection.get("effective_model") or selection.get("default_model") or "").strip()
+        effective_key = effective_id.lower()
+        effective_row = next(
+            (
+                row for row in installed
+                if isinstance(row, dict)
+                and (
+                    str(row.get("canonical_id") or "").lower() == effective_key
+                    or str(row.get("provider_native_id") or "").lower() == effective_key.removeprefix("ollama:")
+                )
+            ),
+            None,
+        )
+        current = (
+            {
+                "provider": selection.get("provider"),
+                "configured_provider": selection.get("provider"),
+                "model": selection.get("default_model"),
+                "configured_model": selection.get("default_model"),
+                "effective_provider": selection.get("provider"),
+                "effective_model": selection.get("effective_model"),
+                "ready": bool((effective_row or {}).get("ready", False)),
+                "provider_health_status": "ok" if bool(model_truth.get("ok", False)) else "unknown",
+                "health_status": "ok" if bool((effective_row or {}).get("ready", False)) else "unknown",
+                "truth_timing_ms": {
+                    "model_runtime_truth_ms": float((model_truth.get("observation") or {}).get("duration_ms") or 0.0)
+                },
+            }
+            if model_truth.get("ok")
+            else truth.current_chat_target_status()
+        )
         provider = str(current.get("provider") or current.get("effective_provider") or "").strip().lower() or None
         model = str(current.get("model") or current.get("effective_model") or "").strip() or None
         ready = bool(current.get("ready", False))
@@ -16874,6 +17018,76 @@ class Orchestrator:
         )
 
     def _canonical_model_inventory_snapshot(self, truth: Any) -> dict[str, Any]:
+        model_truth_fn = getattr(truth, "model_runtime_truth", None)
+        if callable(model_truth_fn):
+            canonical = model_truth_fn(refresh=False)
+            installed = canonical.get("installed") if isinstance(canonical, dict) else []
+            if isinstance(installed, list) and installed:
+                rows = [
+                    {
+                        **dict(row),
+                        "model_id": str(row.get("canonical_id") or ""),
+                        "provider_id": str(row.get("provider") or "").strip().lower(),
+                        "model_name": str(row.get("provider_native_id") or ""),
+                        "active": bool(row.get("effective", False)),
+                        "local": True,
+                        "installed": True,
+                        "installed_local": True,
+                        "available": bool(row.get("ready", False)),
+                        "usable_now": bool(row.get("ready", False) and row.get("chat_eligible", False)),
+                        "health_status": "ok" if bool(row.get("ready", False)) else "unavailable",
+                        "health_reason": str(row.get("eligibility_reason") or "unknown"),
+                    }
+                    for row in installed
+                    if isinstance(row, dict)
+                ]
+                rows.extend(
+                    {
+                        **dict(row),
+                        "model_id": str(row.get("canonical_id") or ""),
+                        "provider_id": str(row.get("provider") or "").strip().lower(),
+                        "model_name": str(row.get("provider_native_id") or ""),
+                        "active": False,
+                        "local": True,
+                        "installed": False,
+                        "installed_local": False,
+                        "available": bool(row.get("ready", False)),
+                        "usable_now": False,
+                        "health_status": "unknown",
+                        "health_reason": "registered_but_not_physically_observed",
+                    }
+                    for row in (
+                        canonical.get("registered_not_observed")
+                        if isinstance(canonical.get("registered_not_observed"), list)
+                        else []
+                    )
+                    if isinstance(row, dict) and str(row.get("canonical_id") or "").strip()
+                )
+                ready_rows = [dict(row) for row in rows if bool(row.get("usable_now", False))]
+                not_ready_rows = [dict(row) for row in rows if not bool(row.get("usable_now", False))]
+                selection = canonical.get("selection") if isinstance(canonical.get("selection"), dict) else {}
+                return {
+                    "active_provider": selection.get("provider"),
+                    "active_model": selection.get("effective_model"),
+                    "configured_provider": selection.get("provider"),
+                    "configured_model": selection.get("default_model"),
+                    "models": rows,
+                    "ready_now_models": ready_rows,
+                    "usable_models": ready_rows,
+                    "other_ready_now_models": [row for row in ready_rows if not bool(row.get("active"))],
+                    "other_usable_models": [row for row in ready_rows if not bool(row.get("active"))],
+                    "not_ready_models": not_ready_rows,
+                    "local_installed_models": rows,
+                    "remote_registered_models": list(canonical.get("remote_registered") or []),
+                    "inventory": dict(canonical),
+                    "readiness": {},
+                    "source": "canonical_model_runtime_truth",
+                    "truth_timing_ms": {
+                        "model_runtime_truth_ms": float(
+                            (canonical.get("observation") or {}).get("duration_ms") or 0.0
+                        )
+                    },
+                }
         inventory_fn = getattr(truth, "model_inventory_status", None)
         readiness_fn = getattr(truth, "model_readiness_status", None)
         snapshot_started = time.monotonic()
@@ -17042,6 +17256,34 @@ class Orchestrator:
             for row in (payload.get("models") if isinstance(payload.get("models"), list) else [])
             if isinstance(row, dict)
         ]
+        if remote_only:
+            rows = [
+                {
+                    **dict(row),
+                    "model_id": str(row.get("canonical_id") or row.get("model_id") or ""),
+                    "provider_id": str(row.get("provider") or row.get("provider_id") or "").strip().lower(),
+                    "model_name": str(row.get("provider_native_id") or row.get("model_name") or ""),
+                    "local": False,
+                    "installed": False,
+                    "installed_local": False,
+                    "available": bool(row.get("ready", row.get("available", False))),
+                    "usable_now": bool(
+                        row.get("ready", row.get("available", False))
+                        and row.get(
+                            "routable",
+                            row.get("usable_now", bool(row.get("enabled", True))),
+                        )
+                    ),
+                    "active": False,
+                    "availability_reason": str(row.get("history_reason") or row.get("health_status") or "unknown"),
+                }
+                for row in (
+                    payload.get("remote_registered_models")
+                    if isinstance(payload.get("remote_registered_models"), list)
+                    else []
+                )
+                if isinstance(row, dict)
+            ]
         if provider_key:
             rows = [
                 row
@@ -17102,7 +17344,7 @@ class Orchestrator:
                     parts.append(f"Cloud models present but not ready: {not_ready_preview}.")
                 message = " ".join(parts)
             else:
-                message = "I do not currently see any cloud chat models in the runtime inventory."
+                message = "I do not currently see any cloud models for chat in the runtime inventory."
             payload_type = "model_availability"
             title = "Available cloud models"
         else:
@@ -20290,6 +20532,35 @@ class Orchestrator:
                 route="model_policy_status",
                 reason="runtime_truth_service_unavailable",
                 skip_post_response_hooks=True,
+            )
+        model_truth_fn = getattr(truth, "model_runtime_truth", None)
+        model_truth = model_truth_fn(refresh=False) if callable(model_truth_fn) else {}
+        evaluation = model_truth.get("evaluation") if isinstance(model_truth, dict) and isinstance(model_truth.get("evaluation"), dict) else {}
+        recommendation = model_truth.get("recommendation") if isinstance(model_truth, dict) and isinstance(model_truth.get("recommendation"), dict) else {}
+        selection = model_truth.get("selection") if isinstance(model_truth, dict) and isinstance(model_truth.get("selection"), dict) else {}
+        if evaluation.get("status") == "current" and recommendation.get("default_general_assistant"):
+            current_id = str(selection.get("default_model") or "not verified")
+            recommended_native = str(recommendation.get("default_general_assistant") or "")
+            recommended_id = recommended_native if recommended_native.startswith("ollama:") else f"ollama:{recommended_native}"
+            message = (
+                f"{current_id} is still selected because the installed-model evaluation is advisory and no exact model-switch confirmation has been given. "
+                f"The current evidence recommends {recommended_id}; no switch was performed."
+            )
+            return self._runtime_truth_response(
+                text=message,
+                route="model_policy_status",
+                skip_post_response_hooks=True,
+                payload={
+                    "type": "model_policy_explanation",
+                    "title": "Current model choice",
+                    "summary": message,
+                    "current_model": current_id,
+                    "recommended_model": recommended_id,
+                    "evaluation_observed_at": evaluation.get("observed_at"),
+                    "advisory_only": True,
+                    "switch_performed": False,
+                    "source": "runtime_truth.model_runtime_truth",
+                },
             )
         payload = truth.model_policy_status()
         current_candidate = payload.get("current_candidate") if isinstance(payload.get("current_candidate"), dict) else {}

@@ -36,6 +36,7 @@ from agent.llm.model_manager import (
     load_model_manager_state,
     model_manager_state_path_for_runtime,
 )
+from agent.llm.model_runtime_truth import ModelRuntimeTruth
 from agent.llm.registry import _default_registry_document, parse_registry_document
 from agent.recovery_contract import detect_recovery_mode, recovery_next_action, recovery_summary
 from agent.runtime_lifecycle import RuntimeLifecyclePhase
@@ -92,6 +93,78 @@ class RuntimeTruthService:
         cache = getattr(self, "_snapshot_cache_store", None)
         if isinstance(cache, dict):
             cache.clear()
+
+    def _model_runtime_truth_service(self) -> ModelRuntimeTruth:
+        cached = getattr(self, "_model_runtime_truth_cache", None)
+        if isinstance(cached, ModelRuntimeTruth):
+            return cached
+        service = ModelRuntimeTruth(self.runtime)
+        self._model_runtime_truth_cache = service
+        return service
+
+    def model_runtime_truth(self, *, refresh: bool = False) -> dict[str, Any]:
+        cache_key = "model_runtime_truth"
+        cache = self._snapshot_cache()
+        entry = cache.get(cache_key)
+        if not refresh and isinstance(entry, dict):
+            value = entry.get("value")
+            if isinstance(value, dict):
+                payload = deepcopy(value)
+                observation = payload.get("observation") if isinstance(payload.get("observation"), dict) else {}
+                created_at = float(entry.get("created_at") or 0.0)
+                age = max(0.0, time.monotonic() - created_at) if created_at else 0.0
+                observation["age_seconds"] = round(age, 3)
+                observation["stale"] = bool(age > 300.0 or observation.get("stale", False))
+                payload["observation"] = observation
+                return payload
+        payload = self._model_runtime_truth_service().refresh()
+        cache[cache_key] = {"created_at": time.monotonic(), "value": deepcopy(payload)}
+        return deepcopy(payload)
+
+    def ready_status_observed(self) -> dict[str, Any]:
+        """Return the latest readiness observation without a synchronous probe.
+
+        Deterministic chat/status paths use this snapshot. Explicit `/ready` and
+        refresh surfaces retain the authority to perform bounded live probing.
+        """
+        entry = self._snapshot_cache().get("ready_status")
+        if isinstance(entry, dict) and isinstance(entry.get("value"), dict):
+            payload = deepcopy(entry["value"])
+            age = max(0.0, time.monotonic() - float(entry.get("created_at") or time.monotonic()))
+            payload["observation_age_seconds"] = round(age, 3)
+            payload["observation_stale"] = bool(age > self._SNAPSHOT_CACHE_TTL_SECONDS)
+            return payload
+        startup_phase = str(getattr(self.runtime, "startup_phase", "starting") or "starting").strip().lower()
+        if startup_phase == "starting" and not bool(getattr(self.runtime, "_startup_warmup_started", False)):
+            startup_phase = "ready"
+        defaults = self._defaults_snapshot()
+        configured_model = str(defaults.get("resolved_default_model") or defaults.get("default_model") or "").strip()
+        configured_provider = str(defaults.get("default_provider") or "").strip().lower()
+        ready = bool(startup_phase == "ready" and configured_model and configured_provider)
+        return {
+            "ok": True,
+            "ready": ready,
+            "core_ready": ready,
+            "chat_ready": ready,
+            "chat_usable": ready,
+            "phase": startup_phase,
+            "startup_phase": startup_phase,
+            "runtime_mode": "READY" if ready else "DEGRADED",
+            "message": (
+                "Core chat is ready."
+                if ready
+                else (
+                    "I can't read a clean runtime status yet."
+                    if not configured_model and not configured_provider
+                    else "Runtime readiness has not been observed yet."
+                )
+            ),
+            "runtime_status": {"runtime_mode": "READY" if ready else "DEGRADED"},
+            "llm": {"provider": configured_provider or None, "model": configured_model or None},
+            "observation_age_seconds": None,
+            "observation_stale": True,
+            "source": "startup+configured_target_without_probe",
+        }
 
     def _filesystem_allowed_roots(self) -> list[str]:
         config = getattr(self.runtime, "config", None)
@@ -2887,9 +2960,15 @@ class RuntimeTruthService:
                 ),
             }
 
-        ready = self.ready_status()
-        current_target = self.current_chat_target_status()
-        target_truth = self.chat_target_truth()
+        ready = self.ready_status_observed()
+        current_target = self._configured_chat_target_status()
+        target_truth = {
+            "configured_provider": current_target.get("provider"),
+            "configured_model": current_target.get("model"),
+            "effective_provider": current_target.get("provider"),
+            "effective_model": current_target.get("model"),
+            "qualification_reason": None,
+        }
         runtime_status = (
             ready.get("runtime_status")
             if isinstance(ready.get("runtime_status"), dict)
@@ -2907,6 +2986,9 @@ class RuntimeTruthService:
                 or "I can't read a clean runtime status from the current state yet."
             )
         )
+        if bool(ready.get("ready", False)) and model and model.lower() not in summary.lower():
+            target = f"{provider}:{model}" if provider and not model.lower().startswith(f"{provider}:") else model
+            summary = normalize_persona_text(f"{summary} Current chat target: {target}.")
         return {
             "scope": "ready",
             "ready": bool(ready.get("ready", False)),
@@ -2924,6 +3006,8 @@ class RuntimeTruthService:
             "configured_model": str(target_truth.get("configured_model") or "").strip() or None,
             "qualification_reason": str(target_truth.get("qualification_reason") or "").strip() or None,
             "summary": summary,
+            "observation_age_seconds": ready.get("observation_age_seconds"),
+            "observation_stale": bool(ready.get("observation_stale", False)),
         }
 
     def skill_governance_status(self) -> dict[str, Any]:

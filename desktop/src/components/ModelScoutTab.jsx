@@ -36,6 +36,7 @@ export default function ModelScoutTab({
         <p className="help-text">
           Lifecycle: {lifecycleSummary}
         </p>
+        <p className="help-text">Last host evaluation: {modelScoutStatus?.lastRunAt || "never"}</p>
         <div className="row-actions">
           <button className="button-primary" disabled={modelScoutRunning} onClick={runModelScout}>
             {modelScoutRunning ? "Refreshing..." : "Refresh Recommendations"}

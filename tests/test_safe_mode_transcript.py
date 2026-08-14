@@ -1652,40 +1652,52 @@ class TestSafeModeTranscript(unittest.TestCase):
         self.assertEqual("action_tool", scout_plain_tg.get("selected_route"))
         self.assertFalse(bool(scout_plain_meta.get("used_llm", False)))
         self.assertFalse(bool(scout_plain_tg.get("used_llm", False)))
-        self.assertEqual(["model_scout"], list(scout_plain_meta.get("used_tools") or []))
-        self.assertIn("current model:", scout_plain_text.lower())
-        self.assertIn("best chat option:", scout_plain_text.lower())
+        self.assertEqual(["model_scout", "model_runtime_evaluation"], list(scout_plain_meta.get("used_tools") or []))
+        self.assertIn("current default/effective model:", scout_plain_text.lower())
+        self.assertIn("ollama:qwen2.5:3b-instruct", scout_plain_text.lower())
         self.assertNotIn("i can't run that command here", scout_plain_text.lower())
-        self.assertIn("current model:", scout_plain_tg_text.lower())
-        self.assertIn("best chat option:", scout_plain_tg_text.lower())
+        self.assertIn("current default/effective model:", scout_plain_tg_text.lower())
+        self.assertIn("ollama:qwen2.5:3b-instruct", scout_plain_tg_text.lower())
         self.assertNotIn("i can't run that command here", scout_plain_tg_text.lower())
 
         for meta, text in ((scout_retry_meta, scout_retry_text),):
             self.assertEqual("action_tool", meta.get("route"))
             self.assertFalse(bool(meta.get("used_llm", False)))
-            self.assertEqual(["model_scout"], list(meta.get("used_tools") or []))
-        self.assertIn("Current model: ollama:qwen3.5:4b.", text)
-        self.assertIn("Best chat option: ollama:qwen2.5:7b-instruct.", text)
-        self.assertIn("Compared with current: upgrade for this task.", text)
-        self.assertIn("qwen3.5:4b", text.lower())
-        self.assertIn("qwen2.5:7b-instruct", text.lower())
-        self.assertIn("No change has been made. You can test it, switch to it temporarily, or make it the default if you want.", text)
+            self.assertEqual(["model_scout", "model_runtime_evaluation"], list(meta.get("used_tools") or []))
+        self.assertIn("Current default/effective model:", text)
+        self.assertIn("qwen2.5:3b-instruct", text.lower())
+        self.assertIn("no model was switched", text.lower())
         self.assertNotIn("disabled", text.lower())
         self.assertNotIn("i can't run that command here", scout_plain_tg_text.lower())
 
         self.assertEqual("action_tool", scout_followup_meta.get("route"))
         self.assertFalse(bool(scout_followup_meta.get("used_llm", False)))
-        self.assertIn("nanbeige", scout_followup_text.lower())
-        self.assertIn("qwen2.5:7b-instruct", scout_followup_text.lower())
+        self.assertIn("qwen3.5:4b", scout_followup_text.lower())
+        self.assertNotIn("nanbeige-chat:4b is ready", scout_followup_text.lower())
         self.assertNotIn("what are you referring to", scout_followup_text.lower())
 
     def test_safe_mode_model_scout_v2_advises_then_controller_can_test_switch_and_roll_back(self) -> None:
         runtime = self._runtime(model_scout_enabled=False)
+        runtime.add_provider_model(
+            "ollama",
+            {
+                "model": "qwen2.5:3b-instruct",
+                "capabilities": ["chat"],
+                "available": True,
+                "max_context_tokens": 32768,
+            },
+        )
+        runtime._health_monitor.state["models"]["ollama:qwen2.5:3b-instruct"] = {
+            "provider_id": "ollama",
+            "status": "ok",
+            "last_checked_at": 123,
+        }
+        runtime._router.set_external_health_state(runtime._health_monitor.state)  # type: ignore[attr-defined]
 
         with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")), patch.object(
             runtime,
             "test_provider",
-            return_value=(True, {"ok": True, "provider": "ollama", "model_id": "ollama:qwen2.5:7b-instruct"}),
+            return_value=(True, {"ok": True, "provider": "ollama", "model_id": "ollama:qwen2.5:3b-instruct"}),
         ), patch.object(
             runtime,
             "rollback_defaults",
@@ -1780,18 +1792,18 @@ class TestSafeModeTranscript(unittest.TestCase):
 
         self.assertEqual("action_tool", recommendation_meta.get("route"))
         self.assertFalse(bool(recommendation_meta.get("used_llm", False)))
-        self.assertEqual(["model_scout"], list(recommendation_meta.get("used_tools") or []))
-        self.assertIn("ollama:qwen2.5:7b-instruct", recommendation_text.lower())
-        self.assertIn("no change has been made.", recommendation_text.lower())
+        self.assertEqual(["model_scout", "model_runtime_evaluation"], list(recommendation_meta.get("used_tools") or []))
+        self.assertIn("ollama:qwen2.5:3b-instruct", recommendation_text.lower())
+        self.assertIn("no model was switched.", recommendation_text.lower())
         self.assertIn(
-            "you can test it, switch to it temporarily, or make it the default if you want.",
+            "a temporary or default change still needs a separate exact preview and your confirmation.",
             recommendation_text.lower(),
         )
         self.assertEqual("ollama:qwen3.5:4b", str(runtime.runtime_truth_service().current_chat_target_status().get("model") or "").strip())
         self.assertIn("without switching", test_text.lower())
         self.assertIn("switch preview", switched_text.lower())
-        self.assertIn("ollama:qwen2.5:7b-instruct", switched_confirm_text.lower())
-        self.assertIn("ollama:qwen2.5:7b-instruct", after_switch_text.lower())
+        self.assertIn("ollama:qwen2.5:3b-instruct", switched_confirm_text.lower())
+        self.assertIn("ollama:qwen2.5:3b-instruct", after_switch_text.lower())
         self.assertIn("switch this chat back", rollback_text.lower())
         self.assertIn("ollama:qwen3.5:4b", rollback_confirm_text.lower())
         self.assertIn("ollama:qwen3.5:4b", rolled_back_text.lower())
@@ -2221,7 +2233,44 @@ class TestSafeModeTranscript(unittest.TestCase):
             ],
         }
 
+        canonical_inventory_payload = {
+            "ok": True,
+            "selection": {
+                "provider": "ollama",
+                "default_model": "ollama:qwen3.5:4b",
+                "effective_model": "ollama:qwen3.5:4b",
+                "temporary_override": None,
+            },
+            "installed": [
+                {
+                    "canonical_id": "ollama:qwen3.5:4b",
+                    "provider": "ollama",
+                    "provider_native_id": "qwen3.5:4b",
+                    "ready": False,
+                    "chat_eligible": True,
+                    "effective": True,
+                    "eligibility_reason": "model health is down",
+                },
+                {
+                    "canonical_id": "ollama:qwen2.5:3b-instruct",
+                    "provider": "ollama",
+                    "provider_native_id": "qwen2.5:3b-instruct",
+                    "ready": True,
+                    "chat_eligible": True,
+                    "effective": False,
+                    "eligibility_reason": "ready",
+                },
+            ],
+            "registered_not_observed": [],
+            "remote_registered": [],
+            "observation": {"status": "current", "duration_ms": 0},
+        }
+
         with patch.object(
+            truth,
+            "model_runtime_truth",
+            return_value=canonical_inventory_payload,
+        ), patch.object(
             truth,
             "current_chat_target_status",
             return_value={
@@ -2702,6 +2751,40 @@ class TestSafeModeTranscript(unittest.TestCase):
 
         with patch.object(
             truth,
+            "model_runtime_truth",
+            return_value={
+                "ok": True,
+                "selection": {
+                    "provider": "ollama",
+                    "default_model": "ollama:qwen3.5:4b",
+                    "effective_model": "ollama:qwen3.5:4b",
+                },
+                "installed": [
+                    {
+                        "canonical_id": "ollama:qwen3.5:4b",
+                        "provider": "ollama",
+                        "provider_native_id": "qwen3.5:4b",
+                        "ready": False,
+                        "chat_eligible": True,
+                        "effective": True,
+                        "eligibility_reason": "model health is down",
+                    },
+                    {
+                        "canonical_id": "ollama:qwen2.5:3b-instruct",
+                        "provider": "ollama",
+                        "provider_native_id": "qwen2.5:3b-instruct",
+                        "ready": True,
+                        "chat_eligible": True,
+                        "effective": False,
+                        "eligibility_reason": "ready",
+                    },
+                ],
+                "registered_not_observed": [],
+                "remote_registered": [],
+                "observation": {"status": "current", "duration_ms": 0},
+            },
+        ), patch.object(
+            truth,
             "current_chat_target_status",
             return_value={
                 "provider": "ollama",
@@ -2842,6 +2925,10 @@ class TestSafeModeTranscript(unittest.TestCase):
         runtime = AgentRuntime(_config(self.registry_path, self.db_path, model_scout_enabled=False))
 
         with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")), patch.object(
+            runtime.runtime_truth_service(),
+            "model_runtime_truth",
+            return_value={"ok": False, "installed": [], "evaluation": {"status": "unavailable"}, "recommendation": {}},
+        ), patch.object(
             runtime.runtime_truth_service(),
             "model_scout_v2_status",
             return_value={

@@ -76,7 +76,7 @@
   "ui_mappings": {
     "basics":"assistant.capabilities","setup":"models.inventory","optional_capabilities":"search.web","state":"system.status",
     "capabilities":"assistant.capabilities","files":"filesystem.list","packs":"packs.manage","operations":"operator.lifecycle",
-    "providers":"models.inventory","telegram":"telegram.status","permissions":"packs.manage","model_scout":"models.scout","debug":"operator.status"
+    "providers":"models.inventory","telegram":"telegram.status","permissions":"packs.manage","model_scout":"models.scout","model_truth":"models.inventory","debug":"operator.status"
   },
   "telegram_mappings": {"ordinary_text":"conversation.history","status":"telegram.status","service_control":"telegram.manage"},
   "native_skill_mappings": {

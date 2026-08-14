@@ -224,14 +224,18 @@ def test_model_scout_and_manager_questions_are_grounded_through_chat() -> None:
                 for prompt in prompts
             ]
 
-        for prompt, response in zip(prompts, responses, strict=True):
-            meta = response.get("meta") if isinstance(response.get("meta"), dict) else {}
-            message = str(response.get("message") or "").lower()
-            assert meta.get("route") in {"action_tool", "model_policy_status"}, (prompt, response)
-            assert meta.get("used_llm") is False, (prompt, response)
-            assert "ollama:gemma:latest" in message, (prompt, response)
-        assert scout.call_count == 4
-        policy.assert_called_once()
+            for prompt, response in zip(prompts, responses, strict=True):
+                meta = response.get("meta") if isinstance(response.get("meta"), dict) else {}
+                message = str(response.get("message") or "").lower()
+                assert meta.get("route") in {"action_tool", "model_policy_status"}, (prompt, response)
+                assert meta.get("used_llm") is False, (prompt, response)
+                if prompt in {"what model scout sees", "what model should you use for chat?", "run model scout now"}:
+                    assert "ollama:qwen2.5:3b-instruct" in message, (prompt, response)
+                    assert "no model was switched" in message, (prompt, response)
+                else:
+                    assert "ollama:gemma:latest" in message, (prompt, response)
+            assert scout.call_count == 1
+        policy.assert_not_called()
 
 
 def test_plain_and_upgrade_model_scout_requests_beat_shell_fallback_through_chat() -> None:
@@ -304,18 +308,18 @@ def test_plain_and_upgrade_model_scout_requests_beat_shell_fallback_through_chat
             message = str(response.get("message") or "").lower()
             assert meta.get("route") == "action_tool", (prompt, response)
             assert meta.get("used_llm") is False, (prompt, response)
-            expected_tools = ["model_scout", "model_discovery_manager"] if "better new models" in prompt else ["model_scout"]
+            expected_tools = ["model_discovery_manager"] if "better new models" in prompt else ["model_scout", "model_runtime_evaluation"]
             assert meta.get("used_tools") == expected_tools, (prompt, response)
-            assert "ollama:gemma:latest" in message, (prompt, response)
+            if "better new models" in prompt:
+                assert "huggingface:example/new-chat-model" in message, (prompt, response)
+            else:
+                assert "ollama:qwen2.5:3b-instruct" in message, (prompt, response)
             assert "can't run that command" not in message, (prompt, response)
 
         upgrade_message = str(responses[0].get("message") or "").lower()
-        assert "installed local" in upgrade_message
-        assert "remote discovery" in upgrade_message
-        assert "safe mode" in upgrade_message
-        assert "no model was downloaded" in upgrade_message
-        assert "no model was switched" in upgrade_message
-        assert scout.call_count == 2
+        assert "huggingface:example/new-chat-model" in upgrade_message
+        assert "sources checked" in upgrade_message
+        assert scout.call_count == 0
         discovery.assert_called_once()
 
 

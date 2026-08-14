@@ -94,12 +94,29 @@ the project intent document, project intent wins.
 - `/ready` remains the richest operator/user readiness surface.
 - Startup before router warmup completes must degrade explicitly; it must not
   crash or hang the status surface.
+- Ordinary deterministic `/chat` routing must not synchronously probe a model or
+  provider. Runtime-status chat consumes the latest observed readiness snapshot
+  and reports its age; explicit readiness/refresh surfaces own live probing.
+
+## 4B. Canonical Model Truth
+
+- `GET /llm/models/truth` reconciles structured physical provider observation,
+  registry configuration, selected/default/effective state, benchmark evidence,
+  Scout advice, and Manager history.
+- Physically installed, registered-but-not-observed, remote/catalog, and
+  history-only rows are separate. Timeout means unknown/stale, never absent.
+- `POST /llm/models/truth/refresh` is bounded and loopback-only.
+- Installed-model evaluation is sequential, advisory, and cannot install,
+  delete, temporarily select, or make a model default.
 
 ## 5. Recommendation Model
 - `recommendation_roles` is the canonical recommendation/advisory truth.
 - `POST /llm/models/check` and `POST /llm/models/recommend` consume that same
   truth.
 - Compatibility fields are derived summaries only.
+- Current host evaluation outranks popularity or stale Scout/Manager metadata
+  for the local default recommendation. The recommendation never authorizes a
+  switch; the existing exact confirmation transaction remains authoritative.
 
 ## 6. Native Capability Model
 - Runtime/model inspection is deterministic and grounded.
