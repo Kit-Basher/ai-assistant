@@ -160,3 +160,54 @@ def test_production_chat_recommendation_uses_host_evidence_and_never_switches():
         assert "ollama:qwen2.5:3b-instruct" in str(response.get("message") or "")
         assert "no model was switched" in str(response.get("message") or "").lower()
         assert runtime.get_defaults().get("default_model") == before
+
+
+def test_production_chat_resolves_spaced_canonical_model_identity_without_switching():
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        runtime = AgentRuntime(_config(str(root / "registry.json"), str(root / "agent.db")))
+        truth = runtime.runtime_truth_service()
+        for model in ("Gemma:latest", "qwen2.5:3b-instruct", "qwen2.5:7b-instruct"):
+            added, result = runtime.add_provider_model(
+                "ollama", {"model": model, "capabilities": ["chat"], "available": True}
+            )
+            assert added, result
+        ok, configured = runtime.update_defaults(
+            {"default_provider": "ollama", "chat_model": "ollama:Gemma:latest"}
+        )
+        assert ok, configured
+        before = runtime.get_defaults().get("default_model")
+        fixture = {
+            "ok": True,
+            "selection": {
+                "provider": "ollama",
+                "default_model": "ollama:Gemma:latest",
+                "effective_model": "ollama:Gemma:latest",
+            },
+            "installed": [
+                {
+                    "canonical_id": f"ollama:{model.lower()}",
+                    "provider": "ollama",
+                    "provider_native_id": model,
+                    "installed": True,
+                    "ready": True,
+                    "routable": True,
+                    "eligible_for_chat": True,
+                    "roles": ["general_chat"],
+                }
+                for model in ("Gemma:latest", "qwen2.5:3b-instruct", "qwen2.5:7b-instruct")
+            ],
+            "registered_not_observed": [],
+            "remote_registered": [],
+        }
+        with patch.object(truth, "model_runtime_truth", return_value=fixture):
+            response = _chat(
+                runtime,
+                "test qwen2.5 3b for me but do not change my default",
+                user="wp45-test",
+                thread="wp45-test:t",
+            )
+        message = str(response.get("message") or "")
+        assert "couldn't find that model" not in message.lower()
+        assert "ollama:qwen2.5:3b-instruct" in message.lower()
+        assert runtime.get_defaults().get("default_model") == before

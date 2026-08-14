@@ -1745,11 +1745,11 @@ class Orchestrator:
                 target = str(payload.get("model_target") or "").strip()
                 if target == "__best_local__":
                     return self._switch_better_local_model_response(user_id)
-                resolution = (
-                    self._resolve_runtime_model_target(target)
-                    if target
-                    else {"status": "none", "requested": None, "model_id": None, "matches": []}
-                )
+                # The understanding contract carries exact provider-native IDs
+                # when the user supplied one.  Human-spaced forms are resolved
+                # here against the live canonical inventory; this validates the
+                # selected capability's input and does not reclassify intent.
+                resolution = self._resolve_runtime_model_target(target or text)
                 return self._set_default_model_response(
                     user_id,
                     text,
@@ -15090,6 +15090,15 @@ class Orchestrator:
             return set()
         candidate_model = normalized_id.split(":", 1)[1] if ":" in normalized_id else normalized_id
         aliases = {normalized_id, candidate_model}
+        # Provider-native identifiers commonly encode the family and size/tag
+        # with punctuation (for example ``family:3b-instruct``), while people
+        # naturally type those same identity fields with spaces.  Derive this
+        # selector from the canonical ID itself so resolution stays tied to live
+        # inventory rather than a model-name phrase table.
+        identity_parts = [part for part in re.split(r"[:/_-]+", candidate_model) if part]
+        if len(identity_parts) >= 2:
+            aliases.add(" ".join(identity_parts))
+            aliases.add(" ".join(identity_parts[:2]))
         model_head = candidate_model.split(":", 1)[0]
         if model_head:
             aliases.add(model_head)
