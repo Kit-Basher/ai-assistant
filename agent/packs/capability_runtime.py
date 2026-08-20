@@ -14,12 +14,15 @@ from typing import Any, Mapping
 
 from agent.capability_registry import ApprovalPolicy, CapabilityContract, CapabilityDefinition, CapabilityMode, CapabilityProvenance, CapabilityRegistry
 from agent.packs.capability_contracts import PackCapabilityContractError, canonical_json, digest, load_manifest, validate_value
+from agent.packs.brokers import CoreBrokerRuntime
+from agent.packs.wp5_contracts import BrokerDeclarationV1
 from agent.packs.worker_runtime import SandboxedPackWorker
 
 
 PACK_PROOF_REQUIREMENTS = (
     "health", "self_test", "verifier", "chat", "policy", "permission", "task",
     "restart", "failure", "timeout", "redaction", "digest", "revocation", "isolation",
+    "acquisition", "broker", "update", "creation",
 )
 
 
@@ -36,8 +39,9 @@ class PackCapabilityStore:
                 record_id TEXT PRIMARY KEY, pack_id TEXT NOT NULL, version TEXT NOT NULL, pack_class TEXT NOT NULL,
                 content_digest TEXT NOT NULL, manifest_json TEXT NOT NULL, artifact_root TEXT NOT NULL,
                 review_approved INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 0,
+                active INTEGER NOT NULL DEFAULT 0,
                 grants_json TEXT NOT NULL DEFAULT '[]', blocked_reason TEXT, self_test_json TEXT,
-                last_invocation_json TEXT,
+                last_invocation_json TEXT, provenance_json TEXT NOT NULL DEFAULT '{}',
                 created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
                 UNIQUE(pack_id, content_digest))""")
             self._conn.execute("""CREATE TABLE IF NOT EXISTS external_pack_mutation_plans (
@@ -48,6 +52,16 @@ class PackCapabilityStore:
             columns = {str(row[1]) for row in self._conn.execute("PRAGMA table_info(external_pack_capability_versions)")}
             if "last_invocation_json" not in columns:
                 self._conn.execute("ALTER TABLE external_pack_capability_versions ADD COLUMN last_invocation_json TEXT")
+            if "active" not in columns:
+                self._conn.execute("ALTER TABLE external_pack_capability_versions ADD COLUMN active INTEGER NOT NULL DEFAULT 0")
+                self._conn.execute("""UPDATE external_pack_capability_versions SET active=1 WHERE record_id IN (
+                    SELECT candidate.record_id FROM external_pack_capability_versions AS candidate
+                    WHERE candidate.enabled=1 AND candidate.blocked_reason IS NULL
+                    AND candidate.created_at=(SELECT MAX(newest.created_at) FROM external_pack_capability_versions AS newest
+                        WHERE newest.pack_id=candidate.pack_id AND newest.enabled=1 AND newest.blocked_reason IS NULL)
+                )""")
+            if "provenance_json" not in columns:
+                self._conn.execute("ALTER TABLE external_pack_capability_versions ADD COLUMN provenance_json TEXT NOT NULL DEFAULT '{}'")
             self._conn.commit()
 
     def preview_mutation(self, action: str, payload: Mapping[str, Any], *, actor_id: str, session_id: str, thread_id: str) -> dict[str, Any]:
@@ -67,13 +81,23 @@ class PackCapabilityStore:
             value = payload.get("value", True)
             canonical_payload = {"record_id": record_id, "gate": gate, "value": value, "content_digest": row["content_digest"], "updated_at": row["updated_at"]}
             consequence = f"Set {gate} for exact pack {row['pack_id']} version {row['version']} to {canonical_json(value)}."
-        elif action == "remove":
+        elif action in {"activate", "rollback"}:
             record_id = str(payload.get("record_id") or "")
             row = self.get(record_id)
             if row is None:
                 raise ValueError("pack_not_found")
             canonical_payload = {"record_id": record_id, "content_digest": row["content_digest"], "updated_at": row["updated_at"]}
-            consequence = f"Remove exact pack {row['pack_id']} version {row['version']} and revoke its capabilities."
+            consequence = f"Atomically activate exact pack {row['pack_id']} version {row['version']}; the current version remains intact unless this succeeds."
+        elif action == "remove":
+            record_id = str(payload.get("record_id") or "")
+            row = self.get(record_id)
+            if row is None:
+                raise ValueError("pack_not_found")
+            private_data = str(payload.get("private_data") or "retain").strip().lower()
+            if private_data not in {"retain", "delete"}:
+                raise ValueError("pack_private_data_disposition_invalid")
+            canonical_payload = {"record_id": record_id, "content_digest": row["content_digest"], "updated_at": row["updated_at"], "private_data": private_data}
+            consequence = f"Remove exact pack {row['pack_id']} version {row['version']} and revoke its capabilities; {private_data} only that pack/version's bounded private data."
         else:
             raise ValueError("pack_mutation_action_invalid")
         plan_id = f"pack-plan-{uuid.uuid4().hex}"
@@ -89,6 +113,7 @@ class PackCapabilityStore:
 
     def apply_mutation(self, plan_id: str, binding_digest: str, *, actor_id: str, session_id: str, thread_id: str) -> dict[str, Any]:
         now = int(time.time())
+        previous_record_id: str | None = None
         with self._lock:
             row = self._conn.execute("SELECT * FROM external_pack_mutation_plans WHERE plan_id=?", (plan_id,)).fetchone()
             if row is None:
@@ -117,7 +142,16 @@ class PackCapabilityStore:
             return {"action": action, "record": self.import_local(payload["source_dir"])}
         if action == "gate":
             return {"action": action, "record": self.set_gate(payload["record_id"], payload["gate"], payload.get("value", True))}
-        return {"action": action, "removed": self.remove(payload["record_id"]), "record_id": payload["record_id"]}
+        if action in {"activate", "rollback"}:
+            return {"action": action, "record": self.activate(payload["record_id"])}
+        return {
+            "action": action,
+            "removed": self.remove(payload["record_id"]),
+            "record_id": payload["record_id"],
+            "pack_id": current["pack_id"],
+            "version": current["version"],
+            "private_data": payload.get("private_data", "retain"),
+        }
 
     def import_local(self, source_dir: str | Path) -> dict[str, Any]:
         source = Path(source_dir).expanduser().resolve()
@@ -146,12 +180,6 @@ class PackCapabilityStore:
                 shutil.rmtree(temp, ignore_errors=True)
         now = int(time.time())
         with self._lock:
-            # A content or contract update is a new authority.  It invalidates
-            # every gate on older versions before the new record can exist.
-            self._conn.execute(
-                "UPDATE external_pack_capability_versions SET review_approved=0,enabled=0,grants_json='[]',self_test_json=NULL,blocked_reason='superseded',updated_at=? WHERE pack_id=? AND content_digest<>?",
-                (now, manifest["id"], manifest["content_digest"]),
-            )
             self._conn.execute(
                 "INSERT OR IGNORE INTO external_pack_capability_versions(record_id,pack_id,version,pack_class,content_digest,manifest_json,artifact_root,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
                 (record_id, manifest["id"], manifest["version"], manifest["pack_class"], manifest["content_digest"], canonical_json(manifest), str(target), now, now),
@@ -163,10 +191,29 @@ class PackCapabilityStore:
         if row is None:
             return None
         try:
-            manifest = json.loads(row["manifest_json"]); grants = json.loads(row["grants_json"]); self_test = json.loads(row["self_test_json"] or "null"); last_invocation = json.loads(row["last_invocation_json"] or "null")
+            manifest = json.loads(row["manifest_json"]); grants = json.loads(row["grants_json"]); self_test = json.loads(row["self_test_json"] or "null"); last_invocation = json.loads(row["last_invocation_json"] or "null"); provenance = json.loads(row["provenance_json"] or "{}")
         except Exception:
-            manifest, grants, self_test, last_invocation = {}, [], None, None
-        return {"record_id": row["record_id"], "pack_id": row["pack_id"], "version": row["version"], "pack_class": row["pack_class"], "content_digest": row["content_digest"], "manifest": manifest, "artifact_root": row["artifact_root"], "review_approved": bool(row["review_approved"]), "enabled": bool(row["enabled"]), "grants": grants, "blocked_reason": row["blocked_reason"], "self_test": self_test, "last_invocation": last_invocation, "created_at": row["created_at"], "updated_at": row["updated_at"]}
+            manifest, grants, self_test, last_invocation, provenance = {}, [], None, None, {}
+        return {"record_id": row["record_id"], "pack_id": row["pack_id"], "version": row["version"], "pack_class": row["pack_class"], "content_digest": row["content_digest"], "manifest": manifest, "artifact_root": row["artifact_root"], "review_approved": bool(row["review_approved"]), "enabled": bool(row["enabled"]), "active": bool(row["active"]), "grants": grants, "blocked_reason": row["blocked_reason"], "self_test": self_test, "last_invocation": last_invocation, "provenance": provenance, "created_at": row["created_at"], "updated_at": row["updated_at"]}
+
+    def set_provenance(self, record_id: str, provenance: Mapping[str, Any]) -> dict[str, Any]:
+        allowed = {
+            key: provenance.get(key)
+            for key in (
+                "source_kind", "requested_target", "final_target", "requested_ref", "resolved_commit",
+                "archive_sha256", "fetched_at", "file_count", "expanded_bytes", "pinned",
+            )
+            if provenance.get(key) is not None
+        }
+        with self._lock:
+            changed = self._conn.execute(
+                "UPDATE external_pack_capability_versions SET provenance_json=?,updated_at=? WHERE record_id=?",
+                (canonical_json(allowed), int(time.time()), record_id),
+            ).rowcount
+            self._conn.commit()
+        if changed != 1:
+            raise ValueError("pack_not_found")
+        return self.get(record_id) or {}
 
     def record_invocation(self, record_id: str, *, capability_id: str, ok: bool, outcome: str, worker: Mapping[str, Any] | None = None) -> None:
         safe = {"capability_id": str(capability_id), "ok": bool(ok), "outcome": str(outcome)[:80], "at": int(time.time())}
@@ -195,8 +242,38 @@ class PackCapabilityStore:
         stored = canonical_json(value) if gate in {"grants", "self_test"} else value
         with self._lock:
             self._conn.execute(f"UPDATE external_pack_capability_versions SET {column}=?,updated_at=? WHERE record_id=?", (stored, int(time.time()), record_id))
+            if gate == "enabled" and not value:
+                self._conn.execute("UPDATE external_pack_capability_versions SET active=0 WHERE record_id=?", (record_id,))
+            elif gate == "enabled" and value:
+                active_count = int(self._conn.execute("SELECT COUNT(*) FROM external_pack_capability_versions WHERE pack_id=? AND active=1", (current["pack_id"],)).fetchone()[0])
+                if active_count == 0:
+                    self._conn.execute("UPDATE external_pack_capability_versions SET active=1 WHERE record_id=?", (record_id,))
             self._conn.commit()
         return self.get(record_id) or {}
+
+    def activate(self, record_id: str) -> dict[str, Any]:
+        current = self.get(record_id)
+        if current is None:
+            raise ValueError("pack_not_found")
+        if not current["review_approved"] or not current["enabled"] or current.get("blocked_reason"):
+            raise PermissionError("pack_activation_gates_incomplete")
+        now = int(time.time())
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                latest = self.get(record_id)
+                if latest is None or latest["content_digest"] != current["content_digest"] or latest["updated_at"] != current["updated_at"]:
+                    raise PermissionError("pack_activation_target_changed")
+                previous = self._conn.execute("SELECT record_id FROM external_pack_capability_versions WHERE pack_id=? AND active=1", (current["pack_id"],)).fetchone()
+                previous_record_id = str(previous[0]) if previous is not None else None
+                self._conn.execute("UPDATE external_pack_capability_versions SET active=0,updated_at=? WHERE pack_id=?", (now, current["pack_id"]))
+                self._conn.execute("UPDATE external_pack_capability_versions SET active=1,updated_at=? WHERE record_id=?", (now, record_id))
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback(); raise
+        result = self.get(record_id) or {}
+        result["previous_active_record_id"] = previous_record_id
+        return result
 
     def remove(self, record_id: str) -> bool:
         current = self.get(record_id)
@@ -214,9 +291,10 @@ class PackCapabilityStore:
 
 
 class DynamicPackCapabilityRuntime:
-    def __init__(self, *, store: PackCapabilityStore, registry: CapabilityRegistry, response_factory, worker: SandboxedPackWorker | None = None) -> None:
+    def __init__(self, *, store: PackCapabilityStore, registry: CapabilityRegistry, response_factory, worker: SandboxedPackWorker | None = None, broker_runtime: CoreBrokerRuntime | None = None) -> None:
         self.store = store; self.registry = registry; self.response_factory = response_factory
         self.worker = worker or SandboxedPackWorker()
+        self.broker_runtime = broker_runtime
         self._registered: set[str] = set()
 
     @staticmethod
@@ -250,16 +328,19 @@ class DynamicPackCapabilityRuntime:
                 underlying = self.registry.get(str(invocation.get("capability_id") or ""))
                 if underlying is not None:
                     requested_set.update(underlying.permission_requirements)
+            elif invocation.get("kind") == "core_broker":
+                requested_set.add(f"broker:{invocation.get('broker_kind')}")
         requested = sorted(requested_set)
         grants = sorted(str(x) for x in (row.get("grants") or []))
         worker_health = self.worker.health() if row.get("pack_class") == "sandboxed_executable" else None
         mutating_declaration = any(str(cap.get("mode")) == "mutating" for cap in manifest.get("capabilities") or [])
-        usable = bool(row.get("review_approved") and row.get("enabled") and not reason and artifacts_ok and not mutating_declaration and set(requested) <= set(grants) and (worker_health is None or worker_health.available))
+        usable = bool(row.get("review_approved") and row.get("enabled") and row.get("active") and not reason and artifacts_ok and not mutating_declaration and set(requested) <= set(grants) and (worker_health is None or worker_health.available))
         if reason: missing = "safety_review"
         elif not artifacts_ok: missing = "integrity"
         elif mutating_declaration: missing = "unsupported_effect_broker"
         elif not row.get("review_approved"): missing = "review_approval"
         elif not row.get("enabled"): missing = "enablement"
+        elif not row.get("active"): missing = "activation"
         elif not set(requested) <= set(grants): missing = "permission"
         elif worker_health and not worker_health.available: missing = "isolation_runtime"
         else: missing = None
@@ -293,6 +374,9 @@ class DynamicPackCapabilityRuntime:
         mode = CapabilityMode(str(cap["mode"]))
         invocation = cap.get("invocation") if isinstance(cap.get("invocation"), dict) else {}
         underlying = self.registry.get(str(invocation.get("capability_id") or "")) if invocation.get("kind") == "registered_capability" else None
+        broker = BrokerDeclarationV1.parse(invocation["broker_declaration"]) if invocation.get("kind") == "core_broker" else None
+        if broker is not None and broker.mode == "mutating" and mode is not CapabilityMode.MUTATING:
+            raise ValueError("pack_broker_policy_downgrade")
         if underlying is not None:
             if underlying.mode is CapabilityMode.MUTATING and mode is not CapabilityMode.MUTATING:
                 raise ValueError("pack_policy_downgrade")
@@ -312,14 +396,14 @@ class DynamicPackCapabilityRuntime:
             pack_input = {k: v for k, v in payload.items() if k not in {"user_id", "text"}}
             pack_input = validate_value(cap["input_schema"], pack_input, field="pack_input")
             is_self_test = str(payload.get("user_id") or "").startswith("pack-self-test:")
-            if now["pack_class"] == "declarative":
+            if now["pack_class"] == "declarative" and cap["invocation"]["kind"] == "registered_capability":
                 spec = cap["invocation"]; underlying = self.registry.require(spec["capability_id"])
                 if underlying.provenance is not CapabilityProvenance.NATIVE:
                     raise RuntimeError("pack_declaration_native_authority_required")
                 mapped = {}
                 for key, value in spec["inputs"].items():
                     if isinstance(value, str) and value.startswith("$input."):
-                        mapped[key] = pack_input[value.split(".", 1)[1]]
+                        mapped[key] = pack_input.get(value.split(".", 1)[1])
                     else: mapped[key] = value
                 mapped.setdefault("user_id", str(payload.get("user_id") or "pack")); mapped.setdefault("text", str(payload.get("text") or cap["description"]))
                 try:
@@ -329,6 +413,27 @@ class DynamicPackCapabilityRuntime:
                         self.store.record_invocation(record_id, capability_id=capability_id, ok=False, outcome=f"underlying_{exc.__class__.__name__}")
                     raise
                 data = {"result": getattr(underlying_result, "text", str(underlying_result)), "underlying_capability_id": spec["capability_id"], "pack_binding": self._binding(now, cap)}
+            elif now["pack_class"] == "declarative" and cap["invocation"]["kind"] == "core_broker":
+                if self.broker_runtime is None:
+                    raise RuntimeError("pack_core_broker_runtime_unavailable")
+                spec = cap["invocation"]
+                mapped = {}
+                for key, value in spec["inputs"].items():
+                    if isinstance(value, str) and value.startswith("$input."):
+                        mapped[key] = pack_input.get(value.split(".", 1)[1])
+                    else:
+                        mapped[key] = value
+                result = self.broker_runtime.invoke(
+                    pack_id=str(now["pack_id"]), version=str(now["version"]),
+                    actor_id="loopback_operator", declaration=spec["broker_declaration"],
+                    operation=spec["operation"], inputs=mapped,
+                )
+                result_field = str(spec.get("result_field") or "result")
+                actual = result if result_field == "result" else result.get(result_field)
+                output_type = ((cap.get("output_schema") or {}).get("properties") or {}).get("result", {}).get("type")
+                if output_type == "string" and not isinstance(actual, str):
+                    actual = canonical_json(actual)
+                data = {"result": actual, "broker_result": result, "broker": {"kind": spec["broker_kind"], "operation": spec["operation"], "declaration_digest": broker.digest if broker else None}, "broker_verification": result.get("verification"), "pack_binding": self._binding(now, cap)}
             else:
                 field = cap["invocation"]["input_field"]
                 result = self.worker.invoke(module_path=Path(now["artifact_root"]) / cap["invocation"]["module"], artifact_digest=cap["artifact_digest"], export=cap["invocation"]["export"], value=pack_input[field], limits=cap["limits"])
@@ -346,6 +451,10 @@ class DynamicPackCapabilityRuntime:
             payload = data if isinstance(data, dict) else {}
             runtime = payload.get("runtime_payload") if isinstance(payload.get("runtime_payload"), dict) else payload.get("runtime") if isinstance(payload.get("runtime"), dict) else payload
             actual = runtime.get("result") if isinstance(runtime, dict) else None
+            if invocation.get("kind") == "core_broker":
+                evidence = runtime.get("broker_verification") if isinstance(runtime, dict) else None
+                if not isinstance(evidence, dict) or not evidence or not all(bool(value) for value in evidence.values()):
+                    return False
             return isinstance(actual, int) if cap["verifier"]["kind"] == "integer_result" else bool(str(actual or "").strip())
         def self_test() -> dict[str, Any]:
             payload = {**cap["self_test_input"], "user_id": f"pack-self-test:{record_id}", "text": cap["description"]}
@@ -361,11 +470,13 @@ class DynamicPackCapabilityRuntime:
             capability_type=f"external_{row['pack_class']}", material_group=f"pack:{row['pack_id']}",
             permission_requirements=tuple(sorted(set(cap["permissions"]) | set(underlying.permission_requirements if underlying is not None else ()))), mode_requirements=("exact_pack_binding",),
             unavailable_message=f"{cap['display_name']} is installed but not usable until its exact pack lifecycle gates pass.",
-            proof_requirements=PACK_PROOF_REQUIREMENTS, proof_nodes={x: ("tests/test_wp4_pack_runtime.py",) for x in PACK_PROOF_REQUIREMENTS},
+            proof_requirements=PACK_PROOF_REQUIREMENTS, proof_nodes={x: (("tests/test_wp5_pack_acquisition_brokers.py",) if x in {"acquisition", "broker", "update", "creation"} else ("tests/test_wp4_pack_runtime.py",)) for x in PACK_PROOF_REQUIREMENTS},
             self_test_hook=self_test, task_composable=bool(cap["task_composable"]), retry_safety="read_only_safe" if mode is CapabilityMode.READ_ONLY else "reconcile_first", max_task_retries=1 if mode is CapabilityMode.READ_ONLY else 0, resume_policy="revalidate",
         )
         self.registry.register(definition); self._registered.add(capability_id)
 
     @staticmethod
     def _binding(row: Mapping[str, Any], cap: Mapping[str, Any]) -> dict[str, Any]:
-        return {"pack_id": row["pack_id"], "record_id": row["record_id"], "version": row["version"], "content_digest": row["content_digest"], "contract_digest": cap["contract_digest"], "abi": cap["invocation"].get("abi") or "declarative.v1"}
+        invocation = cap["invocation"]
+        broker_digest = BrokerDeclarationV1.parse(invocation["broker_declaration"]).digest if invocation.get("kind") == "core_broker" else None
+        return {"pack_id": row["pack_id"], "record_id": row["record_id"], "version": row["version"], "content_digest": row["content_digest"], "contract_digest": cap["contract_digest"], "broker_digest": broker_digest, "abi": invocation.get("abi") or ("core-broker.v1" if broker_digest else "declarative.v1")}

@@ -358,9 +358,9 @@ class TestChatBehaviorAudit(unittest.TestCase):
         lowered = text.lower()
         self.assertEqual("assistant_capabilities", meta.get("route"))
         self.assertIn("safe web search", lowered)
-        self.assertIn("skill-pack metadata", lowered)
-        self.assertIn("cannot download an arbitrary remote pack", lowered)
-        self.assertIn("local text pack", lowered)
+        self.assertIn("pack metadata", lowered)
+        self.assertIn("exact quarantine fetch", lowered)
+        self.assertIn("installed text-only capability pack", lowered)
 
     def test_resource_prompts_after_operational_status_route_to_operational_status(self) -> None:
         prompts = (

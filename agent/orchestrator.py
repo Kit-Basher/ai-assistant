@@ -112,13 +112,14 @@ from agent.packs.managed_adapter_invocation import (
 )
 from agent.packs.lifecycle import PackLifecycleService, render_lifecycle_response
 from agent.packs.lifecycle_actions import PackLifecycleActionController
-from agent.packs.scaffolding import create_generated_scaffold_source, render_scaffold_preview
+from agent.packs.scaffolding import render_scaffold_preview
 from agent.packs.policy import PackPermissionDenied, enforce_iface_allowed
 from agent.packs.remote_fetch import ALLOWED_REMOTE_KINDS
 from agent.packs.source_approval import SourceApprovalController
 from agent.packs.review_state_ux import build_pack_review_state_summary, render_pack_review_state
 from agent.packs.store import PackStore
 from agent.packs.capability_runtime import DynamicPackCapabilityRuntime, PackCapabilityStore
+from agent.packs.brokers import CoreBrokerRuntime
 from agent.actions.persistent_journal import PersistentManagedActionJournalStore
 from agent.compare_mode import compare_now_to_what_if
 from agent.report_followups import resource_followup
@@ -1025,13 +1026,20 @@ class Orchestrator:
             component="orchestrator.tool_executor",
         )
         self._pack_capability_store = PackCapabilityStore(db.db_path, self._pack_store.external_storage_root())
+        self._pack_broker_runtime = CoreBrokerRuntime(
+            db_path=db.db_path,
+            storage_root=self._pack_store.external_storage_root(),
+            allowed_roots=tuple(self.perception_roots),
+        )
         self._capability_registry = self._build_conversation_capability_registry()
         self._dynamic_pack_runtime = DynamicPackCapabilityRuntime(
             store=self._pack_capability_store,
             registry=self._capability_registry,
             response_factory=self._pack_capability_response,
+            broker_runtime=self._pack_broker_runtime,
         )
         self._pack_registry_reconstruction = self._dynamic_pack_runtime.register_usable()
+        self._sync_pack_visualizer()
         self._request_understanding = RequestUnderstandingService(self._capability_registry)
         self._task_coordinator = TaskCoordinator(
             store=TaskStore(self.db),
@@ -1057,6 +1065,7 @@ class Orchestrator:
         runtime = DynamicPackCapabilityRuntime(
             store=self._pack_capability_store, registry=registry,
             response_factory=self._pack_capability_response,
+            broker_runtime=self._pack_broker_runtime,
         )
         report = runtime.register_usable()
         self._capability_registry = registry
@@ -1064,10 +1073,39 @@ class Orchestrator:
         self._pack_registry_reconstruction = report
         self._request_understanding = RequestUnderstandingService(registry)
         self._task_coordinator = TaskCoordinator(store=TaskStore(self.db), registry=registry)
+        self._sync_pack_visualizer()
         return report
 
-    def pack_capability_import(self, source_dir: str) -> dict[str, Any]:
+    def _sync_pack_visualizer(self) -> dict[str, Any]:
+        active_pack_ids: set[str] = set()
+        for row in self._pack_capability_store.list():
+            if not row.get("active") or not row.get("enabled") or not row.get("review_approved") or row.get("blocked_reason"):
+                continue
+            root = Path(str(row.get("artifact_root") or ""))
+            declaration_path = root / "visualizer.json"
+            if not declaration_path.is_file():
+                continue
+            try:
+                declaration = json.loads(declaration_path.read_text(encoding="utf-8"))
+                declaration.pop("declaration_digest", None)
+                asset_rel = str((declaration.get("asset") or {}).get("path") or "")
+                installed = self._pack_broker_runtime.visualizer.install(pack_id=str(row["pack_id"]), version=str(row["version"]), asset_path=root / asset_rel, declaration=declaration)
+                self._pack_broker_runtime.visualizer.activate(installed)
+                active_pack_ids.add(str(row["pack_id"]))
+            except Exception:
+                continue
+        current = self._pack_broker_runtime.visualizer.status()
+        if current.get("pack_id") and current.get("pack_id") not in active_pack_ids:
+            self._pack_broker_runtime.visualizer.disable_pack(str(current["pack_id"]))
+        return self._pack_broker_runtime.visualizer.status()
+
+    def pack_visualizer_status(self) -> dict[str, Any]:
+        return self._pack_broker_runtime.visualizer.status()
+
+    def pack_capability_import(self, source_dir: str, *, provenance: Mapping[str, Any] | None = None) -> dict[str, Any]:
         row = self._pack_capability_store.import_local(source_dir)
+        if provenance:
+            row = self._pack_capability_store.set_provenance(str(row.get("record_id") or ""), provenance)
         self.refresh_pack_capabilities()
         return self.pack_capability_status(str(row.get("record_id") or "")) or row
 
@@ -1084,8 +1122,23 @@ class Orchestrator:
 
     def pack_capability_mutation_apply(self, plan_id: str, binding_digest: str, *, actor_id: str, session_id: str, thread_id: str) -> dict[str, Any]:
         result = self._pack_capability_store.apply_mutation(plan_id, binding_digest, actor_id=actor_id, session_id=session_id, thread_id=thread_id)
+        if result.get("action") == "remove" and result.get("private_data") == "delete":
+            result["private_records_deleted"] = self._pack_broker_runtime.private_store.remove_pack(
+                pack_id=str(result.get("pack_id") or ""),
+                version=str(result.get("version") or ""),
+                actor_id=str(actor_id),
+            )
         report = self.refresh_pack_capabilities()
         record = result.get("record")
+        if result.get("action") in {"activate", "rollback"} and isinstance(record, dict):
+            failed_ids = {str(item.get("capability_id") or "") for item in report.get("failures") or []}
+            expected_ids = {str(item.get("capability_id") or "") for item in (record.get("manifest") or {}).get("capabilities") or []}
+            if expected_ids & failed_ids or not expected_ids <= set(report.get("registered") or []):
+                previous = str(record.get("previous_active_record_id") or "")
+                if previous and previous != record.get("record_id"):
+                    self._pack_capability_store.activate(previous)
+                    self.refresh_pack_capabilities()
+                raise RuntimeError("pack_activation_self_test_failed_old_version_preserved")
         if isinstance(record, dict) and record.get("record_id"):
             result["record"] = self.pack_capability_status(str(record["record_id"])) or record
         result["registry_reconstruction"] = report
@@ -1113,6 +1166,8 @@ class Orchestrator:
                 "record_id": row["record_id"], "pack_id": row["pack_id"], "version": row["version"],
                 "pack_class": row["pack_class"], "content_digest": row["content_digest"],
                 "review_approved": row["review_approved"], "enabled": row["enabled"],
+                "active": row.get("active", False),
+                "provenance": row.get("provenance") if isinstance(row.get("provenance"), dict) else {},
                 "capabilities": [
                     {"id": cap["capability_id"], "display_name": cap["display_name"], "description": cap["description"], "mode": cap["mode"], "contract_digest": cap["contract_digest"]}
                     for cap in row["manifest"].get("capabilities") or []
@@ -1136,6 +1191,67 @@ class Orchestrator:
                 "namespace": "bubblewrap",
                 "default_authority": "pure_computation_only",
             },
+        }
+
+    def pack_capability_compare(self, from_record_id: str, to_record_id: str) -> dict[str, Any]:
+        before = self._pack_capability_store.get(str(from_record_id or ""))
+        after = self._pack_capability_store.get(str(to_record_id or ""))
+        if before is None or after is None:
+            raise ValueError("pack_capability_record_not_found")
+        if before["pack_id"] != after["pack_id"]:
+            raise ValueError("pack_update_identity_mismatch")
+
+        def authority(row: dict[str, Any]) -> dict[str, Any]:
+            manifest = row.get("manifest") if isinstance(row.get("manifest"), dict) else {}
+            capabilities = manifest.get("capabilities") if isinstance(manifest.get("capabilities"), list) else []
+            brokers = manifest.get("brokers") if isinstance(manifest.get("brokers"), list) else []
+            return {
+                "pack_class": row["pack_class"],
+                "capabilities": [
+                    {
+                        "id": cap.get("capability_id"),
+                        "contract_digest": cap.get("contract_digest"),
+                        "mode": cap.get("mode"),
+                        "permissions": sorted(cap.get("permissions") or []),
+                        "invocation_kind": (cap.get("invocation") or {}).get("kind"),
+                        "verifier_kind": (cap.get("verifier") or {}).get("kind"),
+                    }
+                    for cap in capabilities if isinstance(cap, dict)
+                ],
+                "brokers": [
+                    {
+                        "kind": broker.get("kind"),
+                        "declaration_digest": broker.get("declaration_digest"),
+                        "mode": broker.get("mode"),
+                        "scopes": sorted(broker.get("scopes") or []),
+                        "data_flow": broker.get("data_flow"),
+                    }
+                    for broker in brokers if isinstance(broker, dict)
+                ],
+                "content_files": [
+                    {"path": item.get("path"), "sha256": item.get("sha256"), "bytes": item.get("bytes")}
+                    for item in (manifest.get("content_files") or []) if isinstance(item, dict)
+                ],
+            }
+
+        old_authority, new_authority = authority(before), authority(after)
+        changed_sections = [name for name in old_authority if old_authority[name] != new_authority[name]]
+        old_provenance = before.get("provenance") if isinstance(before.get("provenance"), dict) else {}
+        new_provenance = after.get("provenance") if isinstance(after.get("provenance"), dict) else {}
+        return {
+            "schema_version": "personal-agent.pack-update.v1",
+            "pack_id": before["pack_id"],
+            "from": {"record_id": before["record_id"], "version": before["version"], "content_digest": before["content_digest"], "active": before["active"]},
+            "to": {"record_id": after["record_id"], "version": after["version"], "content_digest": after["content_digest"], "active": after["active"]},
+            "changed_sections": changed_sections,
+            "authority_changed": bool(changed_sections),
+            "new_permissions_required": sorted(
+                set().union(*(set(cap.get("permissions") or []) for cap in new_authority["capabilities"]))
+                - set().union(*(set(cap.get("permissions") or []) for cap in old_authority["capabilities"]))
+            ),
+            "source_changed": old_provenance.get("archive_sha256") != new_provenance.get("archive_sha256"),
+            "old_version_remains_active_until_activation": bool(before["active"] and not after["active"]),
+            "activation_requires_current_gates_and_self_test": True,
         }
 
     @staticmethod
@@ -1599,9 +1715,11 @@ class Orchestrator:
         )
         add(
             "packs.manage",
-            "inspect approved skill-pack metadata and manage a local text pack; it cannot download an arbitrary remote pack",
+            "discover pack metadata, preview an exact quarantine fetch or supported draft, and manage reviewed pack lifecycle gates",
             (
                 "preview importing a local text skill folder",
+                "preview fetching an exact GitHub pack into quarantine",
+                "make a supported local data search skill for me",
                 "approve and enable the reviewed guidance pack",
                 "disable or remove an installed text pack",
             ),
@@ -6864,7 +6982,7 @@ class Orchestrator:
                 "summary": (
                     f"I can search {int(pack_state.get('discovery_source_count') or 0)} configured catalogs as untrusted metadata; "
                     f"{int(pack_state.get('installed_count') or 0)} external packs are recorded and {int(pack_state.get('enabled_count') or 0)} are enabled. "
-                    "Arbitrary remote pack download is unavailable; discovery is not installation."
+                    "Supported remote artifacts require a separate exact quarantine-fetch authorization; discovery is not acquisition or installation."
                 ),
                 "available": True,
             },
@@ -13172,7 +13290,9 @@ class Orchestrator:
                         else []
                     ),
                     "missing_capability": acquisition.detected_capability,
-                    "source_scope": "approved_pack_sources_only",
+                    "source_scope": "enabled_queryable_configured_sources",
+                    "automatic_discovery": True,
+                    "automatic_fetch": False,
                     "preview_required": acquisition.source_status == "trusted_catalog_candidate",
                     "install_allowed_initially": False,
                     "candidate_actions": [
@@ -13506,97 +13626,21 @@ class Orchestrator:
                 used_tools=["capability_scaffold_create"],
                 payload={"type": "capability_scaffold_create", "ok": False, "summary": message},
             )
-        try:
-            source_result = create_generated_scaffold_source(
-                preview,
-                storage_root=self._pack_store.external_storage_root(),
-            )
-            ingestor = ExternalPackIngestor(self._pack_store.external_storage_root())
-            normalization_result, review_envelope = ingestor.ingest_from_path(
-                str(source_result.get("source_path") or ""),
-                source_origin="generated_scaffold",
-                created_by="capability_scaffold_create",
-            )
-            canonical_pack = normalization_result.pack.to_dict()
-            proposed_manifest = preview.get("proposed_manifest") if isinstance(preview.get("proposed_manifest"), dict) else {}
-            managed_adapters = proposed_manifest.get("managed_adapters") if isinstance(proposed_manifest.get("managed_adapters"), list) else []
-            ok_adapters, adapter_errors, normalized_adapters = validate_managed_adapter_declarations(managed_adapters)
-            if not ok_adapters:
-                raise ValueError("invalid managed adapter declaration: " + ",".join(adapter_errors))
-            if normalized_adapters:
-                canonical_pack["managed_adapters"] = normalized_adapters
-                runtime = canonical_pack.get("runtime") if isinstance(canonical_pack.get("runtime"), dict) else {}
-                canonical_pack["runtime"] = {**runtime, "managed_adapters": normalized_adapters}
-                permissions = canonical_pack.get("permissions") if isinstance(canonical_pack.get("permissions"), dict) else {}
-                canonical_pack["permissions"] = {**permissions, "managed_adapters": normalized_adapters, "granted": []}
-            pack_row = self._pack_store.record_external_pack(
-                canonical_pack=canonical_pack,
-                classification=normalization_result.classification,
-                status=normalization_result.status,
-                risk_report=normalization_result.risk_report.to_dict(),
-                review_envelope=review_envelope.to_dict(),
-                quarantine_path=normalization_result.quarantine_path,
-                normalized_path=normalization_result.normalized_path,
-            )
-        except Exception as exc:
-            message = "I could not create the draft skill for review. No skill was enabled or run."
-            return self._runtime_truth_response(
-                text=message,
-                route="action_tool",
-                used_runtime_state=False,
-                used_memory=bool(self._current_runtime_setup_state(user_id)),
-                used_tools=["capability_scaffold_create"],
-                payload={
-                    "type": "capability_scaffold_create",
-                    "ok": False,
-                    "summary": message,
-                    "error": exc.__class__.__name__,
-                },
-            )
-        pack_name = str(pack_row.get("name") or preview.get("title") or "the draft skill").strip()
-        canonical_pack = pack_row.get("canonical_pack") if isinstance(pack_row.get("canonical_pack"), dict) else {}
-        message = (
-            f"I created a draft skill for review: {pack_name}. "
-            "It is not usable yet, not turned on, and cannot access your files. "
-            "No permissions were granted and no code was run. "
-            "Next review step: approve the draft before turning it on."
-        )
-        managed_adapters = self._external_pack_managed_adapters(pack_row)
-        try:
-            permission_grants = list_adapter_grants(self._pack_store.external_storage_root())
-        except Exception:
-            permission_grants = []
-        lifecycle = PackLifecycleService().evaluate(
-            capability=str(preview.get("capability") or "").strip() or None,
-            imported_pack=pack_row,
-            permission_grants=permission_grants,
-        ).to_dict()
-        if lifecycle.get("state") in {"generated_quarantined", "imported_for_review"}:
-            self._queue_pack_review_approve_followup(user_id, pack=pack_row, lifecycle=lifecycle)
-        return self._runtime_truth_response(
-            text=message,
-            route="action_tool",
-            used_runtime_state=False,
-            used_memory=bool(self._current_runtime_setup_state(user_id)),
+        proposed = preview.get("proposed_manifest") if isinstance(preview.get("proposed_manifest"), dict) else {}
+        adapters = proposed.get("managed_adapters") if isinstance(proposed.get("managed_adapters"), list) else []
+        template = "local_data_search" if adapters else "portable_text"
+        name = str(preview.get("title") or preview.get("capability") or "Created skill").strip()
+        return self._external_pack_plan_confirmation_response(
+            user_id,
+            action_type="external_pack.draft",
+            operation_payload={"template": template, "name": name, "description": str(preview.get("user_goal") or preview.get("description") or name)},
+            title=f"Create quarantine-only draft: {name}",
+            intro_lines=[
+                "I validated a supported structured draft proposal.",
+                "This confirmation creates only the exact quarantine candidate. It cannot approve, permission, enable, invoke, publish, or update itself.",
+            ],
             used_tools=["capability_scaffold_create"],
-            payload={
-                "type": "capability_scaffold_create",
-                "ok": True,
-                "summary": message,
-                "source_result": source_result,
-                "pack": pack_row,
-                "normalization_result": {
-                    **normalization_result.to_dict(),
-                    "pack": canonical_pack or normalization_result.pack.to_dict(),
-                },
-                "review": review_envelope.to_dict(),
-                "approved": False,
-                "enabled": False,
-                "permissions_granted": [],
-                "executes_code": False,
-                "managed_adapters": managed_adapters,
-                "lifecycle": lifecycle,
-            },
+            preview_payload={"type": "capability_scaffold_create_plan", "scaffold_preview": preview, "template": template, "created": False, "approved": False, "enabled": False, "permissions_granted": [], "executes_code": False},
         )
 
     def _queue_capability_import_followup(
@@ -14264,7 +14308,7 @@ class Orchestrator:
             lines.append(f"Proposed source id: {preview.get('source_id')}. Source kind: {preview.get('source_kind')}.")
             lines.append(
                 "This legacy assistant approval flow is read-only. Configure the source and its query policy "
-                "as separate centrally authorized operations; remote pack acquisition remains unavailable."
+                "as separate centrally authorized operations; use a fresh exact quarantine-fetch preview for a supported source."
             )
         else:
             lines.append("No source approval was recorded. No content was fetched, downloaded, imported, installed, approved, enabled, or granted permissions.")
@@ -14319,8 +14363,8 @@ class Orchestrator:
 
     def _source_fetch_preview_response(self, user_id: str, pending_item: dict[str, Any]) -> OrchestratorResponse:
         message = (
-            "Remote pack fetch-to-quarantine is not implemented in the universal authorization boundary. "
-            "No URL was opened and no content was fetched or imported."
+            "That legacy fetch preview cannot be resumed safely. Request a new exact source preview so the current "
+            "source, redirect policy, limits, actor, thread, and expiry can be bound. No URL was opened."
         )
         return self._runtime_truth_response(
             text=message,
@@ -14331,7 +14375,7 @@ class Orchestrator:
             payload={
                 "type": "source_fetch_preview",
                 "ok": False,
-                "error": "remote_pack_fetch_stage_unimplemented_denied",
+                "error": "legacy_fetch_preview_requires_reauthorization",
                 "summary": message,
                 "did_fetch": False,
                 "did_import": False,
@@ -14344,7 +14388,7 @@ class Orchestrator:
 
     def _source_fetch_confirm_response(self, user_id: str, pending_item: dict[str, Any]) -> OrchestratorResponse:
         message = (
-            "Remote pack fetch confirmation is unavailable and old confirmation payloads are not accepted. "
+            "Old fetch confirmations are not accepted. Request and confirm a new exact quarantine-fetch preview. "
             "No URL was opened and no content was fetched or imported."
         )
         return self._runtime_truth_response(
@@ -14590,7 +14634,7 @@ class Orchestrator:
             payload={
                 "type": "capability_gap_blocker",
                 "blocked_reason": "agent_pack_install_not_os_package",
-                "source_scope": "approved_pack_sources_only",
+                "source_scope": "enabled_queryable_configured_sources",
                 "searched": False,
                 "preview_required": True,
                 "install_allowed_initially": False,
@@ -14635,14 +14679,16 @@ class Orchestrator:
         planner = getattr(adapter, "plan_pack_lifecycle", None)
         if not callable(planner):
             return self._agent_pack_install_explanation_response(user_id, text)
-        body = dict(planner("external_pack.install", {"source": str(match.group("url") or "").rstrip(".")}))
-        message = str(body.get("message") or "Remote pack fetch/install is unavailable. No URL was opened and nothing was imported.")
+        source_url = str(match.group("url") or "").rstrip(".")
+        kind = "github_repo" if re.match(r"https://github\.com/[^/]+/[^/#?]+/?$", source_url, re.IGNORECASE) else "github_archive" if "github.com" in source_url and "/archive/" in source_url else "generic_archive_url"
+        body = dict(planner("external_pack.fetch", {"source": {"url": source_url, "kind": kind}}))
+        message = str(body.get("message") or body.get("preview") or "I prepared an exact quarantine-only fetch preview. Nothing has been fetched, approved, enabled, granted, or executed.")
         return self._runtime_truth_response(
             text=message,
             route="action_tool",
             used_tools=["pack_acquisition"],
-            error_kind=str(body.get("error") or "remote_pack_fetch_stage_unimplemented_denied"),
-            payload={**body, "type": "external_pack_install_denied", "mutated": False, "summary": message},
+            error_kind=str(body.get("error") or "external_pack_fetch_confirmation_required"),
+            payload={**body, "type": "external_pack_fetch_preview", "mutated": False, "summary": message},
         )
     def _email_capability_unavailable_response(self, user_id: str, text: str) -> OrchestratorResponse:
         _ = text
@@ -14661,7 +14707,7 @@ class Orchestrator:
             payload={
                 "type": "capability_gap_blocker",
                 "blocked_reason": "email_capability_unavailable",
-                "source_scope": "approved_pack_sources_only",
+                "source_scope": "enabled_queryable_configured_sources",
                 "searched": False,
                 "preview_required": True,
                 "install_allowed_initially": False,
@@ -14760,7 +14806,9 @@ class Orchestrator:
                         else []
                     ),
                     "missing_capability": acquisition.detected_capability,
-                    "source_scope": "approved_pack_sources_only",
+                    "source_scope": "enabled_queryable_configured_sources",
+                    "automatic_discovery": True,
+                    "automatic_fetch": False,
                     "preview_required": acquisition.source_status == "trusted_catalog_candidate",
                     "install_allowed_initially": False,
                     "candidate_actions": [

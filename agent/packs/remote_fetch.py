@@ -8,6 +8,7 @@ import shutil
 import stat
 import tarfile
 import tempfile
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -15,6 +16,8 @@ import zipfile
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
+
+from agent.packs.secure_transport import ALLOWED_ARCHIVE_TYPES, ALLOWED_PUBLIC_DATA_TYPES, SafeHttpsTransport, SecureTransportError
 
 
 MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
@@ -117,13 +120,17 @@ class _HttpsOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 class RemotePackFetcher:
-    def __init__(self, storage_root: str, *, opener: Any | None = None) -> None:
+    def __init__(self, storage_root: str, *, opener: Any | None = None, secure_transport: SafeHttpsTransport | None = None) -> None:
         self.storage_root = Path(storage_root).expanduser().resolve()
         self.fetch_root = self.storage_root / "fetch"
         self.quarantine_root = self.storage_root / "quarantine"
         self.fetch_root.mkdir(parents=True, exist_ok=True)
         self.quarantine_root.mkdir(parents=True, exist_ok=True)
-        self._opener = opener or urllib.request.build_opener(_HttpsOnlyRedirectHandler())
+        # A supplied opener exists only for deterministic hostile-input tests.
+        # Product traffic always uses the direct, peer-validated transport and
+        # never inherits proxy, cookie, authentication, or ambient headers.
+        self._opener = opener
+        self._secure_transport = secure_transport or SafeHttpsTransport()
 
     @staticmethod
     def build_source(
@@ -249,9 +256,12 @@ class RemotePackFetcher:
             effective_ref = ref or "HEAD"
             if ref is None:
                 provenance_notes.append("No ref was provided; fetched the current GitHub HEAD snapshot.")
-            resolved_url = f"https://github.com/{owner}/{repo}/archive/{effective_ref}.zip"
             if _is_commit_like(effective_ref):
                 commit_hash_resolved = effective_ref
+            elif self._opener is None:
+                commit_hash_resolved = self._resolve_github_commit(owner, repo, effective_ref, source)
+                provenance_notes.append("The requested GitHub ref was resolved to an immutable commit before review.")
+            resolved_url = f"https://github.com/{owner}/{repo}/archive/{commit_hash_resolved or effective_ref}.zip"
             ref = effective_ref
         elif source.kind == REMOTE_KIND_GITHUB_ARCHIVE:
             if parsed.netloc.lower() not in {"github.com", "codeload.github.com"}:
@@ -260,6 +270,13 @@ class RemotePackFetcher:
             ref = inferred_ref
             if _is_commit_like(inferred_ref):
                 commit_hash_resolved = inferred_ref
+            elif inferred_ref and parsed.netloc.lower() == "github.com" and self._opener is None:
+                coordinates = self._github_owner_repo(parsed.path)
+                if coordinates is not None:
+                    owner, repo = coordinates
+                    commit_hash_resolved = self._resolve_github_commit(owner, repo, inferred_ref, source)
+                    resolved_url = f"https://github.com/{owner}/{repo}/archive/{commit_hash_resolved}.zip"
+                    provenance_notes.append("The requested GitHub archive ref was resolved to an immutable commit before review.")
         else:
             lowered_path = parsed.path.lower()
             if not lowered_path.endswith(ALLOWED_ARCHIVE_SUFFIXES):
@@ -285,10 +302,45 @@ class RemotePackFetcher:
             resolved_url=resolved_url,
         )
 
+    def _resolve_github_commit(self, owner: str, repo: str, ref: str, source: RemotePackSource) -> str:
+        encoded_ref = urllib.parse.quote(str(ref), safe="")
+        api_url = f"https://api.github.com/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/commits/{encoded_ref}"
+        try:
+            body, _transport = self._secure_transport.fetch_bytes(
+                api_url,
+                max_bytes=512 * 1024,
+                allowed_content_types=ALLOWED_PUBLIC_DATA_TYPES,
+                total_timeout=15.0,
+            )
+            payload = json.loads(body.decode("utf-8"))
+            commit = str(payload.get("sha") or "").strip().lower() if isinstance(payload, dict) else ""
+            if not re.fullmatch(r"[0-9a-f]{40}", commit):
+                raise ValueError("github_commit_missing")
+            return commit
+        except (SecureTransportError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+            code = exc.code if isinstance(exc, SecureTransportError) else "github_ref_resolution_failed"
+            raise RemoteFetchError(
+                source=source,
+                error_kind=code,
+                message="The GitHub ref could not be resolved to an immutable commit, so no archive was fetched.",
+                flags=(code,),
+                hard_block_reasons=(code,),
+            ) from exc
+
+    @staticmethod
+    def _github_owner_repo(path: str) -> tuple[str, str] | None:
+        parts = [part for part in str(path or "").split("/") if part]
+        if len(parts) < 2:
+            return None
+        owner, repo = parts[0], parts[1]
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", owner) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", repo):
+            return None
+        return owner, repo
+
     @staticmethod
     def _infer_ref_from_github_archive(url: str) -> str | None:
         path = urllib.parse.urlparse(url).path
-        match = re.search(r"/archive/(?:refs/(?:heads|tags)/)?([^/]+)\.(zip|tar\.gz|tgz|tar)$", path)
+        match = re.search(r"/archive/(?:refs/(?:heads|tags)/)?(.{1,160})\.(zip|tar\.gz|tgz|tar)$", path)
         if match:
             return match.group(1)
         return None
@@ -296,6 +348,35 @@ class RemotePackFetcher:
     def _download_archive(self, source: RemotePackSource, download_url: str) -> tuple[Path, str, str]:
         temp_dir = Path(tempfile.mkdtemp(dir=str(self.fetch_root)))
         archive_path = temp_dir / "downloaded.archive"
+        if self._opener is None:
+            try:
+                downloaded, transport = self._secure_transport.fetch_to_temp(
+                    download_url,
+                    parent=temp_dir,
+                    max_bytes=MAX_DOWNLOAD_BYTES,
+                    allowed_content_types=ALLOWED_ARCHIVE_TYPES,
+                    total_timeout=30.0,
+                )
+                downloaded.replace(archive_path)
+                return archive_path, transport.sha256, transport.final_target
+            except SecureTransportError as exc:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                raise RemoteFetchError(
+                    source=source,
+                    error_kind=exc.code,
+                    message=exc.public_message,
+                    flags=(exc.code,),
+                    hard_block_reasons=(exc.code,),
+                ) from exc
+            except Exception as exc:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                raise RemoteFetchError(
+                    source=source,
+                    error_kind="remote_fetch_failed",
+                    message=f"Could not safely fetch the remote archive: {exc.__class__.__name__}.",
+                    flags=("remote_fetch_failed",),
+                    hard_block_reasons=("remote_fetch_failed",),
+                ) from exc
         sha256 = hashlib.sha256()
         total_bytes = 0
         request = urllib.request.Request(
@@ -419,7 +500,8 @@ class RemotePackFetcher:
                         hard_block_reasons=("symlink_entries_rejected",),
                         archive_sha256=source.archive_sha256,
                     )
-                if rel_path in seen_paths:
+                collision_key = unicodedata.normalize("NFC", rel_path).casefold()
+                if collision_key in seen_paths:
                     raise RemoteFetchError(
                         source=source,
                         error_kind="duplicate_archive_member",
@@ -428,7 +510,7 @@ class RemotePackFetcher:
                         hard_block_reasons=("duplicate_archive_member",),
                         archive_sha256=source.archive_sha256,
                     )
-                seen_paths.add(rel_path)
+                seen_paths.add(collision_key)
                 if member.is_dir():
                     continue
                 if mode & 0o111:
@@ -525,7 +607,7 @@ class RemotePackFetcher:
                         hard_block_reasons=("symlink_entries_rejected",),
                         archive_sha256=source.archive_sha256,
                     )
-                if member.isdev():
+                if not member.isdir() and not member.isfile():
                     raise RemoteFetchError(
                         source=source,
                         error_kind="special_archive_entry_rejected",
@@ -534,7 +616,8 @@ class RemotePackFetcher:
                         hard_block_reasons=("special_archive_entry_rejected",),
                         archive_sha256=source.archive_sha256,
                     )
-                if rel_path in seen_paths:
+                collision_key = unicodedata.normalize("NFC", rel_path).casefold()
+                if collision_key in seen_paths:
                     raise RemoteFetchError(
                         source=source,
                         error_kind="duplicate_archive_member",
@@ -543,7 +626,7 @@ class RemotePackFetcher:
                         hard_block_reasons=("duplicate_archive_member",),
                         archive_sha256=source.archive_sha256,
                     )
-                seen_paths.add(rel_path)
+                seen_paths.add(collision_key)
                 if member.isdir():
                     continue
                 if member.mode & 0o111:
@@ -634,6 +717,15 @@ class RemotePackFetcher:
                 message="The remote archive contains hidden files or directories and was blocked.",
                 flags=("archive_hidden_file_blocked",),
                 hard_block_reasons=("archive_hidden_file_blocked",),
+                archive_sha256=source.archive_sha256,
+            )
+        if len(parts) > 12 or len(normalized.encode("utf-8")) > 512 or any(len(part.encode("utf-8")) > 128 for part in parts):
+            raise RemoteFetchError(
+                source=source,
+                error_kind="archive_path_bounds_exceeded",
+                message="The remote archive contains an over-deep or over-long path.",
+                flags=("archive_path_bounds_exceeded",),
+                hard_block_reasons=("archive_path_bounds_exceeded",),
                 archive_sha256=source.archive_sha256,
             )
         lowered = normalized.lower()

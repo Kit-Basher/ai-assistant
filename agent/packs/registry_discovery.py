@@ -2068,10 +2068,18 @@ class PackRegistryDiscoveryService:
                     "provide a separately obtained local snapshot and compare it safely."
                 ),
             }
-        install_handoff: dict[str, Any] | None = None
+        install_handoff: dict[str, Any] | None = {
+            "available": True,
+            "automatic_fetch": False,
+            "next_step": "request_exact_source_authorization",
+            "message": (
+                "Use the exact supported source shown by the catalog, then review and "
+                "confirm a quarantine-only fetch. No bytes are fetched by this preview."
+            ),
+        }
         summary = (
             "Read-only preview: this is untrusted catalog metadata, not an install handoff. "
-            "Remote pack acquisition is unavailable; a local text-pack directory is required for reviewed ingestion. "
+            "A supported remote source requires a separate exact authorization before quarantine fetch. "
         )
         summary += policy_hint + " "
         if related_local_pack is not None:
@@ -2103,6 +2111,7 @@ class PackRegistryDiscoveryService:
             install_handoff=install_handoff,
             choices=(
                 "preview details",
+                "request an exact quarantine-fetch preview",
                 "compare with local version if available",
                 "ignore",
             ),

@@ -22,20 +22,21 @@ runtime. These limits are deliberate.
 - discovery metadata is advisory, not authoritative
 - pack discovery can be degraded or unavailable without making the core
   runtime invalid
-- generated skill scaffolds start with a preview, then may create a local
-  text-only review candidate through the existing quarantine and normalization
-  path; generated packs are not approved, enabled, permissioned, or executable
+- supported generated drafts start with a preview, then may create a portable,
+  declarative local-data-search, native-wrapper, or PNG-visualizer review
+  candidate in quarantine; generated packs cannot approve, enable, permission,
+  execute, or publish themselves
 - private-history capabilities, including YouTube history search, are not live
   capabilities yet; the current scaffold starts from a future user-selected
   local Google Takeout import and explicitly defers OAuth, browser scraping,
   transcript fetching, network lookup, and video/audio downloads
-- generated packs may request managed adapters, but those adapters are core
-  runtime contracts rather than generated code; `local_file_import` currently
-  records a confirmed grant and validates path metadata only, without reading
-  or indexing file contents
+- useful host effects remain core-owned brokers: one exact selected file can be
+  indexed into bounded per-pack structured storage, public HTTPS is exact
+  GET/HEAD only, and private local data cannot be combined with outbound network
 - WP4 executable pack ABI v1 is intentionally `i32 -> i32` pure computation;
   filesystem, network, model, service, database and secret brokers are absent
-- automatic pack acquisition and assistant-created capabilities remain WP5
+- authenticated pack HTTP, WebP visualizers, OAuth/browser automation, broad
+  filesystem access, directory crawling, and pack-supplied UI/code remain unsupported
 - release and recovery diagnostics are deterministic, but they are not a full
   observability stack
 

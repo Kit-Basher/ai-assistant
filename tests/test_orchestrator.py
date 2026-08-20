@@ -27,6 +27,7 @@ from agent.packs.managed_adapters import (
     create_metadata_only_grant,
     record_adapter_grant,
 )
+from agent.packs.draft_builder import PackDraftBuilder
 from agent.tool_contract import normalize_tool_request
 from agent.working_memory import WorkingMemoryState, append_turn
 from memory.db import MemoryDB
@@ -188,6 +189,19 @@ class _RuntimeChatAvailableAdapter:
             return body
         if store is None:
             return {"ok": False, "error": "pack_store_unavailable", "mutated": False}
+        if action_type == "external_pack.draft":
+            builder = PackDraftBuilder(store.external_storage_root())
+            preview = builder.preview(operation_payload)
+            created = builder.create_quarantine(preview)
+            return {
+                **created,
+                "ok": True,
+                "mutated": bool(created.get("created")),
+                "message": (
+                    "Created the exact assistant-generated draft in quarantine only. "
+                    "Review/import is the next separate gate; it has no authority yet."
+                ),
+            }
         if action_type == "external_pack.approve":
             pack = store.set_external_pack_review_status(pack_id, local_review_status="approved", approve_current_hash=True)
         elif action_type == "external_pack.enable":
@@ -225,6 +239,7 @@ class _RuntimeChatAvailableAdapter:
                 "external_pack.enable": "pack.lifecycle.enable",
                 "external_pack.grant": "pack.permission.grant",
                 "external_pack.remove": "pack.lifecycle.remove",
+                "external_pack.draft": "pack.lifecycle.create",
             }
             plan = build_mutation_plan(
                 plan_id=f"canonical-{legacy_plan['plan_id']}", capability_id=capabilities[action_type],
@@ -6762,7 +6777,7 @@ class TestOrchestrator(unittest.TestCase):
         assert isinstance(rescue, dict)
         self.assertEqual("capability_gap_rescue", rescue.get("type"))
         self.assertEqual("voice_output", rescue.get("missing_capability"))
-        self.assertEqual("approved_pack_sources_only", rescue.get("source_scope"))
+        self.assertEqual("enabled_queryable_configured_sources", rescue.get("source_scope"))
         self.assertTrue(rescue.get("preview_required"))
         self.assertFalse(rescue.get("install_allowed_initially"))
         actions = rescue.get("candidate_actions")
@@ -6975,7 +6990,7 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIsInstance(rescue, dict)
         assert isinstance(rescue, dict)
         self.assertEqual("capability_gap_rescue", rescue.get("type"))
-        self.assertEqual("approved_pack_sources_only", rescue.get("source_scope"))
+        self.assertEqual("enabled_queryable_configured_sources", rescue.get("source_scope"))
         self.assertFalse(rescue.get("install_allowed_initially"))
         self.assertEqual("no_candidate_scaffold_available", payload.get("source_status"))
         self.assertTrue(payload.get("scaffold_preview"))
@@ -7070,7 +7085,9 @@ class TestOrchestrator(unittest.TestCase):
                     plan = payload.get("plan") if isinstance(payload.get("plan"), dict) else {}
                     rescue = plan.get("capability_gap_rescue") if isinstance(plan.get("capability_gap_rescue"), dict) else {}
                 self.assertEqual("capability_gap_rescue", rescue.get("type"))
-                self.assertEqual("approved_pack_sources_only", rescue.get("source_scope"))
+                self.assertEqual("enabled_queryable_configured_sources", rescue.get("source_scope"))
+                self.assertTrue(rescue.get("automatic_discovery"))
+                self.assertFalse(rescue.get("automatic_fetch"))
                 self.assertFalse(rescue.get("install_allowed_initially"))
                 if rescue.get("preview_required"):
                     actions = rescue.get("candidate_actions")
@@ -7354,7 +7371,7 @@ class TestOrchestrator(unittest.TestCase):
         )
         self.assertEqual(before_files, after_files)
 
-    def test_second_yes_after_scaffold_preview_creates_review_only_candidate(self) -> None:
+    def test_second_yes_after_scaffold_preview_requires_exact_creation_confirmation(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
         runtime_adapter = _RuntimeChatAvailableAdapter()
         orchestrator = Orchestrator(
@@ -7368,107 +7385,37 @@ class TestOrchestrator(unittest.TestCase):
         runtime_adapter.pack_store = orchestrator._pack_store
         storage_root = Path(orchestrator._pack_store.external_storage_root())  # noqa: SLF001
 
-        first = orchestrator.handle_message(
+        orchestrator.handle_message(
             "Look through my YouTube history and find the video about neurons differentiating during animal infancy.",
             "user1",
         )
-        self.assertEqual(["pack_acquisition"], first.data["used_tools"])
-        before_generated = sorted(storage_root.glob("quarantine/generated-*"))
+        scaffold = orchestrator.handle_message("yes", "user1")
+        self.assertEqual(["capability_scaffold_preview"], scaffold.data["used_tools"])
+        self.assertEqual([], list(storage_root.glob("drafts-v1/*")))
 
-        second = orchestrator.handle_message("yes", "user1")
-        self.assertEqual(["capability_scaffold_preview"], second.data["used_tools"])
-        self.assertIn("no files were created", second.text.lower())
-        self.assertEqual(before_generated, sorted(storage_root.glob("quarantine/generated-*")))
+        plan = orchestrator.handle_message("yes", "user1")
+        self.assertEqual(["capability_scaffold_create"], plan.data["used_tools"])
+        plan_payload = plan.data.get("runtime_payload") if isinstance(plan.data.get("runtime_payload"), dict) else {}
+        self.assertEqual("external_pack.draft", plan_payload.get("action_type"))
+        self.assertFalse(plan_payload.get("created"))
+        self.assertIn("quarantine", plan.text.lower())
+        self.assertEqual([], list(storage_root.glob("drafts-v1/*")))
 
-        third = orchestrator.handle_message("yes", "user1")
-        self.assertEqual(["capability_scaffold_create"], third.data["used_tools"])
-        self.assertIn("I created a draft skill for review", third.text)
-        self.assertIn("not usable yet, not turned on, and cannot access your files", third.text)
-        self.assertIn("Next review step: approve the draft before turning it on", third.text)
-        payload = third.data.get("runtime_payload") if isinstance(third.data.get("runtime_payload"), dict) else {}
+        created = orchestrator.handle_message("yes", "user1")
+        self.assertEqual(["v2f_authorization"], created.data["used_tools"])
+        payload = created.data.get("runtime_payload") if isinstance(created.data.get("runtime_payload"), dict) else {}
+        self.assertTrue(payload.get("quarantine_only"))
         self.assertFalse(payload.get("approved"))
         self.assertFalse(payload.get("enabled"))
-        self.assertFalse(payload.get("executes_code"))
-        self.assertEqual([], payload.get("permissions_granted"))
-        lifecycle = payload.get("lifecycle") if isinstance(payload.get("lifecycle"), dict) else {}
-        self.assertEqual("imported_for_review", lifecycle.get("state"))
-        self.assertFalse(lifecycle.get("usable"))
-        self.assertEqual("approval", lifecycle.get("missing_gate"))
-        source_result = payload.get("source_result") if isinstance(payload.get("source_result"), dict) else {}
-        source_path = Path(str(source_result.get("source_path") or ""))
+        self.assertFalse(payload.get("granted"))
+        self.assertFalse(payload.get("usable"))
+        source_path = Path(str(payload.get("path") or ""))
         self.assertTrue(source_path.is_dir())
-        self.assertTrue(source_path.name.startswith("generated-"))
-        self.assertTrue((source_path / "SKILL.md").is_file())
-        self.assertTrue((source_path / "manifest.json").is_file())
-        self.assertTrue((source_path / "metadata.json").is_file())
+        self.assertEqual("drafts-v1", source_path.parent.name)
+        self.assertTrue((source_path / "personal-agent-pack.json").is_file())
         self.assertFalse((source_path / "handler.py").exists())
         self.assertFalse((source_path / "requirements.txt").exists())
-        pack = payload.get("pack") if isinstance(payload.get("pack"), dict) else {}
-        self.assertIn(str(pack.get("status") or ""), {"normalized", "partial_safe_import"})
-        self.assertIsNone(pack.get("enabled"))
-        normalized_path = Path(str(pack.get("normalized_path") or ""))
-        self.assertTrue(normalized_path.is_dir())
-        normalized_manifest = json.loads((normalized_path / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual([], normalized_manifest["permissions_granted"])
-        canonical_pack = pack.get("canonical_pack") if isinstance(pack.get("canonical_pack"), dict) else {}
-        adapters = canonical_pack.get("managed_adapters") if isinstance(canonical_pack.get("managed_adapters"), list) else []
-        if not adapters:
-            runtime = canonical_pack.get("runtime") if isinstance(canonical_pack.get("runtime"), dict) else {}
-            adapters = runtime.get("managed_adapters") if isinstance(runtime.get("managed_adapters"), list) else []
-        if not adapters:
-            permissions = canonical_pack.get("permissions") if isinstance(canonical_pack.get("permissions"), dict) else {}
-            adapters = permissions.get("managed_adapters") if isinstance(permissions.get("managed_adapters"), list) else []
-        self.assertEqual("local_file_import", adapters[0]["kind"])
-        self.assertFalse(adapters[0]["network_allowed"])
-        combined_source = "\n".join(path.read_text(encoding="utf-8") for path in source_path.iterdir() if path.is_file())
-        self.assertNotIn("neurons differentiating", combined_source)
         self.assertEqual(0, len(llm.chat_calls))
-
-        review_preview = orchestrator.handle_message("yes", "user1")
-        self.assertEqual(["pack_lifecycle_action"], review_preview.data["used_tools"])
-        self.assertIn("review preview", review_preview.text.lower())
-        self.assertIn("review this change before approving", review_preview.text.lower())
-        self.assertNotIn("executor id:", review_preview.text.lower())
-        approved = orchestrator.handle_message("yes", "user1")
-        self.assertEqual(["v2f_authorization"], approved.data["used_tools"])
-        self.assertIn("approved for the next setup step", approved.text.lower())
-        enable_preview = orchestrator.handle_message("yes", "user1")
-        self.assertEqual(["pack_lifecycle_action"], enable_preview.data["used_tools"])
-        self.assertIn("turn-on preview", enable_preview.text.lower())
-        self.assertIn("review this change before approving", enable_preview.text.lower())
-        enabled = orchestrator.handle_message("yes", "user1")
-        self.assertEqual(["v2f_authorization"], enabled.data["used_tools"])
-        self.assertIn("permission preview is required", enabled.text)
-        permission_preview = orchestrator.handle_message("yes", "user1")
-        self.assertEqual(["managed_adapter_permission"], permission_preview.data["used_tools"])
-        self.assertIn("needs your permission to use one selected file", permission_preview.text.lower())
-        self.assertIn("will not run code", permission_preview.text.lower())
-
-        selected_path = storage_root / "watch-history.json"
-        selected_path.write_text('{"private": "history contents"}\n', encoding="utf-8")
-        with patch("pathlib.Path.read_text", side_effect=AssertionError("permission preview should not read files")):
-            path_response = orchestrator.handle_message(f"use {selected_path}", "user1")
-        self.assertEqual(["managed_adapter_permission_preview"], path_response.data["used_tools"])
-        self.assertIn("<redacted-local-history-path>/watch-history.json", path_response.text)
-        self.assertIn("I will not read or parse the file", path_response.text)
-
-        grant_plan = orchestrator.handle_message("yes", "user1")
-        self.assertEqual(["managed_adapter_permission_grant"], grant_plan.data["used_tools"])
-        self.assertIn("selected-file permission plan", grant_plan.text.lower())
-        self.assertIn("review this change before approving", grant_plan.text.lower())
-        grant_response = orchestrator.handle_message("yes", "user1")
-        self.assertEqual(["v2f_authorization"], grant_response.data["used_tools"])
-        self.assertIn("permission metadata recorded", grant_response.text.lower())
-        grant_payload = grant_response.data.get("runtime_payload") if isinstance(grant_response.data.get("runtime_payload"), dict) else {}
-        self.assertTrue(grant_payload.get("approved"))
-        self.assertTrue(grant_payload.get("enabled"))
-        self.assertEqual([], grant_payload.get("permissions_granted"))
-        self.assertTrue(grant_payload.get("did_grant_permissions"))
-        self.assertFalse(grant_payload.get("did_invoke_adapter"))
-        self.assertFalse(grant_payload.get("did_use_pack"))
-        self.assertFalse(grant_payload.get("executes_code"))
-        self.assertFalse(grant_payload.get("reads_file"))
-        self.assertNotIn("history contents", str(grant_payload))
 
     def test_generated_scaffold_yes_continues_one_lifecycle_gate_at_a_time(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
@@ -7489,54 +7436,20 @@ class TestOrchestrator(unittest.TestCase):
         )
         preview = orchestrator.handle_message("yes", "user1")
         self.assertEqual(["capability_scaffold_preview"], preview.data["used_tools"])
+        creation_preview = orchestrator.handle_message("yes", "user1")
+        self.assertEqual(["capability_scaffold_create"], creation_preview.data["used_tools"])
+        creation_payload = creation_preview.data.get("runtime_payload") if isinstance(creation_preview.data.get("runtime_payload"), dict) else {}
+        self.assertEqual("external_pack.draft", creation_payload.get("action_type"))
+        self.assertFalse(creation_payload.get("created"))
+
         created = orchestrator.handle_message("yes", "user1")
-        self.assertEqual(["capability_scaffold_create"], created.data["used_tools"])
+        self.assertEqual(["v2f_authorization"], created.data["used_tools"])
         created_payload = created.data.get("runtime_payload") if isinstance(created.data.get("runtime_payload"), dict) else {}
-        self.assertEqual("imported_for_review", (created_payload.get("lifecycle") or {}).get("state"))
-
-        approval_preview = orchestrator.handle_message("yes", "user1")
-        self.assertEqual(["pack_lifecycle_action"], approval_preview.data["used_tools"])
-        preview_payload = approval_preview.data.get("runtime_payload") if isinstance(approval_preview.data.get("runtime_payload"), dict) else {}
-        self.assertEqual("external_pack_lifecycle_plan", preview_payload.get("action"))
-        self.assertEqual("external_pack.approve", preview_payload.get("action_type"))
-        self.assertFalse(preview_payload.get("did_approve"))
-        self.assertIn("does not turn the skill on", approval_preview.text.lower())
-        self.assertIn("grant file permission", approval_preview.text.lower())
-
-        approved = orchestrator.handle_message("yes", "user1")
-        self.assertEqual(["v2f_authorization"], approved.data["used_tools"])
-        approved_payload = approved.data.get("runtime_payload") if isinstance(approved.data.get("runtime_payload"), dict) else {}
-        self.assertEqual("review_approve", approved_payload.get("action"))
-        self.assertEqual("approved", (approved_payload.get("lifecycle") or {}).get("state"))
-        self.assertTrue(approved_payload.get("did_approve"))
-        self.assertFalse(approved_payload.get("did_enable"))
-        self.assertFalse(approved_payload.get("did_grant_permissions"))
-        self.assertFalse(approved_payload.get("did_use_pack"))
-        self.assertIn("still not enabled", approved.text.lower())
-
-        enable_preview = orchestrator.handle_message("yes", "user1")
-        self.assertEqual(["pack_lifecycle_action"], enable_preview.data["used_tools"])
-        enable_preview_payload = enable_preview.data.get("runtime_payload") if isinstance(enable_preview.data.get("runtime_payload"), dict) else {}
-        self.assertEqual("external_pack_lifecycle_plan", enable_preview_payload.get("action"))
-        self.assertEqual("external_pack.enable", enable_preview_payload.get("action_type"))
-        self.assertFalse(enable_preview_payload.get("did_enable"))
-        self.assertIn("will not grant file permission", enable_preview.text.lower())
-
-        enabled = orchestrator.handle_message("yes", "user1")
-        self.assertEqual(["v2f_authorization"], enabled.data["used_tools"])
-        enabled_payload = enabled.data.get("runtime_payload") if isinstance(enabled.data.get("runtime_payload"), dict) else {}
-        self.assertEqual("enable", enabled_payload.get("action"))
-        self.assertTrue(enabled_payload.get("did_enable"))
-        self.assertFalse(enabled_payload.get("did_grant_permissions"))
-        self.assertFalse(enabled_payload.get("did_use_pack"))
-        self.assertEqual("needs_permission", (enabled_payload.get("lifecycle") or {}).get("state"))
-        self.assertIn("permission", enabled.text.lower())
-
-        permission_preview = orchestrator.handle_message("yes", "user1")
-        self.assertEqual(["managed_adapter_permission"], permission_preview.data["used_tools"])
-        self.assertIn("needs your permission to use one selected file", permission_preview.text.lower())
-        self.assertIn("will not run code", permission_preview.text.lower())
-        self.assertIn("read the file yet", permission_preview.text.lower())
+        self.assertTrue(created_payload.get("quarantine_only"))
+        self.assertFalse(created_payload.get("approved"))
+        self.assertFalse(created_payload.get("enabled"))
+        self.assertFalse(created_payload.get("granted"))
+        self.assertFalse(created_payload.get("usable"))
 
     def test_usable_external_pack_previews_then_invokes_managed_adapter_dry_run(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")

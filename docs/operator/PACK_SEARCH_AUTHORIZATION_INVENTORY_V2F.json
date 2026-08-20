@@ -1,5 +1,7 @@
 {
   "schema": "personal-agent.pack-search-authorization-inventory.v2f",
+  "historical": true,
+  "superseded_by": "docs/design/SAFE_PACK_ACQUISITION_BROKERS_WP5.md",
   "starting_commit": "724de3cbbbd25b2396d0f660fb0062b84d339944",
   "summary": {
     "bounded_internal_writer": 1,

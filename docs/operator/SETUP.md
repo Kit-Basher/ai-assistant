@@ -8,7 +8,9 @@ First-run UX rule: explain setup through normal assistant language. SAFE MODE is
 the default; setup/status checks are read-only, while supported changes show a
 plain-language preview and require explicit confirmation. Controlled Mode is
 not unrestricted and does not make setup automatic. Catalog pack discovery is
-metadata-only; remote pack download is unavailable.
+metadata-only. A supported exact HTTPS/GitHub source can be fetched only after
+a separate expiring authorization, and the bytes land in quarantine without
+approval, permissions, enablement, or execution.
 
 Canonical first-run command:
 

@@ -141,23 +141,24 @@ def test_declarative_capability_calls_only_declared_native_and_works_in_chat(run
     assert payload["underlying_capability_id"] == "system.status" and payload["pack_binding"]["pack_id"] == "health-helper"
 
 
-def test_update_invalidates_old_review_enable_grants_and_registration(runtime: AgentRuntime, tmp_path: Path):
+def test_update_stages_new_version_without_revoking_active_old_version(runtime: AgentRuntime, tmp_path: Path):
     source = _write_pack(tmp_path / "v1")
     old_rid, capability_id = _make_usable(runtime, source)
     updated = _write_pack(tmp_path / "v2", version="2.0.0", wat='(module (func (export "invoke") (param i32) (result i32) local.get 0 i32.const 3 i32.mul))')
     imported = _apply(runtime, "import", {"source_dir": str(updated)})["record"]
     old = runtime.orchestrator().pack_capability_status(old_rid)
-    assert imported["record_id"] != old_rid and old["lifecycle"]["missing_gate"] == "safety_review"
-    assert runtime.orchestrator()._capability_registry.get(capability_id) is None
+    assert imported["record_id"] != old_rid and imported["lifecycle"]["missing_gate"] == "review_approval"
+    assert old["active"] and old["lifecycle"]["usable"]
+    assert runtime.orchestrator()._capability_registry.get(capability_id) is not None
 
 
-def test_task_planned_against_old_pack_version_blocks_after_update(runtime: AgentRuntime, tmp_path: Path):
+def test_task_planned_against_old_pack_version_remains_valid_while_update_is_only_staged(runtime: AgentRuntime, tmp_path: Path):
     _, capability_id = _make_usable(runtime, _write_pack(tmp_path / "v1"))
     proposal = build_deterministic_plan(goal="double 4", capability_requests=[(capability_id, {"value": 4})], actor_id="alice")
     task = runtime.orchestrator()._task_coordinator.create(proposal, actor_id="alice", session_id="s", thread_id="t")
     _apply(runtime, "import", {"source_dir": str(_write_pack(tmp_path / "v2", version="2"))})
     result = runtime.orchestrator()._task_coordinator.run(task["task_id"], actor_id="alice", thread_id="t")
-    assert result["state"] == "blocked" and result["failure"]["classification"] == "missing_capability"
+    assert result["state"] == "succeeded" and result["outcome"]["verified"]
 
 
 def test_mutating_declarative_is_honestly_unavailable_without_effect_broker(runtime: AgentRuntime, tmp_path: Path):

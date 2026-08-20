@@ -23,7 +23,7 @@ For capability requests, the assistant must say what is missing and what the nex
 Allowed v1 outcomes:
 
 - trusted catalog candidate found: show untrusted metadata only; do not offer remote fetch/import.
-- remote source found: explain that remote acquisition is unavailable. Source policy may allow metadata queries only.
+- remote source found: explain that discovery fetched nothing and offer a separate exact, expiring quarantine-fetch authorization for supported HTTPS/GitHub sources.
 - safe web-search leads found: show untrusted source leads only. Leads are not source approval, are not trusted, and cannot be fetched/imported until the separate source approval gate is completed.
 - source approval preview: advisory only in the assistant compatibility flow. Source catalog creation and query-policy changes are separate centrally authorized operations.
 - approved-source fetch confirmation: explicitly unavailable. Old approval/fetch confirmations cannot open a URL or import content.
@@ -40,13 +40,21 @@ Each confirmation advances one gate only. Repeated `yes` must not skip approval,
 Remote content remains hostile even when a source is allowlisted. Source policy
 permits metadata queries only; it does not permit fetch into quarantine.
 Catalog metadata, archives, manifests, README, and `SKILL.md` content remain
-untrusted. A future fetch stage must be separately authorized and digest-bound.
+untrusted. WP5 adds a separate actor/session/thread/target/expiry-bound fetch
+authorization; accepted bytes go only to quarantine and are review-identified
+by immutable archive and normalized-content digests.
 
 Safe web-search lead discovery is metadata-only. Result URLs, titles, snippets, and engine/source labels are untrusted search metadata. The assistant must not fetch result pages, download archives, call `/packs/install`, import packs, enable packs, or infer safety from GitHub or any other domain. Leads only point to the separate source approval gate.
 
 Source catalog and query policy are distinct centrally authorized state changes, not trust in pack content. They permit metadata queries only and do not authorize archive acquisition.
 
-Quarantine fetch/import-for-review is not implemented at the product boundary. The retained hostile-fetch primitives are offline/test infrastructure and are not called by Web, assistant, Telegram, CLI, compatibility, or registered executor paths. A future implementation must add a separate authorized fetch stage before approval or installation.
+Quarantine fetch/import-for-review is implemented through the central mutation
+controller. The hardened direct TLS transport rejects ambient proxies,
+credentials, private/non-global DNS or peers, unsafe redirects, oversized or
+truncated bodies, and unsupported content. Archive normalization rejects links,
+special files, traversal, collisions, nested archives, executable/code payloads,
+and resource-exhaustion shapes. This stage cannot approve, grant, enable,
+activate, invoke, or update an existing active version.
 
 After any import-for-review result, the assistant must render a bounded review-state summary before asking for approval. That summary may include pack identity, lifecycle state, local review status, enabled=false, permissions/grants status, managed-adapter kinds, risk flags, import status, and safe source/provenance metadata. It must not expose raw `SKILL.md`, README, manifests, catalog listings, prompt text, secrets, private paths, or long hostile strings. Review state is not content trust; it is a truthfulness checkpoint that tells the user why the pack is still not usable and names the next safe gate as review/approval.
 
@@ -56,7 +64,12 @@ Enablement continuation follows the same preview-before-mutation rule. After rev
 
 Configuration and permission continuation is separate from enablement. If the enabled pack needs a managed-adapter permission, the assistant first previews the requirement: adapter kind, scope, allowed file types, whether a local path is needed, and the safety limits. A user-provided local path can then produce a scoped grant preview. Only the following confirmation records metadata/config. The grant does not invoke the adapter, use the pack, execute code, install dependencies, run shell commands, or read/parse private file contents. If the grant makes the pack usable, the assistant reports ready/usable and asks for the next specific input or action instead of running automatically.
 
-Managed adapter invocation is a later explicit action after usability. The assistant must preview the pack, adapter kind, operation, redacted grant scope, read/write behavior, and disabled execution channels before running anything. The first supported operation set is `validate_grant`, `describe_capability`, and `dry_run`; `local_file_import` v1 can validate metadata and dry-run the selected-file grant only. Content read, search, parse, or indexing behavior is not implemented until a future core-owned adapter operation adds it.
+Broker use is a later explicit action after usability. `selected_local_data` can
+read one exact confirmed UTF-8 text/JSON/CSV/HTML file and create a minimal,
+bounded per-pack private search index. `scoped_https` performs only exact
+reviewed public GET/HEAD requests, and private local/store data cannot flow into
+that broker. `presence_visualizer` is core-rendered validated PNG metadata and
+never pack-supplied UI code.
 
 External/generated packs must not run arbitrary code. They can request only approved managed adapters implemented in core runtime. V1 does not add internet-wide search, OAuth, browser scraping, transcript lookup, YouTube/browser parsing, dependency installs, `handler.py`, or arbitrary generated code execution.
 

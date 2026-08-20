@@ -22,7 +22,7 @@ def test_mutation_file_inventory_is_exact_and_field_complete() -> None:
     payload = json.loads(audit.CLASSIFICATION_PATH.read_text(encoding="utf-8"))
     rows = payload["classifications"]
     indexed = {row["path"]: row for row in rows}
-    assert len(rows) == len(indexed) == payload["reviewed_count"] == 173
+    assert len(rows) == len(indexed) == payload["reviewed_count"] == 178
     assert set(indexed) == _detected_paths()
     for path, row in indexed.items():
         assert audit.REQUIRED_CLASSIFICATION_FIELDS == set(row)
@@ -33,5 +33,5 @@ def test_v2f_closure_has_no_pending_migration_disposition() -> None:
     payload = json.loads(audit.CLASSIFICATION_PATH.read_text(encoding="utf-8"))
     pending = {row["path"] for row in payload["classifications"] if row["disposition"] == "supported_pending_migration"}
     assert pending == set()
-    denied = {row["path"] for row in payload["classifications"] if "unimplemented_denied" in row["disposition"]}
-    assert "agent/packs/remote_fetch.py" in denied
+    central = {row["path"] for row in payload["classifications"] if row["disposition"] == "central_executor_primitive"}
+    assert {"agent/packs/remote_fetch.py", "agent/packs/secure_transport.py", "agent/packs/brokers.py", "agent/packs/draft_builder.py"} <= central

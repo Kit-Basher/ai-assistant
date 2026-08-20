@@ -5,7 +5,23 @@ This is the current-state handover doc. Product intent lives in
 `PRODUCT_RUNTIME_SPEC.md`. Treat this file as a status snapshot, not the sole
 source of truth.
 
-## WP4.5 candidate truth (v0.2.20)
+## WP5 candidate truth (v0.2.21)
+
+- Missing-capability rescue can search enabled configured metadata sources, but
+  never fetches automatically. Exact-confirmed supported HTTPS/GitHub artifacts
+  stream only to quarantine through DNS/peer/redirect/SSRF and archive gates.
+- Supported assistant-created drafts are deterministic and quarantine-only.
+  Review, exact broker grants, enablement, activation, invocation, update,
+  rollback, revocation, and removal remain separate authority transitions.
+- Core-owned brokers provide one selected local text/JSON/CSV/HTML file with a
+  bounded private index, namespaced structured storage, exact public HTTPS
+  GET/HEAD without private-data exfiltration, and a core-rendered PNG visualizer.
+- `scripts/pack_acquisition_broker_proof.py` is commit/diff-bound and runs from
+  the canonical release gate. See
+  `docs/design/SAFE_PACK_ACQUISITION_BROKERS_WP5.md` and
+  `docs/releases/v0.2.21.md`.
+
+## Completed WP4.5 truth (v0.2.20)
 
 - Structured Ollama observation, registry configuration, Model Manager history,
   and Scout advice are reconciled without presenting remote/history rows as

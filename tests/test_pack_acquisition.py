@@ -420,7 +420,7 @@ class TestPackAcquisitionOrchestratorRegression(unittest.TestCase):
         self.assertIn("source is still untrusted", text.lower())
         self.assertIn("no pages were fetched", text.lower())
         self.assertIn("legacy assistant approval flow is read-only", text.lower())
-        self.assertIn("remote pack acquisition remains unavailable", text.lower())
+        self.assertIn("fresh exact quarantine-fetch preview", text.lower())
         self.assertFalse(self.runtime.pack_store.list_external_packs())
 
     def test_second_yes_after_source_approval_preview_records_approval_only(self) -> None:

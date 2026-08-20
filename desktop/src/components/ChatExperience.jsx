@@ -64,7 +64,7 @@ function CapabilityCard({ capability, disabled, onReply }) {
           <p className="inline-action-eyebrow">Capability rescue</p>
           <p className="inline-action-title">{capability.title}</p>
           <p className="inline-action-text">
-            These are untrusted catalog descriptions only. Discovery is not installation, and remote pack download is unavailable.
+            These are untrusted catalog descriptions only. Discovery fetches nothing. A supported exact source needs a separate confirmation before quarantine-only acquisition.
           </p>
         </div>
         {capability.candidates.length > 0 ? (

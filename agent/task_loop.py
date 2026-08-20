@@ -311,7 +311,9 @@ def build_missing_capability(
         "considered_capabilities": sorted(set(str(item) for item in considered_capabilities))[:32],
         "why_incomplete": "No currently registered capability can safely produce the remaining required evidence.",
         "completed_partial_evidence": _redacted(completed_evidence or []),
-        "safe_next_step_category": "explain_or_wait_for_future_capability",
+        "safe_next_step_category": "discover_pack_metadata_or_offer_supported_draft",
+        "automatic_discovery": True,
+        "automatic_fetch": False,
         "automatic_pack_action": False,
     }
 

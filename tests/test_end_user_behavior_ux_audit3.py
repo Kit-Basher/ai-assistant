@@ -31,23 +31,23 @@ def test_claim_and_journey_inventory_is_deterministic_and_complete() -> None:
     assert {row["id"] for row in payload["journeys"]} >= {
         "new_user_no_model",
         "task_reminder_continuity",
-        "remote_pack_unavailable",
+            "remote_pack_quarantine",
         "failed_indeterminate",
         "disabled_telegram",
         "restart_recovery",
     }
 
 
-def test_capability_discovery_is_outcome_led_and_does_not_advertise_remote_pack_install() -> None:
+def test_capability_discovery_is_outcome_led_and_keeps_remote_pack_gates_distinct() -> None:
     text = build_user_facing_capability_answer(search_available=False, safe_mode=True)
     assert "everyday questions" in text
-    assert "arbitrary remote pack" in text
-    assert "cannot download" in text
+    assert "supported https or github artifact" in text.lower()
+    assert "quarantine only" in text.lower()
     assert "normal default" in text
     assert "need your approval" in text
     assert "capability_id" not in text
     assert "executor" not in text.lower()
-    assert "quarantine review" not in text.lower()
+    assert "review, permissions, enablement, and use remain separate" in text.lower()
 
 
 def test_indeterminate_recovery_never_advises_blind_retry() -> None:
@@ -81,15 +81,15 @@ def test_primary_error_copy_keeps_diagnostics_secondary() -> None:
     assert lines.index("Diagnostic details (for support):") < lines.index("trace_id: synthetic-trace")
 
 
-def test_remote_pack_error_offers_only_local_or_metadata_next_steps() -> None:
+def test_missing_pack_error_offers_local_or_exact_quarantine_preview() -> None:
     recovery = AgentRuntime._failure_recovery_for_error(
         error="pack_not_found",
         error_kind="not_found",
         message="No local pack is installed.",
     )
     combined = " ".join(str(recovery.get(key) or "") for key in ("summary", "reason", "next_step")).lower()
-    assert "remote acquisition" in combined
-    assert "local text-pack" in combined
+    assert "exact quarantine-fetch preview" in combined
+    assert "local pack directory" in combined
     assert "then install it" not in combined
 
 

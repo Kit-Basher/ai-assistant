@@ -942,6 +942,14 @@ class RequestUnderstandingService:
                 score += min(0.18, 0.09 * (fuzzy_overlap_count - overlap_count))
                 if sequence_overlap_count:
                     score += min(0.22, 0.11 * sequence_overlap_count)
+            if definition.capability_id.startswith("pack."):
+                # Dynamic capabilities have narrower, reviewed semantic
+                # evidence than broad native families. Reward multi-token and
+                # word-order specificity from that live contract so a pack
+                # named for a particular wrapper/search is not swallowed by a
+                # generic native status/search capability. This is derived
+                # from registry vectors and is not a pack-name phrase table.
+                score += min(0.24, 0.08 * max(0, overlap_count - 1) + 0.10 * sequence_overlap_count)
             if (
                 definition.capability_id == "assistant.presence"
                 and boost == 0.0
@@ -1163,6 +1171,7 @@ class RequestUnderstandingService:
             # selection. It cannot change the capability id or introduce an
             # authority field. Initial WP4 executable ABI accepts bounded
             # scalar inputs; declarative mappings use the same typed fields.
+            required_string_fields = [name for name in definition.input_contract.required if definition.input_contract.properties.get(name) is str and name not in {"user_id", "text"}]
             for name, expected in definition.input_contract.properties.items():
                 if name in inputs or name in {"user_id", "text"}:
                     continue
@@ -1174,6 +1183,12 @@ class RequestUnderstandingService:
                     quoted = next((m.group("value") for m in _QUOTED_VALUE_RE.finditer(original)), None)
                     if quoted:
                         inputs[name] = quoted
+                    elif len(required_string_fields) == 1 and name == required_string_fields[0]:
+                        # A selected external capability with one required text
+                        # argument receives the bounded original request.  The
+                        # pack contract, not a capability-specific phrase
+                        # extractor, determines this mapping.
+                        inputs[name] = original[:4096]
         try:
             validated_inputs = definition.input_contract.validate(inputs)
         except ValueError as exc:

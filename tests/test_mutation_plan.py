@@ -60,6 +60,18 @@ class MutationPlanTests(unittest.TestCase):
         self.assertEqual(plan["plan_fingerprint"], unchanged)
         self.assertNotEqual(plan["plan_fingerprint"], changed)
 
+    def test_https_authority_target_is_not_rewritten_as_a_local_path(self) -> None:
+        target = "https://example.com/packs/review.zip"
+        plan = build_mutation_plan(
+            plan_id="pack-fetch-plan",
+            capability_id="pack.lifecycle.fetch",
+            executor_id="external_pack.fetch.v1",
+            expires_at_epoch=int(time.time()) + 600,
+            target_snapshot={"source": {"kind": "generic_archive_url", "url": target}},
+        )
+        self.assertEqual(target, plan["target_snapshot"]["source"]["url"])
+        validate_mutation_plan(plan)
+
     def test_plan_store_save_cancel_expire_and_reject_reuse(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = MutationPlanStore(Path(tmp) / "plans.json")

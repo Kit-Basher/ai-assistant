@@ -38,7 +38,7 @@ test("ChatExperience uses one polite live log and explicit cancellation semantic
   assert.match(chatExperience, /aria-label="Cancel this proposed change"/);
   assert.match(chatExperience, /Attachments are not available/);
   assert.match(chatExperience, /Inspect metadata/);
-  assert.match(chatExperience, /remote pack download is unavailable/i);
+  assert.match(chatExperience, /separate confirmation before quarantine-only acquisition/i);
 });
 
 test("App surfaces send failure and supports transcript export", () => {

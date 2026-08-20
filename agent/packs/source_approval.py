@@ -145,7 +145,7 @@ class SourceApprovalController:
             f"Source approval preview for {title}. The source is still untrusted. "
             "Approval only records that this source id may be queried for metadata under policy. "
             "GitHub or any other domain does not make the content safe. No pages were fetched, no archives were downloaded, and no pack was imported. "
-            "Remote pack acquisition is unavailable."
+            "A quarantine fetch needs a separate exact source authorization."
         )
         return SourceApprovalPreview(
             ok=True,
@@ -329,8 +329,8 @@ class SourceApprovalController:
         self._persist_managed_action_journal(journal, status="verified")
         message = (
             f"I recorded source approval for {source_id}. No pack was fetched, imported, installed, approved, enabled, or granted permissions. "
-            "The source content remains hostile. This approval permits metadata queries only; remote pack acquisition is unavailable. "
-            "Next safe step: inspect untrusted catalog metadata, or use a separately obtained local text-pack directory."
+            "The source content remains hostile. Source approval permits metadata queries only and is not fetch authority. "
+            "Next safe step: inspect untrusted metadata, then request a separate exact quarantine-fetch preview if you want those bytes retrieved."
         )
         return SourceApprovalResult(
             ok=True,
@@ -447,7 +447,7 @@ def _approval_notes(*, source_kind: str, title: str, provenance: Any) -> str:
         "approved_by_user=true",
         f"remote_source_kind={source_kind}",
         "content_remains_hostile=true",
-        "approval permits metadata queries only; remote acquisition unavailable",
+        "approval permits metadata queries only; acquisition needs a separate exact fetch authorization",
         "no content was fetched during source approval",
     ]
     if title:

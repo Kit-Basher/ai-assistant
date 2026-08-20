@@ -58,7 +58,7 @@ def structural_proof() -> list[str]:
             "worker": "real_worker", "verifier": "self_test", "task": "task_and_revocation",
             "restart": "startup_reconstructs", "failure": "fail", "timeout": "bounds_fuel",
             "redaction": "authority_fields", "isolation": "denies_imports", "revocation": "revocation",
-            "update": "update_invalidates",
+            "update": "update_stages_new_version",
         }[category]
         if evidence not in test_source:
             failures.append(f"proof_category_missing:{category}")

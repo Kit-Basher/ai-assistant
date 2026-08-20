@@ -46,8 +46,9 @@ class TestFailureRecoveryUx(unittest.TestCase):
         self.assertEqual("pack_available_previewable", preview["kind"])
         self.assertEqual("Available", preview["state_label"])
         self.assertIn("metadata", preview["summary"].lower())
-        self.assertIn("local text-pack", preview["next_step"].lower())
-        self.assertIn("remote acquisition is unavailable", preview["reason"].lower())
+        self.assertIn("local pack", preview["next_step"].lower())
+        self.assertIn("quarantine-fetch preview", preview["next_step"].lower())
+        self.assertIn("discovery is not acquisition", preview["reason"].lower())
 
         unconfirmed = build_failure_recovery("pack_task_unconfirmed")
         self.assertEqual("pack_task_unconfirmed", unconfirmed["kind"])

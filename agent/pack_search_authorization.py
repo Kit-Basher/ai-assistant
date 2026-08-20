@@ -12,6 +12,7 @@ from agent.executor_registry import ExecutorRegistry, ExecutorSpec, redact_execu
 from agent.mutation_boundary import assert_authorized_mutation
 from agent.mutation_plan import build_mutation_plan, target_fingerprint_for_snapshot, validate_mutation_plan
 from agent.permissions import MODEL_OPS_ACTIONS
+from agent.packs.wp5_contracts import ACQUISITION_SCHEMA, AcquisitionSourceV1, WP5ContractError
 
 
 CONTROL_FIELDS = {
@@ -41,6 +42,10 @@ SPECS: dict[str, V2FMutationSpec] = {
     "pack_source.scoped_policy.update": _spec("pack_source.scoped_policy.update", "pack.source.configure", "Restore the previous source-specific policy."),
     "permission.policy.update": _spec("permission.policy.update", "permission.policy.configure", "Restore the previous bounded permission policy through a separately authorized Plan."),
     "external_pack.install": _spec("external_pack.install", "pack.lifecycle.install", "Remove only the exact installed/quarantined pack version through a new Plan.", safe=True),
+    "external_pack.fetch": _spec("external_pack.fetch", "pack.lifecycle.fetch", "Remove only the exact quarantine candidate and fetched bytes through a new Plan."),
+    "external_pack.index": _spec("external_pack.index", "pack.data.index", "Delete only the exact derived pack-private index through a new Plan."),
+    "external_pack.revoke": _spec("external_pack.revoke", "pack.permission.revoke", "Restore only through a new exact file-selection grant."),
+    "external_pack.draft": _spec("external_pack.draft", "pack.lifecycle.create", "Remove only the exact generated quarantine candidate through a new Plan."),
     "external_pack.approve": _spec("external_pack.approve", "pack.lifecycle.approve", "Restore the previous review state through a new Plan."),
     "external_pack.enable": _spec("external_pack.enable", "pack.lifecycle.enable", "Restore the previous enabled state through a new Plan."),
     "external_pack.grant": _spec("external_pack.grant", "pack.permission.grant", "Revoke the exact bounded grant through a new Plan."),
@@ -129,6 +134,8 @@ class PackSearchAuthorizationService:
             snapshot["grants_fingerprint"] = stable_fingerprint(grant_path.read_text(encoding="utf-8") if grant_path.is_file() else "absent")
             snapshot["permission_policy"] = self.runtime.permission_store.load()
             snapshot["source_policy"] = self.runtime._pack_registry_discovery().get_policy()
+            if operation == "external_pack.draft":
+                snapshot["draft_preview"] = self.runtime.pack_draft_preview(request)
         elif operation in {"search.setup", "search.searxng.repair"}:
             built = self.runtime._build_search_setup_execution_plan(request)
             snapshot["execution_plan"] = built.get("_execution_plan") or built.get("plan") or built
@@ -147,8 +154,27 @@ class PackSearchAuthorizationService:
             source_id = str(request.get("source_id") or request.get("id") or "").strip()
             if operation != "pack_source.policy.update" and not source_id:
                 return "pack_source_id_required"
-        if operation.startswith("external_pack.") and operation != "external_pack.install" and not str(request.get("pack_id") or "").strip():
+        if operation.startswith("external_pack.") and operation not in {"external_pack.install", "external_pack.fetch", "external_pack.draft"} and not str(request.get("pack_id") or "").strip():
             return "pack_id_required"
+        if operation == "external_pack.draft" and str(request.get("template") or "") not in {"portable_text", "declarative_native", "local_data_search", "presence_visualizer"}:
+            return "draft_template_unsupported"
+        if operation == "external_pack.fetch":
+            source = request.get("source") if isinstance(request.get("source"), dict) else {}
+            if not str(request.get("source_id") or source.get("source_id") or "").strip() and not str(request.get("url") or source.get("url") or "").strip():
+                return "pack_fetch_source_required"
+            url = str(request.get("url") or source.get("url") or "").strip()
+            if url:
+                try:
+                    AcquisitionSourceV1.parse({
+                        "schema_version": ACQUISITION_SCHEMA,
+                        "source_kind": str(request.get("source_kind") or source.get("kind") or "generic_archive_url"),
+                        "requested_url": url,
+                        "requested_ref": request.get("ref") or source.get("ref"),
+                        "resolved_commit": request.get("resolved_commit") or source.get("resolved_commit"),
+                        "catalog_source_id": request.get("source_id") or source.get("source_id"),
+                    })
+                except WP5ContractError as exc:
+                    return str(exc)
         if operation == "external_pack.install":
             source = request.get("source")
             source_text = str(source or "") if not isinstance(source, dict) else str(source.get("url") or "")
@@ -178,7 +204,7 @@ class PackSearchAuthorizationService:
     def _validation_failure(reason: str) -> dict[str, Any]:
         messages = {
             "remote_pack_fetch_stage_unimplemented_denied": (
-                "Remote pack acquisition is unavailable. No URL was opened and no content was fetched or imported."
+                "The combined install endpoint cannot fetch remote content. No URL was opened and no content was imported."
             ),
             "local_pack_path_required": "A local pack directory is required. No pack was imported.",
             "pack_source_id_required": "A pack source id is required. No source configuration was changed.",
@@ -186,7 +212,7 @@ class PackSearchAuthorizationService:
         }
         next_actions = {
             "remote_pack_fetch_stage_unimplemented_denied": (
-                "Use metadata-only discovery, or provide a local text-pack directory inside assistant-owned pack storage."
+                "Use the separate exact quarantine-fetch preview, or provide a local pack directory."
             ),
             "local_pack_path_required": "Provide one local text-pack directory and request a new preview.",
             "pack_source_id_required": "Use a source id from GET /pack_sources and request a new preview.",
@@ -241,6 +267,15 @@ class PackSearchAuthorizationService:
         plan.update({"action_type": operation, "executor_status": "enabled", "target": operation})
         plan["operation_payload"] = request
         response = {"ok": True, "requires_confirmation": True, "operation": operation, "operation_payload": request, "plan": plan, "mutated": False}
+        if operation == "external_pack.fetch":
+            source = request.get("source") if isinstance(request.get("source"), dict) else {}
+            url = str(request.get("url") or source.get("url") or "")
+            from urllib.parse import urlsplit
+            host = urlsplit(url).hostname or "configured source"
+            response["message"] = (
+                f"Fetch preview for {host}: after exact confirmation, bytes go only to bounded quarantine over validated HTTPS. "
+                "No code will run. Fetch is not review approval, permission grant, enablement, activation, installation, or use; the preview expires in 10 minutes."
+            )
         if operation.startswith("search."):
             execution_preview = snapshot.get("execution_plan") if isinstance(snapshot.get("execution_plan"), dict) else {}
             safe_preview = {
@@ -348,6 +383,10 @@ class PackSearchAuthorizationService:
         if operation == "pack_source.scoped_policy.update": return self.runtime.update_pack_source_policy(str(p.pop("source_id")), p, changed_by=actor)
         if operation == "permission.policy.update": return self.runtime.update_permissions(p)
         if operation == "external_pack.install": return self.runtime.packs_install(p)
+        if operation == "external_pack.fetch": return self.runtime.packs_fetch(p)
+        if operation == "external_pack.draft": return self.runtime.packs_draft(p)
+        if operation == "external_pack.index": return self.runtime.packs_index(p)
+        if operation == "external_pack.revoke": return self.runtime.packs_revoke(p)
         if operation == "external_pack.approve": p["approve"] = True; return self.runtime.packs_approve(p)
         if operation == "external_pack.enable": return self.runtime.packs_enable(p)
         if operation == "external_pack.grant": return self.runtime.packs_grant(p)

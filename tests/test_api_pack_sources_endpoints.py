@@ -307,8 +307,11 @@ class TestAPIPackSourceEndpoints(unittest.TestCase):
         self.assertEqual(before_preview_count, after_preview_count)
         self.assertFalse(preview_payload["preview"]["fetched"])
         self.assertIn("Nothing has been fetched yet.", preview_payload["preview"]["source_hints"])
-        self.assertIsNone(preview_payload["preview"]["install_handoff"])
-        self.assertIn("remote pack acquisition is unavailable", preview_payload["preview"]["summary"].lower())
+        handoff = preview_payload["preview"]["install_handoff"]
+        self.assertTrue(handoff["available"])
+        self.assertFalse(handoff["automatic_fetch"])
+        self.assertEqual("request_exact_source_authorization", handoff["next_step"])
+        self.assertIn("separate exact authorization", preview_payload["preview"]["summary"].lower())
 
         archive = _zip_bytes(
             {

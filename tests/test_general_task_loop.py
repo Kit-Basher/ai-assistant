@@ -254,7 +254,9 @@ def test_missing_capability_contract_is_structured_and_never_runs_pack_lifecycle
     )
     assert result["schema_version"] == MISSING_CAPABILITY_SCHEMA_VERSION
     assert result["automatic_pack_action"] is False
-    assert result["safe_next_step_category"] == "explain_or_wait_for_future_capability"
+    assert result["safe_next_step_category"] == "discover_pack_metadata_or_offer_supported_draft"
+    assert result["automatic_discovery"] is True
+    assert result["automatic_fetch"] is False
 
 
 @pytest.mark.parametrize(

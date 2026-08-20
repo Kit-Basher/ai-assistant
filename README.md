@@ -18,7 +18,7 @@ in BotFather, update the Personal Agent secret store, and restart
 the embedded Telegram poller in `personal-agent-api.service`.
 
 ## Current Product Truth
-Current release candidate: v0.2.20. It preserves the existing authorization,
+Current release candidate: v0.2.21 (Work Package 5). It preserves the existing authorization,
 Telegram, memory, filesystem, model-management, pack, and Web UI foundations
 while adding a bounded, durable plan-act-verify coordinator above the live
 capability registry. Simple requests retain the direct WP1/WP2 path; substantial
@@ -29,7 +29,7 @@ without in-process foreign code or host authority. WP4.5 adds one reconciled
 physical/registered/history model view, comparable installed-model evidence,
 an advisory-only recommendation, and removes synchronous readiness probes from
 deterministic chat delivery. See
-[`docs/releases/v0.2.20.md`](docs/releases/v0.2.20.md). Release tags are not
+[`docs/design/SAFE_PACK_ACQUISITION_BROKERS_WP5.md`](docs/design/SAFE_PACK_ACQUISITION_BROKERS_WP5.md). Release tags are not
 created automatically by audit tooling.
 
 The user interacts with the assistant layer. The assistant interprets intent,
@@ -86,9 +86,13 @@ local activation marker; purge uninstall remains unsupported.
   exact plan-bound approval, registry dispatch, independent verification, and
   restart reconciliation. Direct deterministic requests do not create tasks or
   consume a planning generation.
-- Safe local text-pack ingestion: a user-provided local directory is quarantined,
-  scanned, normalized, and denied permissions by default. Catalog discovery is
-  metadata-only; arbitrary remote pack acquisition is currently unavailable.
+- Safe pack acquisition: enabled catalogs may be searched without mutation;
+  an exact GitHub/archive source can be separately authorized for bounded HTTPS
+  fetch into quarantine. Fetch never implies review, grants, enablement, or use.
+- Useful core brokers: reviewed declarative packs can use one exact selected
+  text/JSON/CSV/HTML file, per-pack bounded structured storage, exact public
+  HTTPS GET/HEAD scopes, or a core-rendered PNG presence visualizer. Pack code
+  never receives the underlying host handle or secret.
 - Safe local capability packs: a strict declarative contract may call only a
   named registered native capability; a strict executable contract may perform
   pure integer computation in a short-lived Bubblewrap/Wasmtime worker with no
@@ -107,8 +111,9 @@ local activation marker; purge uninstall remains unsupported.
 - It will not claim full web browsing. Explicit/current-information requests use
   configured SearXNG search results with source titles and URLs; the assistant
   does not silently fetch arbitrary result pages.
-- It will not create, fetch, install, enable, or execute a pack to fill a missing
-  task capability. WP3 records an honest structured handoff only.
+- It will not automatically fetch, approve, permission, enable, update, or run a
+  pack. Missing-capability discovery is read-only; every later mutation has its
+  own exact preview and confirmation.
 
 ## Core Concepts
 
@@ -231,15 +236,18 @@ are in `config/native_capabilities.json` and
   - these surfaces are loopback/operator-only
 - Discovery metadata is untrusted and advisory only.
 - Discovery cache is performance-only and remains untrusted metadata.
-- Preview is not installation. Catalog metadata can be inspected, but the
-  product does not currently fetch arbitrary remote pack content.
+- Preview is not acquisition or installation. Catalog metadata can be inspected
+  automatically; an exact supported HTTPS/GitHub source requires a separate,
+  expiring authorization before bytes are fetched into quarantine.
 - Missing capability requests should not dead-end: the assistant explains what
   is missing, may show untrusted catalog metadata, and can guide the user to a
   local text-pack inspection or safe scaffold when that path is available.
 - A pack is usable only after the relevant approval, enablement,
   configuration, and permission gates are complete.
-- `POST /packs/install` accepts a local text-pack directory only. URL fields and
-  remote archive source kinds fail closed before network access.
+- `POST /packs/install` remains the local-directory ingestion surface. Remote
+  artifacts use the separate `POST /packs/fetch/plan` and `/packs/fetch/apply`
+  quarantine-only flow; neither route approves, grants, enables, or invokes a
+  pack.
 - Local ingestion goes through:
   - quarantine
   - archive and path validation where applicable
@@ -452,7 +460,7 @@ Useful local commands:
     normalized pack versions
 - `POST /packs/install`
   - quarantined ingestion from an explicitly provided local text-pack directory;
-    arbitrary remote archive acquisition is denied
+    remote sources use the separately authorized quarantine-fetch surface
 
 These are the product-facing surfaces worth learning first. The repo contains
 additional internal/operator endpoints, but they are not the core publishable

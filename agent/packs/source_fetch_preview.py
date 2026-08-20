@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from typing import Any
+from collections.abc import Callable
 
 from agent.packs.external_ingestion import (
     STATUS_BLOCKED,
@@ -16,6 +17,7 @@ from agent.packs.remote_fetch import (
     REMOTE_KIND_GITHUB_ARCHIVE,
     REMOTE_KIND_GITHUB_REPO,
     RemotePackFetcher,
+    RemoteFetchError,
 )
 from agent.packs.source_leads import infer_suspected_source_kind, sanitize_lead_url
 
@@ -33,6 +35,8 @@ class SourceFetchPreview:
     source_kind: str | None
     url: str | None
     source_name: str | None = None
+    requested_ref: str | None = None
+    pinned: bool = False
     blocked_reason: str | None = None
     content_remains_hostile: bool = True
     fetched_to_quarantine: bool = False
@@ -72,6 +76,44 @@ class SourceFetchResult:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    def public_dict(self) -> dict[str, Any]:
+        """Return bounded lifecycle/provenance truth without storage paths or hostile content."""
+        normalization = self.normalization_result if isinstance(self.normalization_result, dict) else {}
+        review = self.review if isinstance(self.review, dict) else {}
+        return {
+            "ok": self.ok,
+            "source_id": self.source_id,
+            "source_kind": self.source_kind,
+            "fetched_to_quarantine": self.fetched_to_quarantine,
+            "imported_for_review": self.imported_for_review,
+            "pack_id": self.pack_id,
+            "canonical_id": self.canonical_id,
+            "lifecycle_state": self.lifecycle_state,
+            "next_step": self.next_step,
+            "blocked_reason": self.blocked_reason,
+            "did_approve": self.did_approve,
+            "did_enable": self.did_enable,
+            "did_grant_permissions": self.did_grant_permissions,
+            "did_use_pack": self.did_use_pack,
+            "provenance": {
+                key: normalization.get(key)
+                for key in (
+                    "schema_version", "archive_sha256", "content_digest", "source_kind",
+                    "resolved_commit", "fetched_at", "files", "bytes", "classification", "status",
+                )
+                if normalization.get(key) is not None
+            },
+            "review": {
+                key: review.get(key)
+                for key in (
+                    "content_remains_untrusted", "did_approve", "did_enable",
+                    "did_grant_permissions", "requested_permissions", "risk_level",
+                )
+                if review.get(key) is not None
+            },
+            "user_message": self.user_message,
+        }
+
 
 class SourceFetchController:
     """Fetches an approved source into quarantine and imports for review only."""
@@ -83,25 +125,20 @@ class SourceFetchController:
         pack_registry_discovery: Any,
         remote_fetcher: RemotePackFetcher | None = None,
         lifecycle_service: PackLifecycleService | None = None,
+        capability_importer: Callable[..., dict[str, Any]] | None = None,
     ) -> None:
         self.pack_store = pack_store
         self.pack_registry_discovery = pack_registry_discovery
         self.remote_fetcher = remote_fetcher
         self.lifecycle_service = lifecycle_service or PackLifecycleService()
+        self.capability_importer = capability_importer
 
-    def preview(self, source_id: str) -> SourceFetchPreview:
+    def preview(self, source_id: str, *, source: dict[str, Any] | None = None) -> SourceFetchPreview:
         source_id = str(source_id or "").strip()
-        return SourceFetchPreview(
-            ok=False,
-            source_id=source_id,
-            source_kind=None,
-            url=None,
-            blocked_reason="remote_pack_fetch_stage_unimplemented_denied",
-            user_message="Remote pack fetch-to-quarantine is unavailable. No content was fetched or imported.",
-        )
-        # Retained below as unreachable reference logic until a separately
-        # authorized, digest-bound quarantine-fetch stage is implemented.
-        source_payload, blocked = self._approved_source_payload(source_id)
+        if source is None:
+            source_payload, blocked = self._approved_source_payload(source_id)
+        else:
+            source_payload, blocked = {"source": dict(source), "effective_policy": {"allowed_by_policy": True}, "persisted_override": {"approved_by_user": False}}, None
         if blocked is not None:
             return SourceFetchPreview(
                 ok=False,
@@ -113,7 +150,8 @@ class SourceFetchController:
             )
         source = source_payload["source"]
         source_kind = self._fetch_kind(source)
-        url = sanitize_lead_url(str(source.get("base_url") or ""))
+        url = sanitize_lead_url(str(source.get("base_url") or source.get("url") or ""))
+        requested_ref = str(source.get("ref") or "").strip() or None
         if source_kind not in FETCHABLE_SOURCE_KINDS or not url:
             return SourceFetchPreview(
                 ok=False,
@@ -138,23 +176,14 @@ class SourceFetchController:
             source_kind=source_kind,
             url=url,
             source_name=str(source.get("name") or source_id),
+            requested_ref=requested_ref,
+            pinned=bool(requested_ref and __import__("re").fullmatch(r"[0-9a-fA-F]{40}", requested_ref)),
             user_message=message,
         )
 
     def fetch_import_for_review(self, preview: SourceFetchPreview | dict[str, Any]) -> SourceFetchResult:
         row = preview.to_dict() if isinstance(preview, SourceFetchPreview) else dict(preview or {})
         source_id = str(row.get("source_id") or "").strip()
-        return SourceFetchResult(
-            ok=False,
-            source_id=source_id,
-            source_kind=str(row.get("source_kind") or "") or None,
-            fetched_to_quarantine=False,
-            imported_for_review=False,
-            blocked_reason="remote_pack_fetch_stage_unimplemented_denied",
-            user_message="Remote pack fetch confirmation is unavailable. No content was fetched or imported.",
-        )
-        # Retained below as unreachable reference logic until a separately
-        # authorized, digest-bound quarantine-fetch stage is implemented.
         if not bool(row.get("ok")):
             reason = str(row.get("blocked_reason") or "source_fetch_preview_blocked")
             return SourceFetchResult(
@@ -165,17 +194,6 @@ class SourceFetchController:
                 imported_for_review=False,
                 blocked_reason=reason,
                 user_message=f"I did not fetch that source because the fetch preview was blocked: {reason}.",
-            )
-        source_payload, blocked = self._approved_source_payload(source_id)
-        if blocked is not None:
-            return SourceFetchResult(
-                ok=False,
-                source_id=source_id,
-                source_kind=str(row.get("source_kind") or "") or None,
-                fetched_to_quarantine=False,
-                imported_for_review=False,
-                blocked_reason=blocked,
-                user_message=f"I did not fetch that source because its approval gate is not complete: {blocked}.",
             )
         source_kind = str(row.get("source_kind") or "").strip().lower()
         url = str(row.get("url") or "").strip()
@@ -189,15 +207,36 @@ class SourceFetchController:
                 blocked_reason="source_not_fetchable",
                 user_message="I did not fetch that source because it is not a directly fetchable pack source.",
             )
-        ingestor = ExternalPackIngestor(
-            self.pack_store.external_storage_root(),
-            remote_fetcher=self.remote_fetcher,
-        )
-        remote_source = RemotePackFetcher.build_source(kind=source_kind, url=url)
-        normalization_result, review_envelope = ingestor.ingest_from_remote_source(
-            remote_source,
-            created_by="source_fetch_preview",
-        )
+        remote_source = RemotePackFetcher.build_source(kind=source_kind, url=url, ref=str(row.get("requested_ref") or "").strip() or None)
+        fetcher = self.remote_fetcher or RemotePackFetcher(str(self.pack_store.external_storage_root()))
+        try:
+            fetched = fetcher.fetch(remote_source)
+        except RemoteFetchError as exc:
+            return SourceFetchResult(ok=False, source_id=source_id, source_kind=source_kind, fetched_to_quarantine=False, imported_for_review=False, blocked_reason=exc.error_kind, user_message="The exact artifact was rejected by quarantine intake. Nothing was approved, enabled, granted, or executed.")
+        manifest_path = __import__("pathlib").Path(fetched.snapshot_path) / "personal-agent-pack.json"
+        if manifest_path.is_file() and self.capability_importer is not None:
+            try:
+                capability = self.capability_importer(
+                    fetched.snapshot_path,
+                    provenance={
+                        "source_kind": source_kind,
+                        "requested_target": fetched.source.url,
+                        "final_target": fetched.source.resolved_url,
+                        "requested_ref": fetched.source.ref,
+                        "resolved_commit": fetched.source.commit_hash_resolved,
+                        "archive_sha256": fetched.source.archive_sha256,
+                        "fetched_at": fetched.source.fetched_at,
+                        "file_count": fetched.file_count,
+                        "expanded_bytes": fetched.total_unpacked_bytes,
+                        "pinned": bool(fetched.source.commit_hash_resolved),
+                    },
+                )
+            except Exception as exc:
+                return SourceFetchResult(ok=False, source_id=source_id, source_kind=source_kind, fetched_to_quarantine=True, imported_for_review=False, blocked_reason=f"capability_contract_{exc.__class__.__name__}", user_message="The artifact reached quarantine but its pack capability contract was rejected. Nothing was approved, enabled, granted, or executed.")
+            pack_id = str(capability.get("pack_id") or "") or None
+            return SourceFetchResult(ok=True, source_id=source_id, source_kind=source_kind, fetched_to_quarantine=True, imported_for_review=True, pack_id=pack_id, canonical_id=pack_id, lifecycle_state="imported_for_review", next_step="review_approve", pack=capability, normalization_result={"schema_version": "personal-agent.pack-review.v1", "archive_sha256": fetched.source.archive_sha256, "content_digest": capability.get("content_digest"), "source_kind": source_kind, "resolved_commit": fetched.source.commit_hash_resolved, "fetched_at": fetched.source.fetched_at, "files": fetched.file_count, "bytes": fetched.total_unpacked_bytes}, review={"content_remains_untrusted": True, "did_approve": False, "did_enable": False, "did_grant_permissions": False}, user_message="I fetched the exact artifact into quarantine and imported its validated capability contract for review only. Nothing was approved, enabled, granted, activated, or executed.")
+        ingestor = ExternalPackIngestor(self.pack_store.external_storage_root())
+        normalization_result, review_envelope = ingestor.ingest_from_path(fetched.snapshot_path, source_origin=source_kind, source_url=fetched.source.url, commit_hash=fetched.source.commit_hash_resolved, created_by="source_fetch_preview")
         pack_row = self.pack_store.record_external_pack(
             canonical_pack=normalization_result.pack.to_dict(),
             classification=normalization_result.classification,

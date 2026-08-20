@@ -407,7 +407,7 @@ def test_local_text_pack_ingest_is_previewed_confirmed_and_reported_through_chat
         assert "not enabled" in str(applied.get("message") or "").lower()
 
 
-def test_remote_pack_and_unrelated_mutation_policy_remain_blocked_through_chat() -> None:
+def test_remote_pack_requires_exact_quarantine_preview_and_unrelated_mutation_remains_blocked() -> None:
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
         runtime = AgentRuntime(_config(str(root / "registry.json"), str(root / "agent.db")))
@@ -424,8 +424,13 @@ def test_remote_pack_and_unrelated_mutation_policy_remain_blocked_through_chat()
                 user_id="policy",
                 thread_id="policy:t",
             )
-        assert remote_status in {200, 400}
-        assert any(term in str(remote.get("message") or "").lower() for term in ("remote", "approved", "not installed", "nothing was installed"))
+        assert remote_status == 200
+        assert "quarantine" in str(remote.get("message") or "").lower()
+        setup = remote.get("setup") if isinstance(remote.get("setup"), dict) else {}
+        assert setup.get("requires_confirmation") is True and setup.get("mutated") is False
+        assert setup.get("operation") == "external_pack.fetch"
+        assert (setup.get("plan") or {}).get("capability_id") == "pack.lifecycle.fetch"
+        assert runtime.orchestrator().pack_capability_status().get("count") == 0
         assert mutation_status in {200, 400}
         assert any(term in str(mutation.get("message") or "").lower() for term in ("blocked", "can't run", "cannot run", "unsupported"))
 

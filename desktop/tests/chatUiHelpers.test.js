@@ -103,13 +103,15 @@ test("buildAssistantMessage renders yes/no mutation previews as approval control
   assert.equal(message.ui.confirmation?.cancelCommand, "no");
 });
 
-test("capability rescue states that catalog discovery cannot remotely install", () => {
+test("capability rescue separates automatic metadata discovery from authorized quarantine fetch", () => {
   const message = buildAssistantMessage({
     ok: true,
     assistant: { content: "I found untrusted catalog metadata." },
     setup: {
       capability_gap_rescue: {
         type: "capability_gap_rescue",
+        automatic_discovery: true,
+        automatic_fetch: false,
         candidate_packs: [{ name: "Example", source_id: "catalog", remote_id: "example" }]
       }
     }
@@ -117,4 +119,6 @@ test("capability rescue states that catalog discovery cannot remotely install", 
 
   assert.equal(message.ui.capability?.type, "rescue");
   assert.equal(message.ui.capability?.installAllowedInitially, false);
+  assert.equal(message.ui.capability?.automaticDiscovery, true);
+  assert.equal(message.ui.capability?.automaticFetch, false);
 });

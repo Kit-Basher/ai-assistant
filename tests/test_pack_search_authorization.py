@@ -28,7 +28,7 @@ def _confirmation(plan: dict[str, object]) -> dict[str, object]:
 
 
 def test_all_v2f_operations_have_distinct_capability_executor_bindings() -> None:
-    assert len(SPECS) == 14
+    assert len(SPECS) == 18
     assert len({row.executor_id for row in SPECS.values()}) == len(SPECS)
     assert all(row.capability_id and row.rollback for row in SPECS.values())
 
@@ -59,7 +59,8 @@ def test_remote_combined_fetch_install_is_explicitly_denied_but_local_install_is
         assert body["requires_confirmation"] is False
         assert body["mutated"] is False
         assert "no url was opened" in body["message"].lower()
-        assert "local text-pack directory" in body["next_action"].lower()
+        assert "quarantine-fetch preview" in body["next_action"].lower()
+        assert "local pack directory" in body["next_action"].lower()
         for remote_payload in (
             {"source": {"kind": "generic_archive_url", "url": "https://example.invalid/a.zip"}},
             {"download_url": "https://example.invalid/a.zip"},

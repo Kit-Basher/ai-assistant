@@ -264,11 +264,11 @@ the project intent document, project intent wins.
   - `personal-agent.pack.v1` executable pure computation through
     `personal-agent.pack-worker.v1`, Bubblewrap namespaces, and no-WASI
     Wasmtime; no host effects are brokered
-- Remote archive/repository ingress is not supported today. Catalog entries may
-  describe remote sources, but they cannot install or enable content.
-  - `github_archive`
-  - `generic_archive_url`
-  - `https` only, with provenance capture and archive validation
+- Remote archive/repository ingress is a separate exact-confirmed quarantine
+  stage. Supported sources are `github_repo`, `github_archive`, configured
+  catalog entries resolving to them, and generic HTTPS zip/tar archives.
+  Certificate/DNS/peer/redirect/SSRF and archive limits apply. Fetch records an
+  immutable archive/content digest and never approves, grants, enables, or uses.
 - Normalized external packs are inspectable through read-only surfaces:
   - `GET /packs/<canonical_id>`
   - `GET /packs/<canonical_id>/history`
@@ -276,9 +276,9 @@ the project intent document, project intent wins.
 - Same normalized content from different sources collapses to one canonical pack
   identity; upstream content changes are treated as new versions and compared
   explicitly.
-- Discovery may surface likely portable text skills, experience packs, or
-  likely native/plugin packs, but WP4 capability-pack ingress remains an
-  explicitly supplied local-directory operation; discovery never installs it.
+- Discovery may surface candidates automatically as untrusted metadata. It does
+  not fetch them. Local and remotely quarantined candidates enter the same
+  review-only WP4 capability lifecycle.
 - Unsupported/native/plugin packs are blocked or reduced to safe text/assets
   only when possible.
 - No imported pack executes in the API process. Executable capability packs are
@@ -287,6 +287,10 @@ the project intent document, project intent wins.
 - `GET /packs/capabilities` reports exact lifecycle and isolation truth.
   `/packs/capabilities/{import,gate,remove}/plan` and `/apply` enforce separate,
   expiring, actor/session/thread/digest-bound mutations.
+- WP5 adds separately authorized `/packs/fetch`, `/packs/create`, `/packs/index`,
+  and `/packs/revoke` plans, atomic activation/rollback, bounded version compare,
+  and the core-owned selected-file, per-pack structured-store, exact public
+  HTTPS GET/HEAD, and PNG presence-visualizer brokers.
 - Missing capability handling should not dead-end: when no installed or
   approved catalog pack can satisfy a user request, the assistant should say
   what is missing and offer the next safe step, including scaffold preview where
@@ -303,7 +307,8 @@ the project intent document, project intent wins.
 - Background full-disk indexing or unrestricted scanning.
 - Legacy root/system packaging.
 - Duplicate recommendation or controller paths.
-- Automatic pack acquisition and assistant-created capabilities (WP5).
+- Automatic remote fetch/approval/grants/enablement/use/update and arbitrary
+  assistant-generated code or host authority.
 
 ## 11. Release Confidence
 - The canonical release gate is `python scripts/release_gate.py`.

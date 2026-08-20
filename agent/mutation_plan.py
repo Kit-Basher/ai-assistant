@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import time
 from typing import Any
+from urllib.parse import urlsplit
 
 from agent.capability_policy import POLICY_SCHEMA_VERSION, build_default_capability_registry, stable_fingerprint, validate_capability_id
 
@@ -87,6 +88,9 @@ def normalize_path_value(value: Any) -> Any:
         return [normalize_path_value(item) for item in value]
     if isinstance(value, str):
         text = value.strip()
+        parsed = urlsplit(text)
+        if parsed.scheme.lower() in {"https", "http"} and parsed.netloc:
+            return text
         if text.startswith("~") or "/" in text:
             try:
                 return str(Path(text).expanduser().resolve(strict=False))

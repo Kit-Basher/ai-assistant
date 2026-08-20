@@ -137,9 +137,9 @@ When approved/trusted external-pack catalogs have no candidate, pack acquisition
 - does not trust GitHub or any other domain by name
 
 A lead can only point to source/catalog metadata review. Source policy may permit
-metadata queries, but remote pack acquisition is unavailable. Any future fetch
-would require a new, separately authorized quarantine stage and content-bound
-review; current approval does not pre-authorize it.
+metadata queries, but does not authorize retrieval. WP5 can create a new,
+separately authorized quarantine-fetch preview for one exact supported source;
+current search/source approval does not pre-authorize that fetch.
 
 ## Status
 

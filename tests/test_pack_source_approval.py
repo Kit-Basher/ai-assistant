@@ -55,7 +55,7 @@ class TestPackSourceApproval(unittest.TestCase):
         self.assertEqual(REGISTRY_KIND_GENERIC_API, preview.registry_kind)
         self.assertTrue(preview.untrusted)
         self.assertFalse(preview.fetch_allowed_after_approval)
-        self.assertIn("remote pack acquisition is unavailable", preview.user_message.lower())
+        self.assertIn("separate exact source authorization", preview.user_message.lower())
 
     def test_generic_web_result_cannot_be_approved_for_direct_fetch(self) -> None:
         preview = self.controller.preview(

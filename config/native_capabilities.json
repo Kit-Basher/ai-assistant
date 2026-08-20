@@ -1,6 +1,6 @@
 {
   "schema_version": "native-capability-inventory.v1",
-  "product_version": "0.2.11",
+  "product_version": "0.2.21",
   "capabilities": [
     {"id":"assistant.presence","family":"assistant","mode":"read_only","chat":true,"proof_profile":"deterministic_read"},
     {"id":"assistant.capabilities","family":"assistant","mode":"read_only","chat":true,"proof_profile":"deterministic_read"},
@@ -94,8 +94,8 @@
     {"item":"local control plane","disposition":"operator_only","parent":"operator.status","boundary":"Development/operator coordination only."},
     {"item":"arbitrary shell, Docker, Podman, or systemctl","disposition":"unsupported","parent":"system.shell.inspect","boundary":"Only allowlisted commands and bounded managed adapters are supported."},
     {"item":"Git push","disposition":"optional_unavailable","parent":"operator.lifecycle","boundary":"Classified preview-only; execution is disabled without explicit remote proof."},
-    {"item":"foreign executable/plugin packs","disposition":"unsupported","parent":"packs.manage","boundary":"Text-only packs may be imported; foreign code is not executed."},
-    {"item":"remote pack acquisition","disposition":"unsupported","parent":"packs.manage","boundary":"Catalog metadata and local-directory ingestion only."},
+    {"item":"foreign Python/JavaScript/native/shell plugin packs","disposition":"unsupported","parent":"packs.manage","boundary":"Portable text, declarative contracts, and isolated pure-computation Wasm are supported; arbitrary foreign host code is not."},
+    {"item":"remote pack acquisition","disposition":"registered_native","parent":"packs.manage","boundary":"Supported exact HTTPS/GitHub sources require a separate authorization and stop at quarantine/review; no automatic approval, grants, enablement, or use."},
     {"item":"SearXNG managed installation","disposition":"optional_unavailable","parent":"search.web","boundary":"Existing confirmation-gated adapter only; no WP2 installation is performed."},
     {"item":"desktop launcher and install/update/uninstall scripts","disposition":"operator_only","parent":"operator.lifecycle","boundary":"Single-install lifecycle boundary."},
     {"item":"backup, restore, support bundle, cleanup","disposition":"operator_only","parent":"operator.lifecycle","boundary":"Previewed and centrally confirmation-gated."},

@@ -132,10 +132,10 @@
       "surface": "security docs"
     },
     {
-      "actual_supported_behavior": "URL and remote archive acquisition fail closed before network access.",
+      "actual_supported_behavior": "HTTPS/GitHub acquisition is target-bound, SSRF-hardened, bounded, and cannot approve, grant, enable, or invoke a pack.",
       "audience": "user/operator",
-      "canonical_truth": "v2F pack authorization inventory",
-      "current_wording": "Catalog discovery is metadata-only; arbitrary remote pack acquisition is unavailable.",
+      "canonical_truth": "WP5 acquisition and broker proof",
+      "current_wording": "Catalog discovery fetches nothing; a supported exact source requires separate authorization and lands in quarantine only.",
       "disposition": "resolved",
       "id": "remote_pack_acquisition",
       "original_disposition": "contradictory",
@@ -266,8 +266,8 @@
     },
     {
       "entry": "assistant/Web/API",
-      "expected": "metadata-only discovery and no fetch continuation",
-      "id": "remote_pack_unavailable",
+      "expected": "metadata discovery followed only by a separately confirmed quarantine fetch",
+      "id": "remote_pack_quarantine",
       "state": "covered"
     },
     {

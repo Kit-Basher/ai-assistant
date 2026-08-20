@@ -3,9 +3,10 @@
 Date: 2026-06-20
 Checkpoint scope: `v0.2.0-chat-reliability-harness` plus release-readiness hardening pass.
 
-This is an operator-focused security boundary audit. It records what is enforced
-now, what remains release-blocking, and what must stay out of normal assistant
-behavior.
+This is a historical operator-focused security boundary audit for the dated
+checkpoint above. Current pack acquisition truth is in
+`docs/design/SAFE_PACK_ACQUISITION_BROKERS_WP5.md`; later work must not treat
+the historical remote-fetch statements below as current runtime truth.
 
 ## Current Rating
 
@@ -237,8 +238,9 @@ authorization threat boundary.
 
 ## Audit 3 user-visible safety semantics
 
-Public copy now matches this boundary: source allowlisting permits untrusted
-metadata queries only, arbitrary remote pack acquisition is unavailable, and a
+At this historical checkpoint, public copy matched this boundary: source
+allowlisting permitted untrusted metadata queries only, remote pack acquisition
+was unavailable, and a
 registered pack removal is distinct from denied arbitrary deletion. Approval
 copy is derived from the canonical Plan but hides capability/executor IDs and
 fingerprints from the primary explanation. Indeterminate execution is not

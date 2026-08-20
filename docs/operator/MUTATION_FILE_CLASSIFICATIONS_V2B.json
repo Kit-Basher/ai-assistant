@@ -1,6 +1,6 @@
 {
   "schema": "personal-agent.mutation-file-classification.v2b",
-  "reviewed_count": 173,
+  "reviewed_count": 178,
   "required_fields": [
     "path",
     "disposition",
@@ -694,18 +694,18 @@
     },
     {
       "path": "agent/packs/remote_fetch.py",
-      "disposition": "unimplemented_denied_public_primitive",
-      "capability": "bounded domain mutation primitive",
-      "entry_point": "canonical authorized adapter or bounded implementation primitive",
-      "actor": "local user/operator or compatibility caller",
-      "target_resources": "provider/model/configuration/memory/pack/filesystem/service state",
-      "mutation_type": "supported mutation not fully on central registry",
-      "policy_path": "central authorization at the public boundary; bounded primitive is not a public authorization surface",
-      "executor": "fixed capability-bound domain function",
-      "confirmation_requirements": "varies; must be replaced by scoped UMP confirmation",
-      "rollback_scope": "domain-specific journal or manual recovery",
-      "audit_evidence": "manual review of remote_fetch.py: contains a reachable domain mutation outside the complete central executor path",
-      "contract_identity": "not_applicable"
+      "disposition": "central_executor_primitive",
+      "capability": "pack.lifecycle.fetch",
+      "entry_point": "external_pack.fetch exact preview/apply through the central authorization controller",
+      "actor": "bound local user/operator",
+      "target_resources": "one exact authorized remote artifact and runtime-owned quarantine/normalization records",
+      "mutation_type": "bounded streamed acquisition, extraction, normalization, and review-only record creation",
+      "policy_path": "central exact source/ref/actor/session/thread plan binding; lower-level fetcher grants no approval or use authority",
+      "executor": "SourceFetchController with RemotePackFetcher and SecureHttpsTransport",
+      "confirmation_requirements": "single-use exact quarantine-fetch confirmation; all later lifecycle gates remain separate",
+      "rollback_scope": "only the exact incomplete quarantine candidate and temporary bytes",
+      "audit_evidence": "WP5 acquisition proof and remote workflow verify fetch stops before approval, grants, enablement, registration, or invocation",
+      "contract_identity": "personal-agent.pack-acquisition.v1"
     },
     {
       "path": "agent/packs/scaffolding.py",
@@ -2583,19 +2583,34 @@
       "contract_identity": "personal-agent.model-truth-latency-proof.v1"
     },
     {
+      "path": "scripts/wp5_browser_candidate_smoke.py",
+      "disposition": "offline_tool",
+      "capability": "developer.isolated_browser_verification",
+      "entry_point": "explicit command-line main against an already-running isolated candidate",
+      "actor": "developer/release operator",
+      "target_resources": "isolated candidate Web UI and an ignored bounded JSON report",
+      "mutation_type": "browser navigation and local proof report generation only",
+      "policy_path": "not imported by shipping runtime; performs no lifecycle confirmation or live service control",
+      "executor": "script-owned headless system Chrome session using Playwright",
+      "confirmation_requirements": "explicit command invocation with an isolated base URL",
+      "rollback_scope": "ephemeral browser context and ignored report only",
+      "audit_evidence": "WP5 mobile-width, reduced-motion, normal-user pack UI, and no plugin-frame checks",
+      "contract_identity": "personal-agent.wp5-browser-candidate.v1"
+    },
+    {
       "path": "scripts/wp45_isolated_candidate.py",
       "disposition": "offline_tool",
       "capability": "developer.isolated_candidate_verification",
       "entry_point": "explicit command-line main against temporary state and a temporary port",
       "actor": "developer/release operator",
-      "target_resources": "temporary copied state/config, candidate process, test transcripts, and ignored report",
-      "mutation_type": "isolated candidate lifecycle and bounded test conversation writes",
-      "policy_path": "never targets the installed service; verifies no selected/default/override or model-artifact mutation",
+      "target_resources": "temporary copied state/config, candidate process, test transcripts, one temporary reviewed pack, and ignored report",
+      "mutation_type": "isolated candidate lifecycle, bounded test conversation writes, and exact-confirmed temporary pack draft/review/grant/enable/use/disable/removal",
+      "policy_path": "never targets the installed service; pack changes use production one-use confirmations in copied state and the script verifies no selected/default/override or model-artifact mutation",
       "executor": "script-owned temporary API process and production HTTP clients",
-      "confirmation_requirements": "explicit command invocation",
+      "confirmation_requirements": "explicit command invocation plus production exact confirmation for each isolated pack lifecycle gate",
       "rollback_scope": "terminate candidate and remove temporary directory, port, and copied state",
-      "audit_evidence": "WP4.5 isolated scenario report including port-closed and zero-model-mutation assertions",
-      "contract_identity": "personal-agent.wp45-isolated-candidate.v1"
+      "audit_evidence": "WP4.5/WP5 isolated scenario report including port-closed, pack-authority cleanup, and zero-model-mutation assertions",
+      "contract_identity": "personal-agent.wp45-isolated-candidate.v2"
     },
     {
       "path": "scripts/wp45_latency_probe.py",
@@ -2611,6 +2626,66 @@
       "rollback_scope": "temporary candidate state and generated report only",
       "audit_evidence": "WP4.5 raw TTFB/body-complete/body-after-first-byte reports",
       "contract_identity": "personal-agent.wp45-latency.v1"
+    },
+    {
+      "path": "agent/packs/brokers.py",
+      "disposition": "central_executor_primitive",
+      "capability": "dynamic reviewed pack capability under an exact core-broker declaration",
+      "entry_point": "CapabilityRegistry invocation after lifecycle/grant validation, plus separately authorized local index construction",
+      "actor": "bound pack invocation actor or central pack lifecycle controller",
+      "target_resources": "one exact selected file, pack/version-private structured state, exact public HTTPS scope, or reviewed PNG visualizer state",
+      "mutation_type": "bounded private-index/storage writes and atomic core-owned visualizer state",
+      "policy_path": "WP4 lifecycle plus WP5 exact broker declaration/grant; pack guest never receives host authority",
+      "executor": "CoreBrokerRuntime fixed dispatch",
+      "confirmation_requirements": "exact grant and index/lifecycle confirmation where state changes; read-only invocation follows current exact grant",
+      "rollback_scope": "one pack/version/actor namespace or active visualizer pointer only",
+      "audit_evidence": "WP5 local-data, HTTPS, visualizer, revocation, quota, TOCTOU, and cross-pack isolation proof",
+      "contract_identity": "personal-agent.pack-broker.v1"
+    },
+    {
+      "path": "agent/packs/draft_builder.py",
+      "disposition": "central_executor_primitive",
+      "capability": "pack.lifecycle.create_draft",
+      "entry_point": "external_pack.draft exact preview/apply",
+      "actor": "bound local user/operator",
+      "target_resources": "one runtime-owned quarantine draft directory and review-only capability record",
+      "mutation_type": "deterministic bounded template materialization",
+      "policy_path": "central mutation plan; schemas permit only supported templates and existing authority primitives",
+      "executor": "PackDraftBuilder",
+      "confirmation_requirements": "single-use exact draft digest confirmation; self-approval, grants, enablement, and use are impossible",
+      "rollback_scope": "one exact unapproved quarantine draft",
+      "audit_evidence": "WP5 generated-pack validation, revision invalidation, and quarantine-only workflow proof",
+      "contract_identity": "personal-agent.pack-draft.v1"
+    },
+    {
+      "path": "agent/packs/secure_transport.py",
+      "disposition": "central_executor_primitive",
+      "capability": "pack.lifecycle.fetch and reviewed scoped_https broker",
+      "entry_point": "authorized acquisition or registered exact broker invocation only",
+      "actor": "bound core controller",
+      "target_resources": "one validated public HTTPS origin/redirect chain and bounded temporary response",
+      "mutation_type": "restrictive temporary response buffering with atomic caller-owned finalization",
+      "policy_path": "exact source or broker declaration, DNS/peer/redirect SSRF validation, no ambient proxy/cookies/credentials",
+      "executor": "SecureHttpsTransport direct TLS client",
+      "confirmation_requirements": "acquisition requires exact confirmation; read-only scoped broker requires reviewed exact grant",
+      "rollback_scope": "temporary response buffer only",
+      "audit_evidence": "WP5 SSRF, redirect, peer mismatch, timeout, body-bound, cancellation, and cleanup tests",
+      "contract_identity": "personal-agent.pack-acquisition.v1"
+    },
+    {
+      "path": "scripts/pack_acquisition_broker_proof.py",
+      "disposition": "offline_tool",
+      "capability": "developer.wp5_release_proof",
+      "entry_point": "explicit command-line main and canonical release gate",
+      "actor": "developer/release operator",
+      "target_resources": "generated redacted candidate-bound WP5 proof reports and temporary test state",
+      "mutation_type": "proof report generation and deliberate isolated sensitivity failures",
+      "policy_path": "not imported by shipping runtime; fixtures use temporary state and are removed",
+      "executor": "script-owned structural and pytest proof runner",
+      "confirmation_requirements": "explicit command or canonical release-gate invocation",
+      "rollback_scope": "ignored build report and temporary fixtures only",
+      "audit_evidence": "WP5 per-category proof totals, sensitivity matrix, and redaction check",
+      "contract_identity": "personal-agent.pack-proof.v1"
     }
   ]
 }

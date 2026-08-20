@@ -282,9 +282,11 @@ function extractCapabilityUi(payload) {
       title: String(rescue.missing_capability || rescue.capability_label || "Missing capability").trim(),
       goal: String(rescue.user_goal || "").trim(),
       searchQuery: String(rescue.search_query || "").trim(),
-      sourceScope: String(rescue.source_scope || "approved_pack_sources_only").trim(),
+      sourceScope: String(rescue.source_scope || "enabled_queryable_configured_sources").trim(),
       previewRequired: rescue.preview_required === true,
       installAllowedInitially: rescue.install_allowed_initially === true,
+      automaticDiscovery: rescue.automatic_discovery !== false,
+      automaticFetch: rescue.automatic_fetch === true,
       warnings: Array.isArray(rescue.trust_warnings)
         ? rescue.trust_warnings.map((warning) => String(warning || "").trim()).filter(Boolean).slice(0, 3)
         : [],

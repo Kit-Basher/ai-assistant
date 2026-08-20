@@ -251,12 +251,15 @@ from agent.packs.managed_adapters import (
     create_metadata_only_grant,
     list_adapter_grants,
     record_adapter_grant,
+    revoke_adapter_grants,
     validate_local_file_path_metadata,
 )
 from agent.packs.policy import is_iface_allowed
 from agent.packs.state_truth import build_pack_state_snapshot, normalize_available_pack_truth, normalize_installed_pack_truth
 from agent.packs.registry_discovery import CatalogSchemaError, PackRegistryDiscoveryService, RegistrySourcePolicyError
 from agent.packs.remote_fetch import RemotePackFetcher
+from agent.packs.source_fetch_preview import SourceFetchController
+from agent.packs.draft_builder import PackDraftBuilder
 from agent.packs.store import PackStore
 from agent.failure_ux import build_failure_recovery
 from agent.recovery_contract import (
@@ -1289,7 +1292,7 @@ class AgentRuntime:
             return build_failure_recovery(
                 "pack_not_installed",
                 reason=why or message,
-                next_step=next_action or "Inspect a local text-pack directory if you have one; remote acquisition is unavailable and catalog metadata cannot download it.",
+                next_step=next_action or "Inspect a local pack directory, or request an exact quarantine-fetch preview for a supported HTTPS/GitHub source.",
             )
         if error_key in {"invalid_manifest", "invalid_metadata"} or kind_key in {"bad_request"}:
             return build_failure_recovery(
@@ -2187,6 +2190,11 @@ class AgentRuntime:
             )
         current = self.pack_store.get_external_pack(pack_id) or self.pack_store.get_pack(pack_id)
         if current is None:
+            dynamic = [row for row in self.orchestrator()._pack_capability_store.list() if row.get("pack_id") == pack_id]
+            if dynamic:
+                latest = dynamic[-1]
+                current = {"pack_id": pack_id, "name": (latest.get("manifest") or {}).get("display_name") or pack_id, "version": latest.get("version"), "status": "dynamic_pack_review"}
+        if current is None:
             return self._pack_error(
                 error="pack_not_found",
                 error_kind="bad_request",
@@ -2251,6 +2259,105 @@ class AgentRuntime:
             "managed_action_journal": grant_payload.get("managed_action_journal") if isinstance(grant_payload.get("managed_action_journal"), dict) else {},
         }
 
+    def packs_fetch(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        """Fetch one exactly authorized remote artifact to quarantine/review only."""
+        source_value = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+        source_id = str(payload.get("source_id") or source_value.get("source_id") or "").strip()
+        url = str(payload.get("url") or source_value.get("url") or "").strip()
+        kind = str(payload.get("source_kind") or source_value.get("kind") or "generic_archive_url").strip().lower()
+        ref = str(payload.get("ref") or source_value.get("ref") or "").strip() or None
+        controller = SourceFetchController(
+            pack_store=self.pack_store,
+            pack_registry_discovery=self._pack_registry_discovery(),
+            remote_fetcher=RemotePackFetcher(str(self.pack_store.external_storage_root())),
+            capability_importer=self.orchestrator().pack_capability_import,
+        )
+        direct = None
+        if url:
+            direct = {"id": source_id or "direct-authorized-source", "name": "Authorized remote pack", "kind": kind, "base_url": url, "ref": ref}
+        preview = controller.preview(source_id, source=direct)
+        if not preview.ok:
+            return False, {**preview.to_dict(), "ok": False, "mutated": False, "message": preview.user_message}
+        try:
+            result = controller.fetch_import_for_review(preview)
+        except Exception as exc:
+            return self._pack_error(
+                error=str(getattr(exc, "error_kind", "remote_pack_fetch_failed")),
+                error_kind="pack_fetch_failed",
+                message="The exact remote artifact was not accepted by the quarantine intake. Nothing was approved, enabled, granted, or executed.",
+                why=exc.__class__.__name__,
+                next_question="Inspect the bounded failure reason or authorize a corrected immutable source.",
+            )
+        return bool(result.ok), {
+            **result.public_dict(),
+            "ok": bool(result.ok),
+            "mutated": bool(result.fetched_to_quarantine),
+            "message": result.user_message,
+        }
+
+    def pack_draft_preview(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return PackDraftBuilder(
+            self.pack_store.external_storage_root(),
+            allowed_asset_roots=tuple(self.config.perception_roots),
+        ).preview(payload)
+
+    def packs_draft(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        builder = PackDraftBuilder(
+            self.pack_store.external_storage_root(),
+            allowed_asset_roots=tuple(self.config.perception_roots),
+        )
+        try:
+            preview = builder.preview(payload)
+            created = builder.create_quarantine(preview)
+            record = self.orchestrator().pack_capability_import(str(created["path"]))
+        except Exception as exc:
+            return self._pack_error(error=str(exc), error_kind="pack_draft_invalid", message="The proposed pack draft was rejected and nothing was created, approved, granted, enabled, or invoked.", next_question="Choose a supported bounded template and request a new exact preview.")
+        return True, {
+            **{key: value for key, value in created.items() if key != "path"},
+            "record": {
+                "record_id": record.get("record_id"),
+                "pack_id": record.get("pack_id"),
+                "version": record.get("version"),
+                "pack_class": record.get("pack_class"),
+                "content_digest": record.get("content_digest"),
+                "review_approved": False,
+                "enabled": False,
+                "active": False,
+            },
+            "imported_for_review": True,
+            "mutated": bool(created.get("created")),
+            "message": (
+                "Created the exact assistant-generated candidate in quarantine and recorded it for review only. "
+                "Review approval is the next separate gate; it has no authority yet."
+            ),
+        }
+
+    def packs_index(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        pack_id = str(payload.get("pack_id") or "").strip()
+        record_id = str(payload.get("record_id") or "").strip()
+        rows = self.orchestrator()._pack_capability_store.list()
+        row = next((item for item in rows if (record_id and item["record_id"] == record_id) or (not record_id and item["pack_id"] == pack_id)), None)
+        if row is None or str(row.get("pack_id") or "") != pack_id:
+            return self._pack_error(error="pack_capability_record_not_found", error_kind="bad_request", message="The exact pack capability version was not found.", next_question="Choose the exact reviewed pack version.")
+        grant = next((item for item in reversed(list_adapter_grants(self.pack_store.external_storage_root())) if str(item.get("pack_id") or "") == pack_id and str(item.get("state") or "") == "granted"), None)
+        if grant is None:
+            return self._pack_error(error="selected_file_grant_missing", error_kind="authorization_denied", message="No current exact-file grant exists for this pack.", next_question="Select one allowed file and approve that separate grant first.")
+        try:
+            result = self.orchestrator()._pack_broker_runtime.local_data.import_index(pack_id=pack_id, version=str(row["version"]), actor_id="loopback_operator", path=str(grant.get("granted_path") or ""), grant=grant)
+        except Exception as exc:
+            return self._pack_error(error=str(exc), error_kind="pack_data_index_failed", message="The selected file was not indexed; no raw source content was retained.", next_question="Revalidate the exact file grant and try a new preview.")
+        self.orchestrator().refresh_pack_capabilities()
+        return True, {"ok": True, "mutated": True, "pack_id": pack_id, "record_id": row["record_id"], "result": result, "message": f"Created a bounded private index for {pack_id}; raw file content was not retained."}
+
+    def packs_revoke(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        pack_id = str(payload.get("pack_id") or "").strip()
+        result = revoke_adapter_grants(self.pack_store.external_storage_root(), pack_id=pack_id, adapter_kind=str(payload.get("adapter_kind") or "local_file_import") or None)
+        rows = [row for row in self.orchestrator()._pack_capability_store.list() if row["pack_id"] == pack_id]
+        for row in rows:
+            self.orchestrator()._pack_capability_store.set_gate(row["record_id"], "grants", [])
+        self.orchestrator().refresh_pack_capabilities()
+        return True, {**result, "mutated": bool(result.get("revoked") or rows), "message": f"Revoked exact local-data authority for {pack_id}; its dynamic capabilities are unavailable."}
+
     def packs_install(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         source_value = payload.get("source")
         source_text = str(source_value or "").strip() if not isinstance(source_value, dict) else ""
@@ -2272,8 +2379,8 @@ class AgentRuntime:
             return self._pack_error(
                 error="remote_pack_fetch_stage_unimplemented_denied",
                 error_kind="authorization_denied",
-                message="Remote pack acquisition is unavailable. No URL was opened and no content was fetched or imported.",
-                next_question="Provide a local text-pack directory, or wait for a separately authorized digest-bound quarantine-fetch stage.",
+                message="The combined install operation cannot fetch remote content. No URL was opened and no content was imported.",
+                next_question="Request a separate exact quarantine-fetch preview, or provide a local pack directory.",
             )
         source_id = str(
             (source_value.get("source_id") if isinstance(source_value, dict) else payload.get("source_id"))
@@ -10265,6 +10372,21 @@ class AgentRuntime:
             return False, {"ok": False, "error": "pack_capability_record_not_found", "message": "That exact pack capability version was not found."}
         return True, {"ok": True, "source": "dynamic_pack_capability_runtime", "result": result}
 
+    def pack_capability_compare(self, from_record_id: str, to_record_id: str) -> tuple[bool, dict[str, Any]]:
+        try:
+            result = self.orchestrator().pack_capability_compare(from_record_id, to_record_id)
+        except Exception as exc:
+            return False, {"ok": False, "error": str(exc)[:160], "message": "Those exact pack versions could not be compared."}
+        return True, {"ok": True, "source": "dynamic_pack_capability_runtime", "result": result}
+
+    def pack_visualizer_status(self) -> dict[str, Any]:
+        status = self.orchestrator().pack_visualizer_status()
+        public = {key: value for key, value in status.items() if key != "storage_key"}
+        return {"ok": True, "schema_version": "personal-agent.pack-visualizer-state.v1", **public}
+
+    def pack_visualizer_asset(self, pack_id: str, version: str) -> tuple[bytes, str] | None:
+        return self.orchestrator()._pack_broker_runtime.visualizer.asset(pack_id, version)
+
     @staticmethod
     def _pack_mutation_binding(payload: dict[str, Any]) -> tuple[str, str, str]:
         return (
@@ -10281,8 +10403,8 @@ class AgentRuntime:
             if not source:
                 return False, {"ok": False, "error": "pack_path_required", "message": "Choose a local pack directory first."}
             mutation_payload = {"source_dir": source}
-        elif action in {"gate", "remove"}:
-            mutation_payload = {k: payload[k] for k in ("record_id", "gate", "value") if k in payload}
+        elif action in {"gate", "remove", "activate", "rollback"}:
+            mutation_payload = {k: payload[k] for k in ("record_id", "gate", "value", "private_data") if k in payload}
         else:
             return False, {"ok": False, "error": "pack_mutation_action_invalid"}
         actor, session, thread = self._pack_mutation_binding(payload)
@@ -24646,6 +24768,24 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 ok, body = self.runtime.pack_capability_status()
                 self._send_json(200 if ok else 404, body)
                 return
+            if path == "/packs/capabilities/compare":
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                ok, body = self.runtime.pack_capability_compare(
+                    str(query.get("from", [""])[0] or ""),
+                    str(query.get("to", [""])[0] or ""),
+                )
+                self._send_json(200 if ok else 400, body)
+                return
+            if path == "/packs/visualizer":
+                self._send_json(200, self.runtime.pack_visualizer_status())
+                return
+            if len(parts) == 5 and parts[:2] == ["packs", "visualizer"] and parts[4] == "asset":
+                asset = self.runtime.pack_visualizer_asset(urllib.parse.unquote(parts[2]), urllib.parse.unquote(parts[3]))
+                if asset is None:
+                    self._send_json(404, {"ok": False, "error": "visualizer_asset_unavailable"})
+                else:
+                    self._send_bytes(200, asset[0], content_type=asset[1], cache_control="private, max-age=300")
+                return
             if len(parts) == 3 and parts[:2] == ["packs", "capabilities"]:
                 ok, body = self.runtime.pack_capability_status(urllib.parse.unquote(parts[2]))
                 self._send_json(200 if ok else 404, body)
@@ -25863,14 +26003,34 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 ok, body = self.runtime.route_pack_search_mutation("external_pack.install", payload)
                 self._send_json(200 if ok else 400, body)
                 return
-            if path in {"/packs/capabilities/import/plan", "/packs/capabilities/gate/plan", "/packs/capabilities/remove/plan"}:
+            if path in {"/packs/fetch", "/packs/fetch/plan", "/packs/fetch/apply"}:
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                ok, body = self.runtime.route_pack_search_mutation("external_pack.fetch", payload)
+                self._send_json(200 if ok else 400, body)
+                return
+            if path in {"/packs/index/plan", "/packs/index/apply", "/packs/revoke/plan", "/packs/revoke/apply"}:
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                lifecycle_action = path.strip("/").split("/")[1]
+                operation = f"external_pack.{lifecycle_action}"
+                ok, body = self.runtime.route_pack_search_mutation(operation, payload)
+                self._send_json(200 if ok else 400, body)
+                return
+            if path in {"/packs/create/plan", "/packs/create/apply"}:
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                ok, body = self.runtime.route_pack_search_mutation("external_pack.draft", payload)
+                self._send_json(200 if ok else 400, body)
+                return
+            if path in {"/packs/capabilities/import/plan", "/packs/capabilities/gate/plan", "/packs/capabilities/remove/plan", "/packs/capabilities/activate/plan", "/packs/capabilities/rollback/plan"}:
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
                 action = path.rsplit("/", 2)[-2]
                 ok, body = self.runtime.pack_capability_mutation_preview(action, payload)
                 self._send_json(200 if ok else 400, body)
                 return
-            if path in {"/packs/capabilities/import/apply", "/packs/capabilities/gate/apply", "/packs/capabilities/remove/apply"}:
+            if path in {"/packs/capabilities/import/apply", "/packs/capabilities/gate/apply", "/packs/capabilities/remove/apply", "/packs/capabilities/activate/apply", "/packs/capabilities/rollback/apply"}:
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
                 ok, body = self.runtime.pack_capability_mutation_apply(payload)

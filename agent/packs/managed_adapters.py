@@ -3,8 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import stat
 import time
 from typing import Any
 
@@ -152,6 +154,8 @@ def validate_managed_adapter_spec(spec: ManagedAdapterSpec | dict[str, Any]) -> 
         errors.append("adapter_kind_disabled")
     if adapter.kind == ADAPTER_LOCAL_FILE_IMPORT and adapter.network_allowed:
         errors.append("local_file_import_network_not_allowed")
+    if adapter.max_file_size_mb < 1 or adapter.max_file_size_mb > 64:
+        errors.append("max_file_size_mb_out_of_bounds")
     if adapter.path_policy != USER_SELECTED_FILE_ONLY:
         errors.append("path_policy_must_be_user_selected_file_only")
     if not adapter.allowed_extensions:
@@ -260,10 +264,14 @@ def validate_local_file_path_metadata(path: str, adapter: ManagedAdapterSpec) ->
         "size_bytes": None,
         "max_file_size_mb": int(adapter.max_file_size_mb),
     }
+    if resolved.is_symlink():
+        errors.append("path_symlink_not_allowed")
+        return False, errors, metadata
     if not resolved.exists():
         errors.append("path_not_found")
         return False, errors, metadata
-    if not resolved.is_file():
+    row = resolved.stat(follow_symlinks=False)
+    if not stat.S_ISREG(row.st_mode) or row.st_nlink != 1:
         errors.append("path_is_not_file")
         metadata["is_file"] = False
         return False, errors, metadata
@@ -271,11 +279,56 @@ def validate_local_file_path_metadata(path: str, adapter: ManagedAdapterSpec) ->
     suffix = resolved.suffix.lower()
     if suffix not in set(adapter.allowed_extensions):
         errors.append("extension_not_allowed")
-    size_bytes = resolved.stat().st_size
+    size_bytes = row.st_size
     metadata["size_bytes"] = size_bytes
     if size_bytes > int(adapter.max_file_size_mb) * 1024 * 1024:
         errors.append("file_too_large")
-    return (not errors, errors, metadata)
+    metadata.update(
+        {
+            "device": int(row.st_dev),
+            "inode": int(row.st_ino),
+            "mtime_ns": int(row.st_mtime_ns),
+            "mode": stat.S_IMODE(row.st_mode),
+            "owner_uid": int(row.st_uid),
+            "fingerprint": hashlib.sha256(
+                f"{row.st_dev}:{row.st_ino}:{row.st_size}:{row.st_mtime_ns}".encode("utf-8")
+            ).hexdigest(),
+        }
+    )
+    # A user-owned group-writable export is common on this installation and is
+    # still protected by the exact inode/device binding below.  World-writable
+    # input is not an acceptable stable grant target.
+    if row.st_mode & stat.S_IWOTH:
+        errors.append("path_unsafe_permissions")
+    if row.st_uid != os.getuid():
+        errors.append("path_owner_mismatch")
+    return (not errors, sorted(dict.fromkeys(errors)), metadata)
+
+
+def revoke_adapter_grants(storage_root: str | Path, *, pack_id: str, adapter_kind: str | None = None) -> dict[str, Any]:
+    """Atomically revoke only the exact pack's grants; never touch other packs."""
+    path = grants_store_path(storage_root)
+    rows = list_adapter_grants(storage_root)
+    changed = 0
+    now = int(time.time())
+    updated: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        matches = str(item.get("pack_id") or "") == str(pack_id)
+        if adapter_kind is not None:
+            matches = matches and str(item.get("adapter_kind") or "") == str(adapter_kind)
+        if matches and str(item.get("state") or "") == GRANT_GRANTED:
+            item["state"] = GRANT_DENIED
+            item["revoked_at"] = now
+            item.pop("granted_path", None)
+            changed += 1
+        updated.append(item)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(f".{path.name}.{time.time_ns()}.tmp")
+    temp.write_text(json.dumps(updated, ensure_ascii=True, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.chmod(temp, 0o600)
+    temp.replace(path)
+    return {"ok": True, "pack_id": str(pack_id), "adapter_kind": adapter_kind, "revoked": changed}
 
 
 def grants_store_path(storage_root: str | Path) -> Path:

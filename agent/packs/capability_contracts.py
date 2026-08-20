@@ -13,6 +13,8 @@ import re
 from pathlib import Path
 from typing import Any, Mapping
 
+from agent.packs.wp5_contracts import BrokerDeclarationV1, WP5ContractError
+
 
 PACK_SCHEMA = "personal-agent.pack.v1"
 CAPABILITY_SCHEMA = "personal-agent.pack-capability.v1"
@@ -30,7 +32,7 @@ MAX_CONTENT_FILES = 64
 MAX_CONTENT_BYTES = 4 * 1024 * 1024
 _ID = re.compile(r"^[a-z][a-z0-9-]{1,47}$")
 _NAME = re.compile(r"^[a-z][a-z0-9_]{1,47}$")
-_ALLOWED_PACK = {"schema_version", "id", "version", "pack_class", "display_name", "description", "capabilities"}
+_ALLOWED_PACK = {"schema_version", "id", "version", "pack_class", "display_name", "description", "capabilities", "brokers"}
 _ALLOWED_CAP = {"schema_version", "name", "display_name", "description", "examples", "input_schema", "output_schema", "mode", "task_composable", "permissions", "invocation", "verifier", "limits", "self_test_input"}
 _ALLOWED_TYPES = {"string", "integer", "number", "boolean", "object", "array"}
 
@@ -161,13 +163,10 @@ def _normalize_invocation(pack_class: str, value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise PackCapabilityContractError("invocation_invalid")
     if pack_class == "declarative":
-        if set(value) - {"kind", "capability_id", "inputs", "result_field"}:
+        if set(value) - {"kind", "capability_id", "broker_kind", "operation", "inputs", "result_field"}:
             raise PackCapabilityContractError("declarative_unknown_authority_field")
-        if value.get("kind") != "registered_capability":
+        if value.get("kind") not in {"registered_capability", "core_broker"}:
             raise PackCapabilityContractError("declarative_kind_invalid")
-        capability_id = str(value.get("capability_id") or "").strip().lower()
-        if not capability_id or capability_id.startswith("pack."):
-            raise PackCapabilityContractError("declarative_capability_invalid")
         inputs = value.get("inputs") or {}
         if not isinstance(inputs, dict) or len(inputs) > MAX_PROPERTIES:
             raise PackCapabilityContractError("declarative_inputs_invalid")
@@ -176,10 +175,27 @@ def _normalize_invocation(pack_class: str, value: Any) -> dict[str, Any]:
                 raise PackCapabilityContractError("declarative_template_invalid")
             if isinstance(item, (dict, list)):
                 raise PackCapabilityContractError("declarative_expression_invalid")
-        result_field = str(value.get("result_field") or "text")
-        if result_field != "text":
-            raise PackCapabilityContractError("declarative_result_field_unsupported")
-        return {"kind": "registered_capability", "capability_id": capability_id, "inputs": dict(sorted(inputs.items())), "result_field": result_field}
+        if value.get("kind") == "registered_capability":
+            capability_id = str(value.get("capability_id") or "").strip().lower()
+            if not capability_id or capability_id.startswith("pack.") or value.get("broker_kind") or value.get("operation"):
+                raise PackCapabilityContractError("declarative_capability_invalid")
+            result_field = str(value.get("result_field") or "text")
+            if result_field != "text":
+                raise PackCapabilityContractError("declarative_result_field_unsupported")
+            return {"kind": "registered_capability", "capability_id": capability_id, "inputs": dict(sorted(inputs.items())), "result_field": result_field}
+        if value.get("capability_id"):
+            raise PackCapabilityContractError("broker_capability_id_denied")
+        broker_kind = str(value.get("broker_kind") or "").strip().lower()
+        operation = str(value.get("operation") or "").strip().lower()
+        allowed_operations = {
+            "selected_local_data": {"search"},
+            "pack_private_store": {"status"},
+            "scoped_https": {"get", "head"},
+            "presence_visualizer": {"status"},
+        }
+        if operation not in allowed_operations.get(broker_kind, set()):
+            raise PackCapabilityContractError("broker_operation_unsupported")
+        return {"kind": "core_broker", "broker_kind": broker_kind, "operation": operation, "inputs": dict(sorted(inputs.items())), "result_field": str(value.get("result_field") or "result")}
     if pack_class == "sandboxed_executable":
         if set(value) - {"kind", "abi", "module", "export", "input_field"}:
             raise PackCapabilityContractError("executable_unknown_authority_field")
@@ -209,6 +225,16 @@ def normalize_manifest(payload: Mapping[str, Any], *, source_dir: Path) -> dict[
     pack_class = str(payload.get("pack_class") or "")
     if pack_class not in PACK_CLASSES:
         raise PackCapabilityContractError("pack_class_invalid")
+    raw_brokers = payload.get("brokers") or []
+    if not isinstance(raw_brokers, list) or len(raw_brokers) > 4:
+        raise PackCapabilityContractError("pack_brokers_invalid")
+    try:
+        brokers = [BrokerDeclarationV1.parse(row).to_dict() for row in raw_brokers if isinstance(row, Mapping)]
+    except WP5ContractError as exc:
+        raise PackCapabilityContractError(str(exc)) from exc
+    if len(brokers) != len(raw_brokers) or len({row["kind"] for row in brokers}) != len(brokers):
+        raise PackCapabilityContractError("pack_brokers_invalid")
+    broker_by_kind = {row["kind"]: row for row in brokers}
     caps = payload.get("capabilities") or []
     if not isinstance(caps, list) or len(caps) > MAX_CAPABILITIES or pack_class != "text" and not caps or pack_class == "text" and caps:
         raise PackCapabilityContractError("pack_capabilities_invalid")
@@ -229,9 +255,15 @@ def normalize_manifest(payload: Mapping[str, Any], *, source_dir: Path) -> dict[
         if mode not in {"read_only", "mutating"}:
             raise PackCapabilityContractError("pack_capability_mode_invalid")
         permissions = row.get("permissions") or []
-        if not isinstance(permissions, list) or any(x not in {"pure_compute"} for x in permissions):
+        allowed_permissions = {"pure_compute", *(f"broker:{kind}" for kind in broker_by_kind)}
+        if not isinstance(permissions, list) or any(x not in allowed_permissions for x in permissions):
             raise PackCapabilityContractError("pack_permission_unsupported")
         invocation = _normalize_invocation(pack_class, row.get("invocation"))
+        if invocation["kind"] == "core_broker":
+            broker_kind = invocation["broker_kind"]
+            if broker_kind not in broker_by_kind or f"broker:{broker_kind}" not in permissions:
+                raise PackCapabilityContractError("broker_declaration_or_permission_missing")
+            invocation["broker_declaration"] = broker_by_kind[broker_kind]
         verifier = row.get("verifier") or {}
         if not isinstance(verifier, dict) or set(verifier) - {"kind", "field"} or verifier.get("kind") not in {"nonempty", "integer_result"}:
             raise PackCapabilityContractError("pack_verifier_invalid")
@@ -289,7 +321,8 @@ def normalize_manifest(payload: Mapping[str, Any], *, source_dir: Path) -> dict[
         "version": _bounded_text(payload.get("version"), "version"), "pack_class": pack_class,
         "display_name": _bounded_text(payload.get("display_name") or pack_id, "display_name"),
         "description": _bounded_text(payload.get("description"), "description"),
-        "capabilities": normalized_caps, "content_files": _content_files(source_dir.resolve()),
+        "capabilities": normalized_caps, "brokers": brokers,
+        "content_files": _content_files(source_dir.resolve()),
     }
     normalized["content_digest"] = digest(normalized)
     return normalized

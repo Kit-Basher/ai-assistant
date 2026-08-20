@@ -27,7 +27,7 @@ def _claim(claim_id: str, surface: str, audience: str, truth: str, wording: str,
 
 CLAIMS = [
     _claim("assistant_front_door", "README/Web chat", "ordinary user", "route_inference + RuntimeTruthService", "Ask for help naturally.", "Web and Telegram intents share the assistant orchestration path.", "accurate"),
-    _claim("remote_pack_acquisition", "README/assistant/Web pack rescue", "user/operator", "v2F pack authorization inventory", "Catalog discovery is metadata-only; arbitrary remote pack acquisition is unavailable.", "URL and remote archive acquisition fail closed before network access.", "resolved", original="contradictory"),
+    _claim("remote_pack_acquisition", "README/assistant/Web pack rescue", "user/operator", "WP5 acquisition and broker proof", "Catalog discovery fetches nothing; a supported exact source requires separate authorization and lands in quarantine only.", "HTTPS/GitHub acquisition is target-bound, SSRF-hardened, bounded, and cannot approve, grant, enable, or invoke a pack.", "resolved", original="contradictory"),
     _claim("pack_removal", "README pack lifecycle", "user/operator", "v2F pack authorization inventory", "Registered pack removal is confirmation-gated; arbitrary filesystem delete is denied.", "Exact registered pack/version removal is centrally authorized.", "resolved", original="contradictory"),
     _claim("source_allowlist", "assistant/pack docs", "user/operator", "pack source policy", "Allowlisted means queryable metadata, not trusted or installable.", "Source policy grants no content trust or permission.", "resolved", original="misleading"),
     _claim("pack_stage_separation", "Web/pack docs", "ordinary user", "pack lifecycle state machine", "Install, review approval, enablement, and grants are separate.", "A pack begins with zero permissions and cannot approve itself.", "accurate"),
@@ -59,7 +59,7 @@ JOURNEYS = [
     {"id": "safe_mode_setup_block", "entry": "Web/API/CLI/Telegram mock", "expected": "blocked reason and safe next action", "state": "covered"},
     {"id": "controlled_preview_cancel", "entry": "public assistant/Web", "expected": "no automatic change and reliable cancellation", "state": "covered"},
     {"id": "local_pack_lifecycle", "entry": "public pack routes", "expected": "distinct install/review/enable/grant/remove stages", "state": "covered"},
-    {"id": "remote_pack_unavailable", "entry": "assistant/Web/API", "expected": "metadata-only discovery and no fetch continuation", "state": "covered"},
+    {"id": "remote_pack_quarantine", "entry": "assistant/Web/API", "expected": "metadata discovery followed only by a separately confirmed quarantine fetch", "state": "covered"},
     {"id": "stale_confirmation", "entry": "public assistant/Web", "expected": "nothing changed and fresh preview advice", "state": "covered"},
     {"id": "failed_indeterminate", "entry": "public status/recovery", "expected": "failure distinguished from unknown outcome; no blind retry", "state": "covered"},
     {"id": "disabled_telegram", "entry": "Web/API/CLI/Telegram mock", "expected": "neutral optional-disabled state", "state": "covered"},
@@ -85,19 +85,19 @@ def rendered() -> str:
 def claim_source_errors() -> list[str]:
     checks = {
         "README.md": {
-            "must": ("arbitrary remote archive acquisition is denied", "Registered pack removal is"),
-            "must_not": ("a supported remote archive source over `https`", "- `rm`/delete/remove flows."),
+            "must": ("quarantine-only flow", "Registered pack removal is"),
+            "must_not": ("arbitrary remote archive acquisition is denied", "- `rm`/delete/remove flows."),
         },
         "agent/assistant_ux.py": {
-            "must": ("arbitrary remote pack", "SAFE MODE is the normal default"),
-            "must_not": ("external skill acquisition suggestions with source approval",),
+            "must": ("fetch a supported HTTPS or GitHub artifact into quarantine only", "SAFE MODE is the normal default"),
+            "must_not": ("download an arbitrary remote pack",),
         },
         "agent/packs/registry_discovery.py": {
-            "must": ("Remote pack acquisition is unavailable", "install_handoff: dict[str, Any] | None = None"),
-            "must_not": ("If you install it, I will fetch it into quarantine",),
+            "must": ("request_exact_source_authorization", "automatic_fetch"),
+            "must_not": ("Remote pack acquisition is unavailable",),
         },
         "desktop/src/components/ChatExperience.jsx": {
-            "must": ("remote pack download is unavailable", 'aria-live="polite"', 'role="log"'),
+            "must": ("quarantine-only acquisition", 'aria-live="polite"', 'role="log"'),
             "must_not": ("Preview is required before any import", 'role="status"'),
         },
     }

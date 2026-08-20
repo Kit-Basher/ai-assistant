@@ -1593,3 +1593,19 @@ button.button-danger:not(:disabled):hover {
     grid-template-columns: 1fr;
   }
 }
+.pack-visualizer-preview {
+  display: grid;
+  gap: 0.75rem;
+  align-items: start;
+}
+
+.pack-visualizer-frame {
+  image-rendering: pixelated;
+  background-repeat: no-repeat;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pack-visualizer-frame { animation: none !important; }
+}
