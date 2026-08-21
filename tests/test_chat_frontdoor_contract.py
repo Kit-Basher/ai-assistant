@@ -230,12 +230,15 @@ def test_model_scout_and_manager_questions_are_grounded_through_chat() -> None:
                 assert meta.get("route") in {"action_tool", "model_policy_status"}, (prompt, response)
                 assert meta.get("used_llm") is False, (prompt, response)
                 if prompt in {"what model scout sees", "what model should you use for chat?", "run model scout now"}:
-                    assert "ollama:qwen2.5:3b-instruct" in message, (prompt, response)
-                    assert "no model was switched" in message, (prompt, response)
+                    if "evidence state is stale" in message:
+                        assert "refresh" in message and "evaluation" in message, (prompt, response)
+                    else:
+                        assert "ollama:gemma:latest" in message, (prompt, response)
+                        assert "no change" in message or "no model was switched" in message, (prompt, response)
                 else:
                     assert "ollama:gemma:latest" in message, (prompt, response)
-            assert scout.call_count == 1
-        policy.assert_not_called()
+            assert scout.call_count == 3
+        policy.assert_called_once_with()
 
 
 def test_plain_and_upgrade_model_scout_requests_beat_shell_fallback_through_chat() -> None:
@@ -308,18 +311,18 @@ def test_plain_and_upgrade_model_scout_requests_beat_shell_fallback_through_chat
             message = str(response.get("message") or "").lower()
             assert meta.get("route") == "action_tool", (prompt, response)
             assert meta.get("used_llm") is False, (prompt, response)
-            expected_tools = ["model_discovery_manager"] if "better new models" in prompt else ["model_scout", "model_runtime_evaluation"]
+            expected_tools = ["model_discovery_manager"] if "better new models" in prompt else ["model_scout"]
             assert meta.get("used_tools") == expected_tools, (prompt, response)
             if "better new models" in prompt:
                 assert "huggingface:example/new-chat-model" in message, (prompt, response)
             else:
-                assert "ollama:qwen2.5:3b-instruct" in message, (prompt, response)
+                assert "ollama:gemma:latest" in message, (prompt, response)
             assert "can't run that command" not in message, (prompt, response)
 
         upgrade_message = str(responses[0].get("message") or "").lower()
         assert "huggingface:example/new-chat-model" in upgrade_message
         assert "sources checked" in upgrade_message
-        assert scout.call_count == 0
+        assert scout.call_count == 1
         discovery.assert_called_once()
 
 
