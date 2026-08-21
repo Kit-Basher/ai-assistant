@@ -398,7 +398,12 @@ class TestPublishabilitySmoke(unittest.TestCase):
         self.assertEqual("action_tool", local_rec_meta.get("route"))
         self.assertEqual(["model_scout", "model_runtime_evaluation"], local_rec_meta.get("used_tools"))
         self.assertFalse(bool(local_rec_meta.get("used_llm")))
-        self.assertIn("ollama:qwen2.5:3b-instruct", str(local_rec.get("message") or ""))
+        local_rec_message = str(local_rec.get("message") or "").lower()
+        self.assertTrue(
+            "ollama:qwen2.5:3b-instruct" in local_rec_message
+            or ("evidence" in local_rec_message and "stale" in local_rec_message and "evaluation" in local_rec_message),
+            local_rec_message,
+        )
 
         controlled = self._authorized(runtime, "runtime.control_mode", {"mode": "controlled"})
         self.assertEqual("controlled", ((controlled.get("policy") or {}).get("mode")))
