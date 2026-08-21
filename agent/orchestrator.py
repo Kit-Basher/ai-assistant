@@ -1193,6 +1193,208 @@ class Orchestrator:
             },
         }
 
+    def _resolve_pack_capability_record_for_chat(
+        self,
+        text: str,
+        *,
+        operation: str,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """Resolve an already-selected pack lifecycle target without reclassifying intent."""
+        rows = self._pack_capability_store.list()
+        if not rows:
+            return None, "There are no external capability-pack versions in this runtime."
+        normalized = re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).strip()
+        tokens = set(normalized.split())
+        scored: list[tuple[int, int, dict[str, Any]]] = []
+        for row in rows:
+            manifest = row.get("manifest") if isinstance(row.get("manifest"), dict) else {}
+            names = (
+                str(row.get("pack_id") or ""),
+                str(manifest.get("display_name") or ""),
+                str(row.get("version") or ""),
+            )
+            name_tokens = {
+                token
+                for value in names
+                for token in re.sub(r"[^a-z0-9]+", " ", value.lower()).split()
+                if len(token) > 1
+            }
+            score = len(tokens & name_tokens)
+            exact = int(any(value and re.sub(r"[^a-z0-9]+", " ", value.lower()).strip() in normalized for value in names[:2]))
+            scored.append((exact, score, row))
+        scored.sort(key=lambda item: (item[0], item[1], int(item[2].get("updated_at") or 0)), reverse=True)
+        best_exact, best_score, best = scored[0]
+        pack_ids = {str(row.get("pack_id") or "") for row in rows}
+        if not best_exact and best_score == 0 and len(pack_ids) != 1:
+            return None, "Which exact pack do you mean? Name it or choose its version in the Skills view."
+        selected_pack_id = str(best.get("pack_id") or "") if best_exact or best_score else next(iter(pack_ids))
+        versions = [row for row in rows if str(row.get("pack_id") or "") == selected_pack_id]
+        active = next((row for row in versions if bool(row.get("active"))), None)
+        if operation == "rollback":
+            candidates = [row for row in versions if not bool(row.get("active")) and bool(row.get("review_approved"))]
+            if not candidates:
+                return None, f"{selected_pack_id} has no previously reviewed inactive version eligible for rollback."
+            return max(candidates, key=lambda row: int(row.get("updated_at") or 0)), None
+        if operation in {"disable", "remove", "revoke", "inspect", "update", "compare"} and active is not None:
+            return active, None
+        return max(versions, key=lambda row: int(row.get("updated_at") or 0)), None
+
+    def _queue_pack_capability_mutation_followup(
+        self,
+        user_id: str,
+        *,
+        operation: str,
+        plan: Mapping[str, Any],
+    ) -> None:
+        now_epoch = int(time.time())
+        self._memory_runtime.add_pending_item(
+            user_id,
+            {
+                "pending_id": str(uuid.uuid4()),
+                "kind": "followup",
+                "origin_tool": "pack_capability_exact_mutation",
+                "question": str(plan.get("preview") or "Apply this exact pack lifecycle change?"),
+                "options": ["yes", "no"],
+                "created_at": now_epoch,
+                "expires_at": min(int(plan.get("expires_at") or now_epoch + 300), now_epoch + 300),
+                "thread_id": self._active_thread_id_for_user(user_id),
+                "status": PENDING_STATUS_READY_TO_RESUME,
+                "context": {
+                    "operation": operation,
+                    "plan_id": str(plan.get("plan_id") or ""),
+                    "binding_digest": str(plan.get("binding_digest") or ""),
+                    "session_id": f"assistant:{self._active_thread_id_for_user(user_id) or 'thread'}",
+                },
+            },
+        )
+
+    def _pack_capability_mutation_confirm_response(
+        self,
+        user_id: str,
+        pending_item: Mapping[str, Any],
+    ) -> OrchestratorResponse:
+        context = pending_item.get("context") if isinstance(pending_item.get("context"), dict) else {}
+        thread_id = self._active_thread_id_for_user(user_id)
+        try:
+            result = self.pack_capability_mutation_apply(
+                str(context.get("plan_id") or ""),
+                str(context.get("binding_digest") or ""),
+                actor_id=user_id,
+                session_id=str(context.get("session_id") or f"assistant:{thread_id or 'thread'}"),
+                thread_id=thread_id,
+            )
+        except Exception as exc:
+            message = "That exact pack lifecycle change was refused without changing pack authority."
+            return self._runtime_truth_response(
+                text=message,
+                route="pack_lifecycle",
+                used_tools=["pack_capability_store", "capability_registry"],
+                ok=False,
+                error_kind=str(exc)[:160],
+                payload={"type": "pack_capability_mutation_refused", "mutated": False, "summary": message},
+            )
+        operation = str(context.get("operation") or result.get("action") or "change")
+        message = f"Applied exactly the confirmed {operation} gate and rebuilt live capability authority. No later lifecycle gate was implied or approved."
+        return self._runtime_truth_response(
+            text=message,
+            route="pack_lifecycle",
+            used_tools=["pack_capability_store", "capability_registry"],
+            payload={"type": "pack_capability_mutation_applied", "operation": operation, "result": result, "mutated": True, "summary": message},
+        )
+
+    def _pack_capability_lifecycle_chat_response(
+        self,
+        user_id: str,
+        text: str,
+        operation: str,
+    ) -> OrchestratorResponse:
+        row, error = self._resolve_pack_capability_record_for_chat(text, operation=operation)
+        if row is None:
+            return self._runtime_truth_response(
+                text=error or "Choose the exact pack version first.",
+                route="pack_lifecycle",
+                used_tools=["pack_capability_store"],
+                ok=False,
+                error_kind="pack_capability_target_required",
+                next_question=error or "Which exact pack version do you mean?",
+                payload={"type": "pack_lifecycle_clarification", "mutated": False},
+            )
+        record_id = str(row.get("record_id") or "")
+        pack_id = str(row.get("pack_id") or "")
+        if operation in {"inspect", "update", "compare"}:
+            versions = [item for item in self._pack_capability_store.list() if str(item.get("pack_id") or "") == pack_id]
+            comparison = None
+            active = next((item for item in versions if bool(item.get("active"))), None)
+            staged = sorted((item for item in versions if not bool(item.get("active"))), key=lambda item: int(item.get("updated_at") or 0), reverse=True)
+            if active is not None and staged:
+                comparison = self.pack_capability_compare(str(active["record_id"]), str(staged[0]["record_id"]))
+            status = self.pack_capability_status(record_id) or {}
+            if operation == "inspect":
+                message = f"{pack_id} {status.get('version')} is {'usable' if (status.get('lifecycle') or {}).get('usable') else 'not currently usable'}. The next gate is {(status.get('lifecycle') or {}).get('missing_gate') or 'none'}."
+            elif comparison is None:
+                message = f"No separately fetched or staged update is recorded for {pack_id}. Update checks are metadata-only; no artifact was fetched."
+            else:
+                changed = ", ".join(comparison.get("changed_sections") or []) or "no authority-bearing sections"
+                message = f"A staged version of {pack_id} differs in {changed}. The active version remains unchanged until a separate exact activation confirmation."
+            return self._runtime_truth_response(
+                text=message,
+                route="pack_lifecycle",
+                used_tools=["pack_capability_store"],
+                payload={"type": "pack_capability_status", "operation": operation, "record": status, "comparison": comparison, "mutated": False, "summary": message},
+            )
+        if operation == "revoke":
+            return self._external_pack_plan_confirmation_response(
+                user_id,
+                action_type="external_pack.revoke",
+                operation_payload={"pack_id": pack_id},
+                title=f"Revoke exact broker access for {pack_id}",
+                intro_lines=["This revokes only the exact pack's current local-data broker grant and immediately removes unusable capability authority."],
+                used_tools=["pack_permission_authorization"],
+                preview_payload={"type": "pack_permission_revoke_preview", "pack_id": pack_id},
+            )
+        action = "gate"
+        mutation_payload: dict[str, Any] = {"record_id": record_id}
+        if operation == "approve":
+            mutation_payload.update({"gate": "review_approved", "value": True})
+        elif operation == "grant":
+            requested = list(self._dynamic_pack_runtime.lifecycle(row).get("requested_permissions") or [])
+            if not requested:
+                message = f"{pack_id} requests no capability-level grants. Broker access, if needed, is a separate exact file or network grant."
+                return self._runtime_truth_response(text=message, route="pack_lifecycle", used_tools=["pack_capability_store"], payload={"type": "pack_grant_status", "mutated": False, "summary": message})
+            mutation_payload.update({"gate": "grants", "value": requested})
+        elif operation == "enable":
+            mutation_payload.update({"gate": "enabled", "value": True})
+        elif operation == "disable":
+            mutation_payload.update({"gate": "enabled", "value": False})
+        elif operation in {"activate", "rollback"}:
+            action = operation
+        elif operation == "remove":
+            action = "remove"
+            mutation_payload["private_data"] = "retain"
+        else:
+            return self._pack_review_state_response(user_id) or self._assistant_capabilities_response(text)
+        try:
+            thread_id = self._active_thread_id_for_user(user_id)
+            plan = self.pack_capability_mutation_preview(
+                action,
+                mutation_payload,
+                actor_id=user_id,
+                session_id=f"assistant:{thread_id or 'thread'}",
+                thread_id=thread_id,
+            )
+        except Exception as exc:
+            message = f"I could not prepare that exact pack lifecycle preview: {str(exc)[:120]}. Nothing changed."
+            return self._runtime_truth_response(text=message, route="pack_lifecycle", used_tools=["pack_capability_store"], ok=False, error_kind=str(exc)[:160], payload={"type": "pack_lifecycle_preview_refused", "mutated": False, "summary": message})
+        self._queue_pack_capability_mutation_followup(user_id, operation=operation, plan=plan)
+        question = f"{plan['preview']} This confirms only that one gate; reply yes to apply it or no to cancel."
+        return self._runtime_truth_response(
+            text=question,
+            route="pack_lifecycle",
+            used_tools=["pack_capability_store"],
+            next_question=question,
+            payload={"type": "pack_capability_mutation_preview", "operation": operation, "plan": plan, "mutated": False, "summary": question},
+        )
+
     def pack_capability_compare(self, from_record_id: str, to_record_id: str) -> dict[str, Any]:
         before = self._pack_capability_store.get(str(from_record_id or ""))
         after = self._pack_capability_store.get(str(to_record_id or ""))
@@ -2029,6 +2231,11 @@ class Orchestrator:
                     next_question="Which local pack directory should I inspect?",
                     payload={"type": "pack_lifecycle_clarification", "mutated": False},
                 )
+            if operation in {
+                "inspect", "approve", "grant", "enable", "disable", "activate", "revoke",
+                "remove", "update", "compare", "rollback",
+            }:
+                return self._pack_capability_lifecycle_chat_response(user_id, text, operation)
             response = self._pack_review_state_response(user_id)
             return response if response is not None else self._assistant_capabilities_response(text)
         if capability_id == "telegram.status":
@@ -2119,6 +2326,19 @@ class Orchestrator:
             recommended_model = str((recommendation or {}).get("model_id") or "").strip()
             if recommended_model:
                 inputs["models.switch"]["model_target"] = recommended_model
+        if (
+            continuation_capability_id is None
+            and (referenced_id == "packs.manage" or str(referenced_id or "").startswith("pack."))
+            and (
+                followup_tokens & {
+                    "approve", "enable", "disable", "activate", "remove", "delete", "revoke",
+                    "rollback", "revert", "update", "changed", "compare", "grant", "permission",
+                    "permissions", "access", "inspect",
+                }
+                or {"roll", "back"} <= followup_tokens
+            )
+        ):
+            continuation_capability_id = "packs.manage"
         if (
             continuation_capability_id is None
             and
@@ -7578,7 +7798,7 @@ class Orchestrator:
         payload_type = str(payload.get("type") or "").strip().lower()
         remember_setup_flow = route == "setup_flow" and payload_type in {"provider_repair", "provider_repair_options"}
         if route not in {"operational_status", "runtime_status", "provider_status", "model_status"} and not remember_setup_flow and not (
-            route == "action_tool"
+            route in {"action_tool", "pack_lifecycle"}
             and payload_type
             in {
                 "model_scout",
@@ -7592,6 +7812,10 @@ class Orchestrator:
                 "filesystem_search_text",
                 "filesystem_recent_downloaded_videos",
                 "filesystem_recent_videos",
+                "pack_capability_status",
+                "pack_grant_status",
+                "pack_capability_mutation_preview",
+                "pack_capability_mutation_applied",
             }
         ):
             return
@@ -27871,6 +28095,15 @@ class Orchestrator:
                         if pending_id:
                             self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_ABORTED)
                         return OrchestratorResponse("Okay — I did not enable that pack.")
+                if pending_kind == "followup" and str(pending_item.get("origin_tool") or "") == "pack_capability_exact_mutation":
+                    if followup_intent in {"accept", "details"}:
+                        if pending_id:
+                            self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_DONE)
+                        return self._pack_capability_mutation_confirm_response(user_id, pending_item)
+                    if followup_intent == "decline":
+                        if pending_id:
+                            self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_ABORTED)
+                        return OrchestratorResponse("Okay — I cancelled that exact pack lifecycle preview. No pack authority changed.")
                 if pending_kind == "confirmation":
                     if followup_intent in {"accept", "details"}:
                         pending_action = self.confirmations.get(user_id)

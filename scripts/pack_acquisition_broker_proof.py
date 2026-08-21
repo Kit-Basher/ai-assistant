@@ -23,6 +23,7 @@ REQUIRED = (
     "agent/packs/wp5_contracts.py", "agent/packs/secure_transport.py", "agent/packs/brokers.py",
     "agent/packs/draft_builder.py", "tests/test_wp5_pack_acquisition_brokers.py",
     "docs/design/SAFE_PACK_ACQUISITION_BROKERS_WP5.md",
+    "desktop/src/components/PacksTab.jsx", "scripts/wp5_browser_candidate_smoke.py",
 )
 
 
@@ -53,6 +54,13 @@ def structural() -> list[str]:
     for category, token in evidence.items():
         if token not in tests:
             failures.append(f"proof_category_missing:{category}")
+    ui = (ROOT / "desktop/src/components/PacksTab.jsx").read_text(encoding="utf-8")
+    for token in ("Search configured catalogs", "Preview quarantine fetch", "Preview rollback to this version", "prefers-reduced-motion"):
+        if token not in ui:
+            failures.append(f"normal_user_pack_ui_missing:{token}")
+    browser = (ROOT / "scripts/wp5_browser_candidate_smoke.py").read_text(encoding="utf-8")
+    if "catalog_search_accessible" not in browser:
+        failures.append("browser_pack_search_proof_missing")
     return failures
 
 

@@ -80,6 +80,15 @@ class SourceFetchResult:
         """Return bounded lifecycle/provenance truth without storage paths or hostile content."""
         normalization = self.normalization_result if isinstance(self.normalization_result, dict) else {}
         review = self.review if isinstance(self.review, dict) else {}
+        pack = self.pack if isinstance(self.pack, dict) else {}
+        record = {
+            key: pack.get(key)
+            for key in (
+                "record_id", "pack_id", "version", "pack_class", "content_digest",
+                "review_approved", "enabled", "active", "lifecycle", "capabilities",
+            )
+            if pack.get(key) is not None
+        }
         return {
             "ok": self.ok,
             "source_id": self.source_id,
@@ -95,6 +104,7 @@ class SourceFetchResult:
             "did_enable": self.did_enable,
             "did_grant_permissions": self.did_grant_permissions,
             "did_use_pack": self.did_use_pack,
+            "record": record or None,
             "provenance": {
                 key: normalization.get(key)
                 for key in (

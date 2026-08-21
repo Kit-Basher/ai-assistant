@@ -61,6 +61,8 @@ export default function PacksTab({ packsSnapshot, capabilitySnapshot, request, o
   const [mutationAction, setMutationAction] = useState("import");
   const [mutationStatus, setMutationStatus] = useState("");
   const [remoteUrl, setRemoteUrl] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState([]);
   const [draftName, setDraftName] = useState("");
   const [draftTemplate, setDraftTemplate] = useState("local_data_search");
   const [selectedFile, setSelectedFile] = useState("");
@@ -141,6 +143,26 @@ export default function PacksTab({ packsSnapshot, capabilitySnapshot, request, o
       setMutationStatus("Loaded bounded untrusted metadata only. Nothing was fetched or enabled.");
     } catch (error) { setMutationStatus(`Candidate preview refused: ${String(error?.message || error)}`); }
   };
+  const searchConfiguredSources = async () => {
+    const query = searchQuery.trim();
+    if (!query) return setMutationStatus("Describe the capability you want to find first.");
+    try {
+      const sourcePayload = await request("GET", "/pack_sources");
+      const sources = (Array.isArray(sourcePayload?.sources) ? sourcePayload.sources : [])
+        .filter((source) => source?.enabled !== false && source?.allowed_by_policy !== false && source?.supports_search !== false);
+      const settled = await Promise.allSettled(sources.map(async (source) => {
+        const payload = await request("GET", `/pack_sources/${encodeURIComponent(source.id)}/search?q=${encodeURIComponent(query)}`);
+        const rows = Array.isArray(payload?.search?.results) ? payload.search.results : [];
+        return rows.map((row) => ({ ...row, source_id: source.id, source_name: source.name, stale: Boolean(payload?.search?.stale), fetched_at: payload?.search?.fetched_at || null }));
+      }));
+      const rows = settled.flatMap((entry) => entry.status === "fulfilled" ? entry.value : []).slice(0, 40);
+      setSearchResults(rows);
+      setMutationStatus(rows.length ? `Found ${rows.length} bounded metadata candidate(s). Nothing was fetched.` : "No configured catalog candidate matched. You can supply an exact HTTPS source or create a supported draft.");
+    } catch (error) {
+      setSearchResults([]);
+      setMutationStatus(`Metadata discovery unavailable: ${String(error?.message || error)}`);
+    }
+  };
   const compareVersion = async (row) => {
     const active = dynamicRows.find((item) => item?.pack_id === row?.pack_id && item?.active);
     if (!active) return setMutationStatus("There is no active version to compare with this staged version.");
@@ -170,6 +192,9 @@ export default function PacksTab({ packsSnapshot, capabilitySnapshot, request, o
       <div className="card">
         <h2>Find, fetch, or create a skill</h2>
         <p className="help-text">Metadata search is read-only. A remote artifact is fetched only after exact confirmation and goes to quarantine; fetch is not approval or activation.</p>
+        <label>What capability do you need?<input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Search a local export" /></label>
+        <div className="row-actions"><button type="button" onClick={searchConfiguredSources}>Search configured catalogs</button></div>
+        {searchResults.length ? <div className="model-list" aria-live="polite">{searchResults.map((row) => <DetailRow key={`${row.source_id}:${row.remote_id}`} title={packName(row)} badge={stateBadge(row.stale ? "Stale metadata" : "Candidate", row.stale ? "health-degraded" : "")} metaLines={[packPurpose(row), `Source: ${row.source_name || row.source_id} · ${row.stale ? "refresh needed" : "cached/current metadata"}`]}><button type="button" onClick={() => previewCandidate(row)}>Inspect bounded metadata</button></DetailRow>)}</div> : null}
         <label>Exact HTTPS or GitHub source<input value={remoteUrl} onChange={(event) => setRemoteUrl(event.target.value)} placeholder="https://github.com/owner/repo" /></label>
         <div className="row-actions"><button type="button" onClick={() => previewAuthority("fetch", { source: { url: remoteUrl.trim(), kind: /github\.com\/[^/]+\/[^/]+\/?$/.test(remoteUrl.trim()) ? "github_repo" : remoteUrl.includes("github.com") ? "github_archive" : "generic_archive_url" } })}>Preview quarantine fetch</button></div>
         <label>Skill name<input value={draftName} onChange={(event) => setDraftName(event.target.value)} placeholder="Library export search" /></label>
@@ -209,6 +234,7 @@ export default function PacksTab({ packsSnapshot, capabilitySnapshot, request, o
                 {row.review_approved && row.lifecycle?.missing_gate === "permission" ? <button type="button" onClick={() => previewMutation("gate", { record_id: row.record_id, gate: "grants", value: row.lifecycle?.requested_permissions || [] })}>Preview exact grants</button> : null}
                 {row.review_approved && !row.enabled ? <button type="button" onClick={() => previewMutation("gate", { record_id: row.record_id, gate: "enabled", value: true })}>Preview enable</button> : null}
                 {row.enabled && !row.active ? <button type="button" onClick={() => previewMutation("activate", { record_id: row.record_id })}>Preview activation</button> : null}
+                {!row.active && row.review_approved ? <button type="button" onClick={() => previewMutation("rollback", { record_id: row.record_id })}>Preview rollback to this version</button> : null}
                 {!row.active && dynamicRows.some((item) => item?.pack_id === row.pack_id && item?.active) ? <button type="button" onClick={() => compareVersion(row)}>Compare with active</button> : null}
                 {row.enabled ? <button type="button" onClick={() => previewMutation("gate", { record_id: row.record_id, gate: "enabled", value: false })}>Preview disable</button> : null}
                 {row.lifecycle?.requested_permissions?.includes("broker:selected_local_data") ? <button type="button" onClick={() => previewAuthority("grant", { pack_id: row.pack_id, adapter: { kind: "local_file_import", purpose: "build a bounded private search index", allowed_extensions: [".json", ".csv", ".html", ".htm", ".txt"], max_file_size_mb: 8, path_policy: "user_selected_file_only", stores_local_index: true, network_allowed: false }, requested_path: selectedFile.trim() })}>Preview exact-file grant</button> : null}

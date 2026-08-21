@@ -5,9 +5,9 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Version: `v0.2.21` (Work Package 5 completed release)
+- Version: `v0.2.22` (Work Package 5 completion-audit release candidate)
 - Baseline: completed WP4.5 commit `26fd8cdb8f66f5bf4e8295e6c56fb3eb8caa6055`
-- Promoted live runtime: `v0.2.21`
+- Promoted live runtime before this candidate: `v0.2.21`
 - Capability truth: the live registry plus
   `config/native_capabilities.json`, enforced by
   `scripts/native_capability_proof.py`
@@ -21,11 +21,13 @@ marketing copy and it is not a final release claim.
 - Pack acquisition: read-only configured-source discovery; exact-confirmed
   HTTPS/GitHub quarantine fetch; separate review/grant/enable/activation; and
   core-owned selected-file, private-store, public-HTTPS, and PNG visualizer brokers.
-- Release status: complete. The exact clean WP5 candidate passed 2,912 Python
-  tests (22 documented environment exclusions), 21 JavaScript tests, the
-  484-test canonical gate, the 194-pass/5-environment-exclusion extended gate,
-  43 WP5 focused tests across 22 proof categories, and 27 isolated API/chat/UI
-  scenarios before exact-SHA promotion and live verification.
+- Release status: the completion-audit candidate adds natural-chat lifecycle,
+  update, rollback, and revocation controls; configured-catalog search and
+  rollback controls in the Web UI; 45 focused WP5 tests; and 32 isolated
+  API/chat/browser scenarios covering reference workflows A–F. The canonical
+  gate covers 486 tests plus 2,042 subtests; the extended gate covers 194 tests,
+  five documented environment exclusions, and 2,038 subtests. Exact clean-commit
+  full-suite and live totals are recorded in the v0.2.22 release evidence.
 
 See `docs/design/NATIVE_CAPABILITY_CENSUS_WP2.md` for the census,
 reconciliation, proof profiles, surface mappings, and explicit unsupported

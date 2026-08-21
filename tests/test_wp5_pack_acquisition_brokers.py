@@ -276,7 +276,12 @@ def test_useful_local_data_pack_registers_searches_through_chat_and_revocation_r
     assert _understanding(response).get("selected_capability_id") == "pack.library-export-search.search", response
     assert response["setup"].get("result"), response
     assert json.loads(response["setup"]["result"])["match_count"] == 1
-    _apply_central(runtime, "external_pack.revoke", {"pack_id": "library-export-search"})
+    revoke_preview = _chat(runtime, "revoke this skill's file access", user="alice", thread="alice:t")
+    assert _understanding(revoke_preview).get("selected_capability_id") == "packs.manage", revoke_preview
+    assert revoke_preview["setup"].get("type") == "action_confirmation_required"
+    assert revoke_preview["setup"].get("action_type") == "external_pack.revoke"
+    revoked = _chat(runtime, "yes", user="alice", thread="alice:t")
+    assert revoked["setup"].get("mutated") is True, revoked
     assert runtime.orchestrator()._capability_registry.get("pack.library-export-search.search") is None
 
 
@@ -299,6 +304,54 @@ def test_update_activation_is_atomic_and_exact_rollback_restores_reviewed_versio
     assert comparison[0] and comparison[1]["result"]["authority_changed"]
     rolled = _apply_capability_api(runtime, "rollback", {"record_id": old_rid})["record"]
     assert rolled["active"] and not runtime.orchestrator().pack_capability_status(new_rid)["active"]
+
+
+def test_pack_lifecycle_controls_are_reachable_through_natural_chat_and_exact_confirmation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGENT_EXTERNAL_PACKS_DIR", str(tmp_path / "external"))
+    runtime = _runtime(tmp_path, perception_roots=(str(tmp_path),))
+    rid, capability_id = _make_usable(runtime, _write_pack(tmp_path / "chat-pack", pack_id="chat-doubler"))
+
+    preview = _chat(runtime, "could u disable the chat doubler skill please", user="alice", thread="alice:pack-admin")
+    assert _understanding(preview).get("selected_capability_id") == "packs.manage", preview
+    assert preview["setup"]["type"] == "pack_capability_mutation_preview"
+    assert runtime.orchestrator()._capability_registry.get(capability_id) is not None
+
+    unrelated = _chat(runtime, "what model are you using now", user="alice", thread="alice:pack-admin")
+    assert _understanding(unrelated).get("selected_capability_id") == "models.inventory", unrelated
+    assert runtime.orchestrator()._capability_registry.get(capability_id) is not None
+
+    applied = _chat(runtime, "yes", user="alice", thread="alice:pack-admin")
+    assert applied["setup"]["type"] == "pack_capability_mutation_applied", applied
+    assert runtime.orchestrator().pack_capability_status(rid)["enabled"] is False
+    assert runtime.orchestrator()._capability_registry.get(capability_id) is None
+
+
+def test_pack_update_diff_and_rollback_are_truthful_chat_controls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGENT_EXTERNAL_PACKS_DIR", str(tmp_path / "external"))
+    runtime = _runtime(tmp_path, perception_roots=(str(tmp_path),))
+    old_rid, capability_id = _make_usable(runtime, _write_pack(tmp_path / "chat-v1", pack_id="chat-update"))
+    newer = _write_pack(tmp_path / "chat-v2", pack_id="chat-update", version="2.0.0", wat='(module (func (export "invoke") (param i32) (result i32) local.get 0 i32.const 3 i32.mul))')
+    new_rid = _apply_capability_gate(runtime, "import", {"source_dir": str(newer)})["record"]["record_id"]
+    _apply_capability_gate(runtime, "gate", {"record_id": new_rid, "gate": "review_approved", "value": True})
+    _apply_capability_gate(runtime, "gate", {"record_id": new_rid, "gate": "grants", "value": ["pure_compute"]})
+    _apply_capability_gate(runtime, "gate", {"record_id": new_rid, "gate": "enabled", "value": True})
+    _apply_capability_api(runtime, "activate", {"record_id": new_rid})
+
+    comparison = _chat(runtime, "what changed in the chat update skill?", user="alice", thread="alice:update")
+    assert _understanding(comparison).get("selected_capability_id") == "packs.manage", comparison
+    assert comparison["setup"].get("comparison", {}).get("authority_changed") is True
+
+    short_followup = _chat(runtime, "is there an update?", user="alice", thread="alice:update")
+    assert _understanding(short_followup).get("selected_capability_id") == "packs.manage", short_followup
+    assert short_followup["setup"].get("comparison", {}).get("authority_changed") is True
+
+    preview = _chat(runtime, "roll back that skill to the prior reviewed version", user="alice", thread="alice:update")
+    assert preview["setup"]["type"] == "pack_capability_mutation_preview", preview
+    assert runtime.orchestrator().pack_capability_status(new_rid)["active"] is True
+    applied = _chat(runtime, "yes", user="alice", thread="alice:update")
+    assert applied["setup"]["type"] == "pack_capability_mutation_applied", applied
+    assert runtime.orchestrator().pack_capability_status(old_rid)["active"] is True
+    assert runtime.orchestrator()._capability_registry.get(capability_id) is not None
 
 
 def _png_header(width: int, height: int) -> bytes:
@@ -351,6 +404,7 @@ def test_remote_capability_archive_uses_central_confirmation_and_stops_at_review
     monkeypatch.setattr(api_server_module, "RemotePackFetcher", lambda *_args, **_kwargs: fetcher)
     result = _apply_central(runtime, "external_pack.fetch", {"source": {"url": url, "kind": "generic_archive_url"}})
     assert result["fetched_to_quarantine"] and result["imported_for_review"]
+    assert result["record"]["record_id"] and result["record"]["pack_id"] == "remote-health"
     row = runtime.orchestrator().pack_capability_status()
     assert len(row["packs"]) == 1
     recorded = row["packs"][0]

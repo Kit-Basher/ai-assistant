@@ -102,6 +102,7 @@ PY_COMPILE_TARGETS: tuple[str, ...] = (
     "agent/packs/brokers.py",
     "agent/packs/draft_builder.py",
     "scripts/pack_acquisition_broker_proof.py",
+    "scripts/wp5_browser_candidate_smoke.py",
 )
 
 def _pytest_command(test_nodes: tuple[str, ...]) -> tuple[str, ...]:

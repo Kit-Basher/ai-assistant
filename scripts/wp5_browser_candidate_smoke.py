@@ -15,6 +15,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--expect-visualizer", action="store_true")
     args = parser.parse_args()
     chrome = os.environ.get("BROWSER_UI_CHROME") or "/usr/bin/google-chrome"
     checks: list[dict[str, object]] = []
@@ -31,8 +32,11 @@ def main() -> int:
         page.locator(".admin-nav-group-buttons").get_by_role("button", name="Packs", exact=True).click(timeout=10_000)
         page.get_by_role("heading", name="Find, fetch, or create a skill").wait_for(timeout=10_000)
         body = page.locator("body").inner_text(timeout=5_000)
-        checks.append({"name": "normal_user_pack_flow", "passed": all(text in body for text in ("Preview quarantine fetch", "Preview assistant-created draft", "Presence visualizer"))})
+        checks.append({"name": "normal_user_pack_flow", "passed": all(text in body for text in ("Search configured catalogs", "Preview quarantine fetch", "Preview assistant-created draft", "Presence visualizer"))})
+        checks.append({"name": "catalog_search_accessible", "passed": page.get_by_label("What capability do you need?").count() == 1 and page.get_by_role("button", name="Search configured catalogs").count() == 1})
         checks.append({"name": "reduced_motion_context", "passed": page.evaluate("matchMedia('(prefers-reduced-motion: reduce)').matches") is True})
+        if args.expect_visualizer:
+            checks.append({"name": "active_visualizer_core_render", "passed": page.get_by_role("img", name="thinking presence animation preview").count() == 1})
         checks.append({"name": "no_pack_supplied_script_surface", "passed": page.locator("iframe, object, embed").count() == 0})
         context.close()
         browser.close()

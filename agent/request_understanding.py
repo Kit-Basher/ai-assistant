@@ -322,7 +322,11 @@ def _semantic_domain_boost(capability_id: str, tokens: set[str]) -> float:
         or has_fuzzy("pack", "packs", "skill", "skills")
         or (has("capability", "capabilities") and has("add", "install", "import"))
     )
-    if capability_id == "packs.manage" and pack_domain and has("add", "import", "install", "approve", "enable", "disable", "remove", "delete", "grant"):
+    if capability_id == "packs.manage" and pack_domain and (has(
+        "add", "import", "install", "approve", "enable", "disable", "remove", "delete",
+        "grant", "revoke", "rollback", "update", "changed", "compare", "inspect", "activate",
+        "access", "permission", "permissions",
+    ) or (has("roll") and has("back"))):
         score += 0.44
     telegram_domain = has("telegram", "messaging", "poller", "bot") or has_fuzzy("telegram", "messaging", "poller")
     if capability_id == "telegram.status" and telegram_domain and has("status", "health", "working", "connected", "running", "operational", "connection"):
@@ -610,7 +614,26 @@ def _structured_capability_inputs(
     elif capability_id == "memory.manage":
         result["memory_operation"] = next((name for name in ("forget", "delete", "export", "redact", "cleanup", "disable", "enable", "reset") if name in tokens), "status")
     elif capability_id == "packs.manage":
-        result["pack_operation"] = next((name for name in ("import", "install", "approve", "enable", "disable", "remove", "grant") if name in tokens), "install" if "add" in tokens else "inspect")
+        operation_aliases = (
+            ("rollback", {"rollback", "revert"}),
+            ("revoke", {"revoke"}),
+            ("remove", {"remove", "delete"}),
+            ("disable", {"disable", "off"}),
+            ("activate", {"activate"}),
+            ("enable", {"enable", "on"}),
+            ("approve", {"approve", "review"}),
+            ("grant", {"grant"}),
+            ("compare", {"compare", "changed", "difference", "diff"}),
+            ("update", {"update", "newer"}),
+            ("import", {"import"}),
+            ("install", {"install", "add"}),
+        )
+        result["pack_operation"] = (
+            "rollback"
+            if {"roll", "back"} <= tokens
+            else next((operation for operation, markers in operation_aliases if tokens & markers), "inspect")
+        )
+        result["pack_query"] = normalized
         path_match = _LOCAL_PATH_RE.search(original)
         if path_match:
             result["pack_path"] = str(path_match.group("path") or "").strip().rstrip(".\"'`")
@@ -882,6 +905,21 @@ class RequestUnderstandingService:
         semantic_surface = _LOCAL_PATH_RE.sub(" ", original)
         query = _features(semantic_surface)
         semantic_tokens = _with_inflection_variants(set(normalized.split()))
+        if (
+            (referenced_context_id == "packs.manage" or referenced_context_id.startswith("pack."))
+            and (
+                semantic_tokens & {
+                    "approve", "enable", "disable", "activate", "remove", "delete", "revoke",
+                    "rollback", "revert", "update", "changed", "compare", "grant", "permission",
+                    "permissions", "access", "inspect",
+                }
+                or {"roll", "back"} <= semantic_tokens
+            )
+        ):
+            # A short same-thread lifecycle follow-up retains the preceding
+            # pack domain, while the action itself is still selected by the
+            # live registry and validated by the lifecycle controller.
+            semantic_tokens.add("pack")
         if _LOCAL_PATH_RE.search(original):
             # A path is a typed filesystem argument. Preserve that domain
             # signal after removing its spelling from the similarity vector.
@@ -950,6 +988,12 @@ class RequestUnderstandingService:
                 # generic native status/search capability. This is derived
                 # from registry vectors and is not a pack-name phrase table.
                 score += min(0.24, 0.08 * max(0, overlap_count - 1) + 0.10 * sequence_overlap_count)
+                if semantic_tokens & {
+                    "approve", "enable", "disable", "activate", "remove", "delete", "revoke",
+                    "rollback", "revert", "update", "changed", "compare", "grant", "permission",
+                    "permissions", "access",
+                }:
+                    score *= 0.18
             if (
                 definition.capability_id == "assistant.presence"
                 and boost == 0.0
@@ -959,7 +1003,11 @@ class RequestUnderstandingService:
                 score *= 0.15
             if (
                 definition.capability_id == "packs.manage"
-                and not semantic_tokens & {"add", "import", "install", "approve", "enable", "disable", "remove", "delete", "grant"}
+                and not (semantic_tokens & {
+                    "add", "import", "install", "approve", "enable", "disable", "remove", "delete",
+                    "grant", "revoke", "rollback", "revert", "update", "changed", "compare", "inspect", "activate",
+                    "access", "permission", "permissions",
+                } or {"roll", "back"} <= semantic_tokens)
             ):
                 score *= 0.16
             if definition.capability_id == "assistant.capabilities" and boost == 0.0:

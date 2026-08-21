@@ -8,12 +8,15 @@ import os
 import shutil
 import socket
 import statistics
+import struct
 import subprocess
 import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+import zlib
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +37,15 @@ def timing_summary(values: list[float]) -> dict[str, float | int]:
     ordered = sorted(values)
     index = max(0, min(len(ordered) - 1, int((len(ordered) - 1) * 0.95)))
     return {"samples": len(ordered), "median_ms": round(statistics.median(ordered), 3), "p95_ms": round(ordered[index], 3)}
+
+
+def tiny_sprite_png() -> bytes:
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+
+    header = struct.pack(">IIBBBBB", 2, 1, 8, 6, 0, 0, 0)
+    raster = b"\x00" + b"\x00\x80\xff\xff" + b"\x00\xff\x80\xff"
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(raster)) + chunk(b"IEND", b"")
 
 
 def request(base: str, method: str, path: str, payload: dict[str, Any] | None = None, timeout: float = 30.0) -> tuple[int, dict[str, Any], float]:
@@ -87,6 +99,23 @@ def confirm_capability_mutation(base: str, action: str, payload: dict[str, Any])
     return status, applied
 
 
+def make_record_usable(base: str, record: dict[str, Any]) -> tuple[bool, list[dict[str, Any]]]:
+    record_id = str(record.get("record_id") or "")
+    status, snapshot, _ = request(base, "GET", "/packs/capabilities")
+    full_record = next(
+        (row for row in ((snapshot.get("result") or {}).get("packs") or []) if str(row.get("record_id") or "") == record_id),
+        record,
+    ) if status == 200 else record
+    requested = list(((full_record.get("lifecycle") or {}).get("requested_permissions") or []))
+    outcomes: list[dict[str, Any]] = []
+    for gate, value in (("review_approved", True), ("grants", requested), ("enabled", True)):
+        if gate == "grants" and not requested:
+            continue
+        status, body = confirm_capability_mutation(base, "gate", {"record_id": record_id, "gate": gate, "value": value})
+        outcomes.append({"gate": gate, "status": status, "ok": bool(body.get("ok"))})
+    return bool(record_id) and all(row["status"] == 200 and row["ok"] for row in outcomes), outcomes
+
+
 def wait_ready(base: str, timeout: float = 40.0) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     last: dict[str, Any] = {}
@@ -125,6 +154,7 @@ def start(port: int, state: Path, log: Path, *, selected_model: str) -> subproce
         "PERSONAL_AGENT_INSTANCE": "dev",
         "PERSONAL_AGENT_RUNTIME_ROOT": str(ROOT),
         "AGENT_WEBUI_DIST_PATH": str(ROOT / "agent" / "webui" / "dist"),
+        "PERCEPTION_ROOTS": str(state),
         "PERSONAL_AGENT_GIT_COMMIT_OVERRIDE": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         "PYTHONUNBUFFERED": "1",
     })
@@ -150,6 +180,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", default="build/reports/wp45-isolated-candidate.json")
     parser.add_argument("--latency-samples", type=int, default=20)
+    parser.add_argument("--wp5-remote-reference-url", default="")
     args = parser.parse_args()
     results: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(prefix="personal-agent-wp45-") as raw:
@@ -222,6 +253,36 @@ def main() -> int:
             })
             status, after_preview, _ = request(base, "GET", "/packs/capabilities")
             results.append({"name": "remote_preview_zero_pack_mutation", "passed": status == 200 and int(((after_preview.get("result") or {}).get("count") or 0)) == before_pack_count})
+            if args.wp5_remote_reference_url:
+                remote_status, remote_created = confirm_central_pack_mutation(
+                    base,
+                    "fetch",
+                    {"source": {"url": args.wp5_remote_reference_url, "kind": "github_archive" if "github.com" in args.wp5_remote_reference_url else "generic_archive_url"}},
+                )
+                remote_record = remote_created.get("record") if isinstance(remote_created.get("record"), dict) else {}
+                remote_ready, remote_gates = make_record_usable(base, remote_record)
+                remote_chat_status, remote_chat, _ = chat(base, "use the reference health helper to inspect this machine", "remote-pack-use")
+                remote_selected = str((((remote_chat.get("setup") or {}).get("request_understanding") or {}).get("selected_capability_id") or ""))
+                remote_rid = str(remote_record.get("record_id") or "")
+                remote_disable_status, _ = confirm_capability_mutation(base, "gate", {"record_id": remote_rid, "gate": "enabled", "value": False})
+                remote_remove_status, _ = confirm_capability_mutation(base, "remove", {"record_id": remote_rid, "private_data": "delete"})
+                results.append({
+                    "name": "workflow_a_remote_acquisition",
+                    "passed": (
+                        remote_status == 200
+                        and remote_created.get("fetched_to_quarantine") is True
+                        and remote_created.get("imported_for_review") is True
+                        and remote_ready
+                        and remote_chat_status == 200
+                        and remote_selected.startswith("pack.reference-health.")
+                        and remote_disable_status == 200
+                        and remote_remove_status == 200
+                    ),
+                    "gates": remote_gates,
+                    "selected": remote_selected,
+                })
+            else:
+                results.append({"name": "workflow_a_remote_acquisition", "passed": False, "error": "--wp5-remote-reference-url is required for exact-candidate remote proof"})
             status, created = confirm_central_pack_mutation(base, "create", {"template": "declarative_native", "name": "WP5 Isolated Report", "capability_id": "system.status"})
             record = created.get("record") if isinstance(created.get("record"), dict) else {}
             record_id = str(record.get("record_id") or "")
@@ -234,6 +295,86 @@ def main() -> int:
             status, pack_chat, _ = chat(base, "please use the WP5 isolated report", "pack-use")
             selected = str((((pack_chat.get("setup") or {}).get("request_understanding") or {}).get("selected_capability_id") or ""))
             results.append({"name": "dynamic_pack_chat_invocation", "passed": status == 200 and selected == "pack.wp5-isolated-report.report" and bool((pack_chat.get("setup") or {}).get("result")), "status": status, "selected": selected, "message": str(pack_chat.get("message") or "")[:500]})
+
+            # Workflow B: a real exact-file grant, bounded derived index,
+            # restart-persistent search, then immediate revocation.
+            fixture = state / "library-export.json"
+            fixture.write_text(json.dumps([{"title": "Dune", "author": "Frank Herbert"}, {"title": "Hyperion", "author": "Dan Simmons"}]), encoding="utf-8")
+            local_status, local_created = confirm_central_pack_mutation(base, "create", {"template": "local_data_search", "name": "Isolated Library Search"})
+            local_record = local_created.get("record") if isinstance(local_created.get("record"), dict) else {}
+            local_ready, local_gates = make_record_usable(base, local_record)
+            adapter = {"kind": "local_file_import", "purpose": "build a bounded private search index", "allowed_extensions": [".json"], "max_file_size_mb": 8, "path_policy": "user_selected_file_only", "stores_local_index": True, "network_allowed": False}
+            grant_status, _ = confirm_central_pack_mutation(base, "grant", {"pack_id": "isolated-library-search", "adapter": adapter, "requested_path": str(fixture)})
+            index_status, indexed = confirm_central_pack_mutation(base, "index", {"pack_id": "isolated-library-search", "record_id": str(local_record.get("record_id") or "")})
+            search_status, search_body, _ = chat(base, "find Dune in my isolated library export", "local-data")
+            local_selected = str((((search_body.get("setup") or {}).get("request_understanding") or {}).get("selected_capability_id") or ""))
+            raw_fixture_leaked = fixture.read_bytes() in (state / "agent.db").read_bytes()
+            stop(proc)
+            proc = start(port, state, log, selected_model=selected_model)
+            wait_ready(base)
+            restart_search_status, restart_search, _ = chat(base, "search the isolated library export for Hyperion", "local-data-restart")
+            revoke_status, _ = confirm_central_pack_mutation(base, "revoke", {"pack_id": "isolated-library-search"})
+            denied_status, denied_search, _ = chat(base, "find Dune in my isolated library export", "local-data-denied")
+            local_remove_status, _ = confirm_capability_mutation(base, "remove", {"record_id": str(local_record.get("record_id") or ""), "private_data": "delete"})
+            results.append({
+                "name": "workflow_b_local_data_search",
+                "passed": (
+                    local_status == 200 and local_ready and grant_status == 200 and index_status == 200
+                    and search_status == 200 and local_selected == "pack.isolated-library-search.search"
+                    and "Dune" in str((search_body.get("setup") or {}).get("result") or "")
+                    and restart_search_status == 200 and "Hyperion" in str((restart_search.get("setup") or {}).get("result") or "")
+                    and revoke_status == 200 and local_remove_status == 200 and not raw_fixture_leaked
+                    and not bool((denied_search.get("setup") or {}).get("result"))
+                ),
+                "gates": local_gates,
+                "indexed": bool(indexed.get("mutated")),
+                "selected": local_selected,
+                "revoked_status": revoke_status,
+                "post_revoke_status": denied_status,
+                "raw_fixture_leaked": raw_fixture_leaked,
+            })
+
+            # Workflow C: core-rendered raster metadata only. The browser
+            # smoke runs while this exact visualizer is active.
+            sprite = state / "presence-sprite.png"
+            sprite.write_bytes(tiny_sprite_png())
+            visual_status, visual_created = confirm_central_pack_mutation(base, "create", {
+                "template": "presence_visualizer", "name": "Isolated Presence", "asset_path": str(sprite),
+                "frame_width": 1, "frame_height": 1,
+                "animations": {"idle": {"frames": [0], "frame_duration_ms": 300, "loop": True}, "thinking": {"frames": [0, 1], "frame_duration_ms": 120, "loop": True}},
+            })
+            visual_record = visual_created.get("record") if isinstance(visual_created.get("record"), dict) else {}
+            visual_ready, visual_gates = make_record_usable(base, visual_record)
+            visual_http, visual_truth, _ = request(base, "GET", "/packs/visualizer")
+            results.append({"name": "workflow_c_visualizer_runtime", "passed": visual_status == 200 and visual_ready and visual_http == 200 and visual_truth.get("available") is True and visual_truth.get("scripts_allowed") is False and visual_truth.get("remote_requests") is False, "gates": visual_gates})
+
+            # Workflow E: stage v2, compare exact authority, invalidate a
+            # stale activation preview, activate atomically, then roll back.
+            v1_status, v1_created = confirm_central_pack_mutation(base, "create", {"template": "declarative_native", "name": "Isolated Versioned Report", "pack_id": "isolated-versioned-report", "version": "1.0.0", "description": "Version one report", "capability_id": "system.status"})
+            v1 = v1_created.get("record") if isinstance(v1_created.get("record"), dict) else {}
+            v1_ready, _ = make_record_usable(base, v1)
+            v2_status, v2_created = confirm_central_pack_mutation(base, "create", {"template": "declarative_native", "name": "Isolated Versioned Report", "pack_id": "isolated-versioned-report", "version": "2.0.0", "description": "Version two reviewed report", "capability_id": "models.inventory"})
+            v2 = v2_created.get("record") if isinstance(v2_created.get("record"), dict) else {}
+            v2_ready, _ = make_record_usable(base, v2)
+            compare_status, compared, _ = request(base, "GET", f"/packs/capabilities/compare?from={urllib.parse.quote(str(v1.get('record_id') or ''))}&to={urllib.parse.quote(str(v2.get('record_id') or ''))}")
+            scoped = {"record_id": str(v2.get("record_id") or ""), "actor_id": "wp5-isolated", "session_id": "wp5-isolated", "thread_id": "wp5-isolated"}
+            stale_status, stale_preview, _ = request(base, "POST", "/packs/capabilities/activate/plan", scoped)
+            _gate_status, _gate_body = confirm_capability_mutation(base, "gate", {"record_id": str(v2.get("record_id") or ""), "gate": "enabled", "value": False})
+            stale_plan = stale_preview.get("plan") if isinstance(stale_preview.get("plan"), dict) else {}
+            stale_apply_status, _stale_apply, _ = request(base, "POST", "/packs/capabilities/activate/apply", {"plan_id": stale_plan.get("plan_id"), "binding_digest": stale_plan.get("binding_digest"), "confirmed": True, **{key: scoped[key] for key in ("actor_id", "session_id", "thread_id")}})
+            confirm_capability_mutation(base, "gate", {"record_id": str(v2.get("record_id") or ""), "gate": "enabled", "value": True})
+            activate_status, _ = confirm_capability_mutation(base, "activate", {"record_id": str(v2.get("record_id") or "")})
+            rollback_status, _ = confirm_capability_mutation(base, "rollback", {"record_id": str(v1.get("record_id") or "")})
+            _, version_snapshot, _ = request(base, "GET", "/packs/capabilities")
+            final_v1 = next((item for item in ((version_snapshot.get("result") or {}).get("packs") or []) if str(item.get("record_id") or "") == str(v1.get("record_id") or "")), {})
+            results.append({"name": "workflow_e_update_rollback", "passed": v1_status == 200 and v2_status == 200 and v1_ready and v2_ready and compare_status == 200 and bool((compared.get("result") or {}).get("authority_changed")) and stale_status == 200 and stale_apply_status == 400 and activate_status == 200 and rollback_status == 200 and bool(final_v1.get("active"))})
+
+            # Workflow F: the production chat planner must create one durable
+            # mixed native/pack task rather than a hidden pack workflow.
+            mixed_status, mixed_body, _ = chat(base, "list every installed model; then use the WP5 isolated report", "mixed-task")
+            mixed_task = (mixed_body.get("setup") or {}).get("task") if isinstance((mixed_body.get("setup") or {}).get("task"), dict) else {}
+            mixed_steps = mixed_task.get("steps") if isinstance(mixed_task.get("steps"), list) else []
+            results.append({"name": "workflow_f_mixed_wp3_task", "passed": mixed_status == 200 and {str(step.get("capability_id") or "") for step in mixed_steps} >= {"models.inventory", "pack.wp5-isolated-report.report"} and all(str(step.get("verifier_status") or "") == "pass" for step in mixed_steps), "state": mixed_task.get("state"), "steps": [step.get("capability_id") for step in mixed_steps]})
             pack_timings: list[float] = []
             pack_latency_ok = True
             for sample in range(10):
@@ -244,7 +385,7 @@ def main() -> int:
             browser_python = ROOT / ".venv-browser/bin/python"
             browser_output = temp / "browser.json"
             browser = subprocess.run(
-                [str(browser_python), "scripts/wp5_browser_candidate_smoke.py", "--base-url", base, "--output", str(browser_output)],
+                [str(browser_python), "scripts/wp5_browser_candidate_smoke.py", "--base-url", base, "--output", str(browser_output), "--expect-visualizer"],
                 cwd=ROOT,
                 check=False,
                 capture_output=True,
@@ -255,10 +396,17 @@ def main() -> int:
             results.append({"name": "browser_pack_ui", "passed": browser.returncode == 0 and int((browser_report.get("summary") or {}).get("failed") or 0) == 0, "summary": browser_report.get("summary") or {}, "error": browser.stderr[-500:]})
             disable_status, _disabled = confirm_capability_mutation(base, "gate", {"record_id": record_id, "gate": "enabled", "value": False})
             remove_status, removed = confirm_capability_mutation(base, "remove", {"record_id": record_id, "private_data": "delete"})
+            visual_disable_status, _ = confirm_capability_mutation(base, "gate", {"record_id": str(visual_record.get("record_id") or ""), "gate": "enabled", "value": False})
+            visual_remove_status, _ = confirm_capability_mutation(base, "remove", {"record_id": str(visual_record.get("record_id") or ""), "private_data": "delete"})
+            version_remove_statuses = [
+                confirm_capability_mutation(base, "remove", {"record_id": str(item.get("record_id") or ""), "private_data": "delete"})[0]
+                for item in (v2, v1)
+            ]
+            _, visual_fallback, _ = request(base, "GET", "/packs/visualizer")
             status, final_packs, _ = request(base, "GET", "/packs/capabilities")
             results.append({
                 "name": "disable_remove_authority_cleanup",
-                "passed": disable_status == 200 and remove_status == 200 and bool(removed.get("ok")) and status == 200 and int(((final_packs.get("result") or {}).get("count") or 0)) == before_pack_count,
+                "passed": disable_status == 200 and remove_status == 200 and bool(removed.get("ok")) and visual_disable_status == 200 and visual_remove_status == 200 and all(code == 200 for code in version_remove_statuses) and visual_fallback.get("available") is False and status == 200 and int(((final_packs.get("result") or {}).get("count") or 0)) == before_pack_count,
                 "disable_status": disable_status,
                 "remove_status": remove_status,
                 "removed": removed,

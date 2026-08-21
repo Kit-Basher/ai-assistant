@@ -54,6 +54,29 @@ An update is a new quarantine/version record. A bounded diff covers source, arch
 
 The canonical pack status API exposes candidate classification, sanitized provenance, lifecycle checklist, access/data flow, health, self-test, verifier, last bounded invocation and one next safe action. Mutation endpoints are thin adapters to the central preview/confirmation controller. Chat uses unified understanding and the acquisition coordinator; it never adds a phrase router. Telegram uses the same actor/session/thread-bound plans or reports the mutation unavailable. The Web UI renders the same records, escaped and bounded, with candidate search, quarantine/review, grants, enablement, update diff, rollback/revoke/remove, and optional visualizer controls. Browser state is never authority.
 
+The completion audit makes those claims executable end to end. Once
+`packs.manage` is selected, structured lifecycle inputs resolve an exact live
+pack/version; they do not reclassify ordinary intent. Inspection, update status,
+and version comparison are read-only. Approval, grants, enable/disable,
+activation, rollback, removal, and broker revocation produce exactly one
+actor/session/thread-bound preview and one confirmation. A short same-thread
+follow-up such as “is there an update?” retains the preceding pack context, but
+an unrelated message neither advances nor cancels a pending mutation. Remote
+fetch responses expose only a bounded dynamic-record identity so the next review
+gate can be completed without leaking quarantine paths or hostile documents.
+
+The normal-user Skills view queries only enabled, policy-allowed configured
+metadata sources and labels cache age/staleness. It separately supports an exact
+HTTPS/GitHub source, assistant draft preview, version diff, activation/rollback,
+broker revocation, removal, and reduced-motion visualizer preview. No listing or
+status render performs a remote fetch.
+
+Exact-candidate proof uses an immutable minimal reference artifact at Git commit
+`96e290cf0981b6986da4b5c7cc0b35b9a8db1949`. The reference commit contains only
+one declarative manifest and is test evidence, not a bundled or live-installed
+capability. The isolated workflow removes it and every generated pack/grant/index
+before exit.
+
 ## Security, recovery and explicit exclusions
 
 Foreign content cannot approve itself, select capabilities, expand grants, alter plans, supply verifier truth or claim completion. Broker results and remote content are tainted and never become prompts or authority automatically. In-flight mutations are reconcile-first; unknown outcomes do not retry. Revocation/update/restart causes exact binding revalidation before any queued task continues.
