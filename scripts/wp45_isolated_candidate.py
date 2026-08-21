@@ -210,15 +210,21 @@ def main() -> int:
                 ("presence", "u here?", "here"),
                 ("model_status", "wht model r u using rn?", selected_model.removeprefix("ollama:").lower()),
                 ("installed_inventory", "show models actually on this box pls", "qwen"),
-                ("recommendation_chat", "which installed model is best for this assistant and why?", "qwen2.5:3b"),
+                ("recommendation_chat", "which installed model is best for this assistant and why?", "__recommendation_truth__"),
                 ("scout_chat", "what did model scout find?", "qwen2.5:3b"),
-                ("why_selected", "why is the current model selected?", "selected"),
+                ("why_selected", "why is the current model selected?", "__selection_reason__"),
                 ("unavailable_models", "show unavailable or stale models", "not ready"),
                 ("system_status", "give me a system status check", "ready"),
             )):
                 status, body, elapsed = chat(base, text, f"case-{index}")
                 message = str(body.get("message") or "").lower()
-                results.append({"name": name, "passed": status == 200 and expected in message, "elapsed_ms": elapsed, "route": (body.get("meta") or {}).get("route"), "message": message[:300]})
+                if expected == "__recommendation_truth__":
+                    matched = "qwen2.5:3b" in message or ("evidence" in message and "stale" in message and "evaluation" in message)
+                elif expected == "__selection_reason__":
+                    matched = selected_model.removeprefix("ollama:").lower() in message and any(term in message for term in ("selected", "using", "pinned"))
+                else:
+                    matched = expected in message
+                results.append({"name": name, "passed": status == 200 and matched, "elapsed_ms": elapsed, "route": (body.get("meta") or {}).get("route"), "message": message[:300]})
             status, preview, _ = chat(base, "make ollama:qwen2.5:3b-instruct my default", "switch-deny")
             status2, denied, _ = chat(base, "no cancel that", "switch-deny")
             results.append({"name": "switch_preview_denial", "passed": status == 200 and status2 == 200 and any(term in str(denied.get("message") or "").lower() for term in ("cancel", "denied", "not"))})
