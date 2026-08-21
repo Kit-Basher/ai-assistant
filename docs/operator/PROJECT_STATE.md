@@ -5,9 +5,9 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Version: `v0.2.22` (Work Package 5 completion-audit release candidate)
+- Version: `v0.2.23` (Work Package 5 completion-audit release candidate)
 - Baseline: completed WP4.5 commit `26fd8cdb8f66f5bf4e8295e6c56fb3eb8caa6055`
-- Promoted live runtime before this candidate: `v0.2.21`
+- Promoted live runtime before the final candidate: `v0.2.22` (superseded after a live zero-pack update-status check returned an inappropriate HTTP 400; no state mutation occurred)
 - Capability truth: the live registry plus
   `config/native_capabilities.json`, enforced by
   `scripts/native_capability_proof.py`

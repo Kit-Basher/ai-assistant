@@ -18,7 +18,7 @@ in BotFather, update the Personal Agent secret store, and restart
 the embedded Telegram poller in `personal-agent-api.service`.
 
 ## Current Product Truth
-Current release candidate: v0.2.22 (Work Package 5 closure). It preserves the existing authorization,
+Current release candidate: v0.2.23 (Work Package 5 closure). It preserves the existing authorization,
 Telegram, memory, filesystem, model-management, pack, and Web UI foundations
 while adding a bounded, durable plan-act-verify coordinator above the live
 capability registry. Simple requests retain the direct WP1/WP2 path; substantial

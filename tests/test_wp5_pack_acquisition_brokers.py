@@ -326,6 +326,16 @@ def test_pack_lifecycle_controls_are_reachable_through_natural_chat_and_exact_co
     assert runtime.orchestrator()._capability_registry.get(capability_id) is None
 
 
+def test_pack_update_question_with_zero_external_packs_is_grounded_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGENT_EXTERNAL_PACKS_DIR", str(tmp_path / "external"))
+    runtime = _runtime(tmp_path, perception_roots=(str(tmp_path),))
+    response = _chat(runtime, "is there an update for an installed skill pack?", user="alice", thread="alice:none")
+    assert _understanding(response).get("selected_capability_id") == "packs.manage", response
+    assert response["setup"].get("count") == 0
+    assert response["setup"].get("mutated") is False
+    assert "no external capability-pack versions" in str(response.get("message") or "").lower()
+
+
 def test_pack_update_diff_and_rollback_are_truthful_chat_controls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AGENT_EXTERNAL_PACKS_DIR", str(tmp_path / "external"))
     runtime = _runtime(tmp_path, perception_roots=(str(tmp_path),))

@@ -1310,6 +1310,19 @@ class Orchestrator:
     ) -> OrchestratorResponse:
         row, error = self._resolve_pack_capability_record_for_chat(text, operation=operation)
         if row is None:
+            if operation in {"inspect", "update", "compare"} and error and "no external capability-pack versions" in error.lower():
+                message = (
+                    "There are no external capability-pack versions installed, so there is no installed pack update or version diff to show. "
+                    "Configured catalog discovery remains metadata-only and no artifact was fetched."
+                    if operation in {"update", "compare"}
+                    else "There are no external capability-pack versions installed or usable in this runtime."
+                )
+                return self._runtime_truth_response(
+                    text=message,
+                    route="pack_lifecycle",
+                    used_tools=["pack_capability_store"],
+                    payload={"type": "pack_capability_status", "operation": operation, "count": 0, "mutated": False, "summary": message},
+                )
             return self._runtime_truth_response(
                 text=error or "Choose the exact pack version first.",
                 route="pack_lifecycle",
