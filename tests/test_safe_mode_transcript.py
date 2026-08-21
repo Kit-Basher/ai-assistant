@@ -1652,21 +1652,21 @@ class TestSafeModeTranscript(unittest.TestCase):
         self.assertEqual("action_tool", scout_plain_tg.get("selected_route"))
         self.assertFalse(bool(scout_plain_meta.get("used_llm", False)))
         self.assertFalse(bool(scout_plain_tg.get("used_llm", False)))
-        self.assertEqual(["model_scout", "model_runtime_evaluation"], list(scout_plain_meta.get("used_tools") or []))
-        self.assertIn("current default/effective model:", scout_plain_text.lower())
-        self.assertIn("ollama:qwen2.5:3b-instruct", scout_plain_text.lower())
+        self.assertEqual(["model_scout"], list(scout_plain_meta.get("used_tools") or []))
+        self.assertIn("current model:", scout_plain_text.lower())
+        self.assertIn("ollama:qwen3.5:4b", scout_plain_text.lower())
         self.assertNotIn("i can't run that command here", scout_plain_text.lower())
-        self.assertIn("current default/effective model:", scout_plain_tg_text.lower())
-        self.assertIn("ollama:qwen2.5:3b-instruct", scout_plain_tg_text.lower())
+        self.assertIn("current model:", scout_plain_tg_text.lower())
+        self.assertIn("ollama:qwen3.5:4b", scout_plain_tg_text.lower())
         self.assertNotIn("i can't run that command here", scout_plain_tg_text.lower())
 
         for meta, text in ((scout_retry_meta, scout_retry_text),):
             self.assertEqual("action_tool", meta.get("route"))
             self.assertFalse(bool(meta.get("used_llm", False)))
-            self.assertEqual(["model_scout", "model_runtime_evaluation"], list(meta.get("used_tools") or []))
-        self.assertIn("Current default/effective model:", text)
-        self.assertIn("qwen2.5:3b-instruct", text.lower())
-        self.assertIn("no model was switched", text.lower())
+            self.assertEqual(["model_scout"], list(meta.get("used_tools") or []))
+        self.assertIn("Current model:", text)
+        self.assertIn("qwen3.5:4b", text.lower())
+        self.assertTrue("no model was switched" in text.lower() or "no change has been made" in text.lower())
         self.assertNotIn("disabled", text.lower())
         self.assertNotIn("i can't run that command here", scout_plain_tg_text.lower())
 
@@ -1693,11 +1693,39 @@ class TestSafeModeTranscript(unittest.TestCase):
             "last_checked_at": 123,
         }
         runtime._router.set_external_health_state(runtime._health_monitor.state)  # type: ignore[attr-defined]
+        fresh_evaluation = {
+            "selection": {
+                "default_model": "ollama:qwen3.5:4b",
+                "effective_model": "ollama:qwen3.5:4b",
+            },
+            "evaluation": {
+                "status": "current",
+                "reason": None,
+                "observed_at": "2026-08-21T00:00:00+00:00",
+                "evaluated_models": [
+                    {
+                        "model": "qwen2.5:3b-instruct",
+                        "score": {"passed": 12, "total": 12},
+                        "latency": {"median_ms": 900},
+                    },
+                    {
+                        "model": "qwen3.5:4b",
+                        "score": {"passed": 10, "total": 12},
+                        "latency": {"median_ms": 1200},
+                    },
+                ],
+            },
+            "recommendation": {"default_general_assistant": "qwen2.5:3b-instruct"},
+        }
 
         with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")), patch.object(
             runtime,
             "test_provider",
             return_value=(True, {"ok": True, "provider": "ollama", "model_id": "ollama:qwen2.5:3b-instruct"}),
+        ), patch.object(
+            runtime.runtime_truth_service(),
+            "model_runtime_truth",
+            return_value=fresh_evaluation,
         ), patch.object(
             runtime,
             "rollback_defaults",

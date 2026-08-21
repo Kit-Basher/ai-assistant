@@ -132,7 +132,7 @@ class TestChatBehaviorAudit(unittest.TestCase):
             "what can you do": ("capability_policy", ("preview-and-approval", "show a bounded preview")),
             "install a skill that lets you browse": ("action_tool", ("browser", "preview")),
             "fix yourself": ("runtime_status", ("diagnostics", "code changes")),
-            "use the best local model": ("action_tool", ("model", "confirmation")),
+            "use the best local model": ("action_tool", ("evaluation", "default")),
             "do you remember what we were doing": ("agent_memory", ("saved", "runtime context")),
             "my computer is slow": ("operational_status", ("ram", "load")),
             "open the app": ("assistant_capabilities", ("personal agent", "127.0.0.1")),
