@@ -654,7 +654,15 @@ def _structured_capability_inputs(
         elif tokens & {"web", "search", "searxng"} and tokens & {"start", "restart", "setup", "configure", "enable"}:
             result["lifecycle_operation"] = "managed_search_start"
         else:
-            operation = next((name for name in ("backup", "restore", "update", "cleanup", "uninstall", "repair") if name in tokens), "support" if "support" in tokens else "repair")
+            # Treat the ordinary phrasal verb "back up" as the same structured
+            # lifecycle operation as the noun/verb "backup". This belongs in
+            # typed input extraction after registry selection; it does not
+            # create a competing phrase router or grant mutation authority.
+            operation = (
+                "backup"
+                if "backup" in tokens or {"back", "up"} <= tokens
+                else next((name for name in ("restore", "update", "cleanup", "uninstall", "repair") if name in tokens), "support" if "support" in tokens else "repair")
+            )
             result["lifecycle_operation"] = f"operator_{operation}_preview" if operation != "support" else "operator_support_bundle_preview"
     return result
 

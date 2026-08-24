@@ -101,6 +101,17 @@ def test_normal_user_onboarding_never_requires_shell_or_config_editing() -> None
         assert "open " in public
 
 
+def test_phrasal_backup_request_reaches_exact_operator_backup_preview(runtime: AgentRuntime) -> None:
+    response = _chat(runtime, "Could you back up the assistant for recovery?", thread="wp6-backup-phrasal")
+    understanding = _understanding(response)
+    setup = response.get("setup") if isinstance(response.get("setup"), dict) else {}
+    plan = setup.get("canonical_plan") if isinstance(setup.get("canonical_plan"), dict) else setup.get("plan") if isinstance(setup.get("plan"), dict) else {}
+    assert understanding.get("selected_capability_id") == "operator.lifecycle"
+    assert setup.get("requires_confirmation") is True
+    assert plan.get("action_type") == "operator.backup"
+    assert plan.get("executor_status") == "enabled"
+
+
 def test_diagnostics_export_uses_real_route_and_redacts_hostile_secrets(runtime: AgentRuntime) -> None:
     runtime.audit_log.append(actor="Bearer wp6-secret-token", action="password=wp6", decision="deny", reason="Authorization: Basic abc", params={"api_key": "should-not-appear"}, dry_run=True, outcome="blocked", error_kind=None, duration_ms=1)
     handler = _Handler(runtime, {}, path="/diagnostics/export")

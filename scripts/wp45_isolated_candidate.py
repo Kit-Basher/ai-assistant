@@ -264,11 +264,12 @@ def main() -> int:
             diagnostics_status, diagnostics, diagnostics_ms = request(base, "GET", "/diagnostics/export")
             diagnostics_text = json.dumps(diagnostics, sort_keys=True).lower()
             results.append({"name": "diagnostics_export", "passed": diagnostics_status == 200 and str((diagnostics.get("bundle") or {}).get("schema_version") or "") == "personal-agent.diagnostics.v1" and "bearer secret" not in diagnostics_text, "elapsed_ms": diagnostics_ms})
-            backup_preview_status, _backup_preview, _ = chat(base, "back up Personal Agent", "portable-backup")
+            backup_preview_status, backup_preview, _ = chat(base, "Back up assistant", "portable-backup")
             backup_apply_status, backup_apply, backup_ms = chat(base, "yes", "portable-backup")
             backup_message = str(backup_apply.get("message") or "")
             portable_archives = list((state / "backups").glob("personal-agent-backup-*-portable-v2.tar.gz"))
-            results.append({"name": "portable_backup_chat", "passed": backup_preview_status == 200 and backup_apply_status == 200 and "portable recovery archive" in backup_message.lower() and len(portable_archives) == 1, "elapsed_ms": backup_ms, "archive_count": len(portable_archives)})
+            backup_setup = backup_apply.get("setup") if isinstance(backup_apply.get("setup"), dict) else {}
+            results.append({"name": "portable_backup_chat", "passed": backup_preview_status == 200 and bool((backup_preview.get("setup") or {}).get("requires_confirmation")) and backup_apply_status == 200 and "portable recovery archive" in backup_message.lower() and len(portable_archives) == 1, "elapsed_ms": backup_ms, "archive_count": len(portable_archives), "message": backup_message[:500], "error_kind": backup_apply.get("error_kind"), "result_error": (backup_setup.get("result") or {}).get("error_code") if isinstance(backup_setup.get("result"), dict) else None})
             status, ui, ui_ms = request(base, "GET", "/")
             results.append({"name": "web_ui", "passed": status == 200 and "Personal Agent" in str(ui.get("_text") or ""), "elapsed_ms": ui_ms})
             status, before_packs, _ = request(base, "GET", "/packs/capabilities")
@@ -420,7 +421,7 @@ def main() -> int:
                 timeout=60,
             )
             browser_report = json.loads(browser_output.read_text(encoding="utf-8")) if browser_output.is_file() else {}
-            results.append({"name": "browser_pack_ui", "passed": browser.returncode == 0 and int((browser_report.get("summary") or {}).get("failed") or 0) == 0, "summary": browser_report.get("summary") or {}, "error": browser.stderr[-500:]})
+            results.append({"name": "browser_pack_ui", "passed": browser.returncode == 0 and int((browser_report.get("summary") or {}).get("failed") or 0) == 0, "summary": browser_report.get("summary") or {}, "checks": browser_report.get("checks") or [], "error": browser.stderr[-500:]})
             disable_status, _disabled = confirm_capability_mutation(base, "gate", {"record_id": record_id, "gate": "enabled", "value": False})
             remove_status, removed = confirm_capability_mutation(base, "remove", {"record_id": record_id, "private_data": "delete"})
             visual_disable_status, _ = confirm_capability_mutation(base, "gate", {"record_id": str(visual_record.get("record_id") or ""), "gate": "enabled", "value": False})
