@@ -1834,13 +1834,14 @@ class Orchestrator:
         )
         add(
             "models.scout",
-            "inspect Model Scout recommendations and model upgrade candidates",
+            "investigate newly announced or discovered model candidates and inspect Model Scout recommendations",
             (
                 "find the best model for coding and research",
                 "check whether a better local model is available",
                 "show the model recommendation strategy",
                 "scan candidate models with model scout",
                 "which model should be used for chat",
+                "investigate a newly announced language model candidate",
             ),
             group="model_scout",
         )

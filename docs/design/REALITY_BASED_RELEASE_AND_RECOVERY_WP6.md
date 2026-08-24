@@ -1,6 +1,6 @@
 # Reality-based release and recovery (WP6)
 
-Status: implementation design for the v0.2.24 pre-reinstall gate.
+Status: implementation design for the v0.2.25 pre-reinstall gate.
 
 WP6 does not add a second assistant, capability registry, approval system, or
 installer.  It makes the assembled WP1-WP5 product prove itself through the

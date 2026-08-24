@@ -88,7 +88,10 @@ def _failure_warnings(label: str, first_line: str, text: str, ok: bool) -> list[
         warnings.append("raw dump")
     if any(token in lowered for token in ("need more context", "does not exist", "i can't", "i cannot", "couldn't complete", "no discovery sources are enabled")):
         warnings.append("dead-end wording")
-    if label == "hardware" and not any(token in lowered for token in ("ram", "vram")):
+    if label == "hardware" and not (
+        any(token in lowered for token in ("ram", "memory"))
+        and any(token in lowered for token in ("vram", "gpu"))
+    ):
         warnings.append("missing ram/vram answer")
     if label == "runtime":
         if not any(token in lowered for token in ("runtime", "ready", "health")):

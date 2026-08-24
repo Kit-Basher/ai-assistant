@@ -256,6 +256,10 @@ def _semantic_domain_boost(capability_id: str, tokens: set[str]) -> float:
         "active", "current", "using", "configured", "setup", "installed", "available", "ready", "answering", "inventory", "status", "health"
     ) or (has("why") and has("switch"))
     model_recommendation_signal = has("best", "better", "stronger", "worth", "recommend", "recommendation", "should", "upgrade", "candidate")
+    model_candidate_investigation_signal = (
+        has("investigate", "research", "explore", "examine")
+        or (has("look") and has("into"))
+    ) and has("new", "newly", "announced", "released", "candidate")
     provider_guidance_signal = has("gpu", "vram", "hardware", "debian") and has("provider", "setup", "support", "llama", "ollama")
     if model_domain and capability_id == "models.inventory" and not model_recommendation_signal and (model_inventory_signal or has("local", "cloud") or {"set", "up"}.issubset(tokens)):
         score += 0.40 if (has("provider", "providers", "openrouter", "ollama") or has_fuzzy("provider", "providers", "openrouter", "ollama")) and (has("status", "health") or has_fuzzy("status", "health")) else 0.24
@@ -264,6 +268,8 @@ def _semantic_domain_boost(capability_id: str, tokens: set[str]) -> float:
     if model_domain and capability_id == "models.inventory" and has("install", "acquire", "download", "pull") and has("can", "could", "available", "support"):
         score += 0.44
     if model_domain and capability_id == "models.scout" and (has("scout") or has_fuzzy("scout")):
+        score += 0.40
+    elif model_domain and capability_id == "models.scout" and model_candidate_investigation_signal:
         score += 0.40
     elif model_domain and capability_id == "models.scout" and has("discover", "discovery", "catalog", "hugging", "huggingface"):
         score += 0.34
@@ -551,7 +557,11 @@ def _structured_capability_inputs(
             else:
                 remote_role = "cheap_cloud"
             result["scout_role"] = remote_role
-        if tokens & {"discover", "discovery", "catalog", "download", "hugging", "huggingface"} or (
+        candidate_investigation = (
+            tokens & {"investigate", "research", "explore", "examine"}
+            or ({"look", "into"} <= tokens)
+        ) and bool(tokens & {"new", "newly", "announced", "released", "candidate"})
+        if tokens & {"discover", "discovery", "catalog", "download", "hugging", "huggingface"} or candidate_investigation or (
             "scout" in tokens and tokens & {"new", "upgrade"}
         ):
             result["scout_view"] = "discovery"

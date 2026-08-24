@@ -242,6 +242,23 @@ def main() -> int:
                 else:
                     matched = expected in message
                 results.append({"name": name, "passed": status == 200 and matched, "elapsed_ms": elapsed, "route": (body.get("meta") or {}).get("route"), "message": message[:300]})
+            discovery_status, discovery_body, discovery_ms = chat(
+                base,
+                "Could you investigate a recently announced compact Orion model?",
+                "model-discovery",
+            )
+            discovery_understanding = ((discovery_body.get("setup") or {}).get("request_understanding") or {})
+            results.append({
+                "name": "indirect_model_discovery",
+                "passed": (
+                    discovery_status == 200
+                    and discovery_understanding.get("selected_capability_id") == "models.scout"
+                    and (discovery_body.get("meta") or {}).get("route") == "action_tool"
+                    and not bool((discovery_body.get("meta") or {}).get("generic_fallback_used"))
+                ),
+                "elapsed_ms": discovery_ms,
+                "selected": discovery_understanding.get("selected_capability_id"),
+            })
             status, preview, _ = chat(base, "make ollama:qwen2.5:3b-instruct my default", "switch-deny")
             status2, denied, _ = chat(base, "no cancel that", "switch-deny")
             results.append({"name": "switch_preview_denial", "passed": status == 200 and status2 == 200 and any(term in str(denied.get("message") or "").lower() for term in ("cancel", "denied", "not"))})
