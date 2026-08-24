@@ -259,6 +259,28 @@ def main() -> int:
                 "elapsed_ms": discovery_ms,
                 "selected": discovery_understanding.get("selected_capability_id"),
             })
+            resource_status, resource_body, resource_ms = chat(
+                base,
+                "can you do a quick system check and see if anything is eating ram?",
+                "resource-observation",
+            )
+            resource_understanding = ((resource_body.get("setup") or {}).get("request_understanding") or {})
+            resource_message = str(resource_body.get("message") or "").lower()
+            results.append({
+                "name": "resource_observation_domain_and_evidence",
+                "passed": (
+                    resource_status == 200
+                    and resource_understanding.get("selected_capability_id") == "system.status"
+                    and (resource_understanding.get("structured_inputs") or {}).get("status_scope") == "observe"
+                    and (resource_body.get("meta") or {}).get("route") == "operational_status"
+                    and "used:" in resource_message
+                    and "available:" in resource_message
+                    and ("baseline" in resource_message or "usual" in resource_message)
+                ),
+                "elapsed_ms": resource_ms,
+                "selected": resource_understanding.get("selected_capability_id"),
+                "status_scope": (resource_understanding.get("structured_inputs") or {}).get("status_scope"),
+            })
             status, preview, _ = chat(base, "make ollama:qwen2.5:3b-instruct my default", "switch-deny")
             status2, denied, _ = chat(base, "no cancel that", "switch-deny")
             results.append({"name": "switch_preview_denial", "passed": status == 200 and status2 == 200 and any(term in str(denied.get("message") or "").lower() for term in ("cancel", "denied", "not"))})
