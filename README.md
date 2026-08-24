@@ -18,7 +18,7 @@ in BotFather, update the Personal Agent secret store, and restart
 the embedded Telegram poller in `personal-agent-api.service`.
 
 ## Current Product Truth
-Current release candidate: v0.2.23 (Work Package 5 closure). It preserves the existing authorization,
+Current release candidate: v0.2.24 (Work Package 6 pre-reinstall gate). It preserves the existing authorization,
 Telegram, memory, filesystem, model-management, pack, and Web UI foundations
 while adding a bounded, durable plan-act-verify coordinator above the live
 capability registry. Simple requests retain the direct WP1/WP2 path; substantial
@@ -31,6 +31,14 @@ an advisory-only recommendation, and removes synchronous readiness probes from
 deterministic chat delivery. See
 [`docs/design/SAFE_PACK_ACQUISITION_BROKERS_WP5.md`](docs/design/SAFE_PACK_ACQUISITION_BROKERS_WP5.md). Release tags are not
 created automatically by audit tooling.
+
+WP6 adds a layered reality-based release proof, normal-user redacted
+diagnostics, UI-first onboarding recovery language, an allowlisted portable
+backup/isolated restore contract, lifecycle and Ubuntu 24.04 preflight proof,
+and an independent security/dependency review. The physical fresh Ubuntu
+install/restore/upgrade/rollback journey has not yet occurred, so the honest
+status is **pre-reinstall gate**, not full WP6 completion. See
+[`docs/design/REALITY_BASED_RELEASE_AND_RECOVERY_WP6.md`](docs/design/REALITY_BASED_RELEASE_AND_RECOVERY_WP6.md).
 
 The user interacts with the assistant layer. The assistant interprets intent,
 asks the agent layer for grounded runtime/tool facts or bounded action results

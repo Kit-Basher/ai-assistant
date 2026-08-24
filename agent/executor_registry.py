@@ -43,6 +43,11 @@ from .primary_uninstall_policy import (
     validate_primary_uninstall_marker,
 )
 from .skill_pack_permissions import SkillGrantStore, build_skill_identity
+from .portable_backup import (
+    BACKUP_CONTRACT as PORTABLE_BACKUP_CONTRACT,
+    create_backup as create_portable_backup,
+    validate_backup as validate_portable_backup,
+)
 
 
 SUPPORT_BUNDLE_SCHEMA_VERSION = "support_bundle.v2"
@@ -3587,7 +3592,27 @@ def create_additive_backup(plan: dict[str, Any], action: dict[str, Any]) -> dict
             "user_message": "Backup v1 did not finish. I did not write a final manifest or verify a usable backup.",
             "details": {"artifact_path": str(root), "partial": True, "error": exc.__class__.__name__},
         }
-    resources = [str(root / name) for name in included_files]
+    portable_path = backup_root / f"{root.name}-portable-v2.tar.gz"
+    try:
+        create_portable_backup(Path.home(), portable_path)
+        portable_validation = validate_portable_backup(portable_path)
+        if not portable_validation.ok:
+            raise ValueError(f"portable_backup_validation_failed:{portable_validation.error}")
+    except Exception as exc:
+        portable_path.unlink(missing_ok=True)
+        resources = [str(root / name) for name in included_files]
+        return {
+            "ok": False,
+            "mutated": True,
+            "executor_id": "operator.backup.v1",
+            "resources_touched": resources,
+            "rollback_available": True,
+            "rollback_hint": f"Remove only the incomplete Backup v1 directory: {root}",
+            "error_code": "portable_backup_v2_failed",
+            "user_message": "The portable backup did not pass integrity checks. I preserved the bounded Backup v1 evidence but did not claim a usable recovery archive.",
+            "details": {"artifact_path": str(root), "portable_contract": PORTABLE_BACKUP_CONTRACT, "error": exc.__class__.__name__},
+        }
+    resources = [str(root / name) for name in included_files] + [str(portable_path)]
     return {
         "ok": True,
         "mutated": True,
@@ -3596,10 +3621,18 @@ def create_additive_backup(plan: dict[str, Any], action: dict[str, Any]) -> dict
         "rollback_available": True,
         "rollback_hint": f"Remove only the newly created backup directory: {root}",
         "user_message": (
-            f"Backup v1 created at {root}. It contains redacted summaries and durable authorization receipts. "
-            "Restore v1 can apply allowlisted preferences and merge authorization history without replaying operations."
+            f"Backup created and verified. The portable recovery archive is {portable_path}; its machine-bound secrets are excluded and must be re-entered after restore. "
+            f"The companion Backup v1 evidence is at {root} and preserves bounded authorization receipts."
         ),
-        "details": {"artifact_path": str(root), "files": included_files, "manifest_path": str(root / "manifest.json")},
+        "details": {
+            "artifact_path": str(root),
+            "files": included_files,
+            "manifest_path": str(root / "manifest.json"),
+            "portable_archive_path": str(portable_path),
+            "portable_contract": PORTABLE_BACKUP_CONTRACT,
+            "portable_file_count": len(portable_validation.files),
+            "portable_secrets_require_reentry": True,
+        },
     }
 
 

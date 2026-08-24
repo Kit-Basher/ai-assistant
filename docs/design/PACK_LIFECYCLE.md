@@ -11,7 +11,9 @@ Canonical external pack format: [`docs/design/EXTERNAL_PACK_FORMAT.md`](/home/c/
 
 `agent/packs/source_approval.py` retains offline preview/test primitives. Product source catalog and query-policy writes are separate centrally authorized operations; the legacy assistant confirmation is denied.
 
-`agent/packs/source_fetch_preview.py` now fails closed with `remote_pack_fetch_stage_unimplemented_denied`. It cannot preview or apply a product fetch, including through stale assistant follow-ups.
+`agent/packs/source_fetch_preview.py` remains a compatibility preview helper.
+The WP5 acquisition controller owns exact-authorized HTTPS/GitHub quarantine
+fetch; stale assistant follow-ups cannot bypass its source/digest binding.
 
 `agent/packs/lifecycle_actions.py` performs gated lifecycle continuations. It accepts a `PackLifecycleResult`, validates that the requested action matches the current state, and then calls an existing safe handler for exactly one transition. It refuses mismatched states, blocked/removed packs, missing handlers, and attempts to skip directly across review, enablement, configuration, or permission gates.
 
@@ -38,11 +40,15 @@ Canonical external pack format: [`docs/design/EXTERNAL_PACK_FORMAT.md`](/home/c/
 
 External packs are never bundled native abilities. Starter catalogs are discoverable sources only, not active capabilities.
 
-Remote external pack sources are hostile by default. Source policy permits metadata queries only. GitHub repositories, archives, generic archive URLs, and catalog entries cannot be acquired by the current product path.
+Remote external pack sources are hostile by default. Source policy permits
+metadata queries only; an exact, expiring confirmation may separately fetch a
+supported HTTPS/GitHub artifact into quarantine. Fetch is not content trust or
+any later lifecycle gate.
 
 Safe web-search source leads remain untrusted advisory metadata. Recording catalog/query policy does not permit fetch or preview into quarantine.
 
-Future quarantine fetch/import-for-review must remain separate from source policy, pack review approval, enablement, grants, and installation. It is currently unavailable.
+Quarantine fetch/import-for-review remains separate from source policy, pack
+review approval, enablement, grants, registration, and invocation.
 
 `agent/packs/review_state_ux.py` renders the mandatory review-state checkpoint for imported candidates. Before approval continuation, assistant responses must show that the pack is imported for review only, not approved, not enabled, has no permissions granted, is not usable yet, and requires review/approval next. Review-state output is based on structured metadata and lifecycle results only; it must not dump raw imported documents, manifests, catalog entries, prompt material, secrets, private paths, or hostile text.
 
@@ -52,7 +58,14 @@ Enablement is also a separate explicit gate after review approval. The first con
 
 Configuration and permission are separate from enablement. For managed adapters, the assistant first shows the permission/configuration requirement, including adapter kind, scope, allowed file types, whether a local path is involved, and the remaining lifecycle gate. A later scoped grant preview is required before recording metadata/config. Recording a permission/configuration grant does not execute code, invoke a managed adapter, read or parse private files, or use the pack. If the lifecycle becomes `usable=true` after the grant, the assistant reports readiness and asks for the next specific input or action instead of running automatically.
 
-Approved source policy is not content trust. Catalog listings are validated with a strict schema, unknown or execution-implying fields are rejected, remote URLs must be HTTPS, local catalog paths must stay inside approved catalog roots, and catalog prose is untrusted metadata. Remote archive acquisition is denied. Offline hostile-archive tests retain the quarantine extraction proof for traversal, links, special files, hidden files, nested archives, executable bits, duplicate paths, size/count/expansion bounds, and post-write containment required by any future fetch stage.
+Approved source policy is not content trust. Catalog listings are validated
+with a strict schema, unknown or execution-implying fields are rejected,
+remote URLs must be HTTPS, local catalog paths must stay inside approved
+catalog roots, and catalog prose is untrusted metadata. Remote archive
+acquisition is exact-confirmed and quarantine-only. Production transport and
+hostile-archive tests enforce certificate/DNS/peer/redirect/SSRF, traversal,
+link, special-file, nested archive, executable, collision,
+size/count/expansion, cleanup, and post-write containment boundaries.
 
 Imported pack documents are untrusted guidance, never assistant authority. Normalized imported `SKILL.md` and prompt material are wrapped with an internal warning that runtime/system policy wins over pack text. Strong prompt-injection patterns in primary instruction files, including requests to ignore system/developer instructions, leak secrets, auto-approve/auto-enable, run shell or dependency installs, or disable safety gates, block the import and require manual rewrite/review.
 
@@ -93,13 +106,21 @@ Each confirmation advances at most one gate:
 - permission preview + confirmation: record metadata/config only; do not invoke adapters or use the pack.
 - `usable` + `use_if_usable`: show a managed adapter invocation preview first; only the following explicit confirmation runs the named core-owned adapter operation.
 
-The action controller does not add arbitrary external code execution, OAuth, browser scraping, transcript fetching, network fetching, or private file reads. Local-file permission remains metadata-only until a later explicitly scoped adapter implementation reads or indexes content.
+The action controller does not add arbitrary external code execution, OAuth,
+browser scraping, transcript fetching, or unrestricted networking/filesystem
+access. WP5 core-owned brokers provide exact-file bounded text/JSON/CSV/HTML
+input, pack-private structured state, reviewed public HTTPS GET/HEAD, and a
+declarative raster visualizer. Guests never receive host authority.
 
 ## Managed Adapter Invocation
 
 Invocation is separate from lifecycle continuation. Lifecycle says whether a pack has passed gates; lifecycle actions move one gate at a time; managed adapter invocation performs approved core adapter operations only after the pack is usable.
 
-Current generic operations are `validate_grant`, `describe_capability`, and `dry_run`. `local_file_import` is only the first minimal adapter implementation behind that generic contract. Its `dry_run` confirms the selected file still exists and still matches extension/size policy. It does not read, parse, index, or search private file contents; it does not parse Google Takeout, search history, fetch transcripts, upload data, or store an index.
+Compatibility operations `validate_grant`, `describe_capability`, and `dry_run`
+remain bounded. The current selected-file/private-store broker can build and
+query a minimal private index for the reviewed local-data workflow. It cannot
+scan directories, read unsupported/sensitive files, upload private data, or
+combine private input with outbound network access.
 
 Invocation is never automatic after permission grant. A user must ask for a specific adapter operation, the assistant must preview what will run, and only a follow-up confirmation runs that core-owned operation. If the user asks for content reading, searching, or indexing before a core-owned operation exists, the assistant must say that the pack is enabled and permissioned but that safe content-read/search operation is not implemented yet.
 

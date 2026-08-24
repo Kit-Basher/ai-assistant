@@ -1,6 +1,6 @@
 {
   "schema": "personal-agent.mutation-file-classification.v2b",
-  "reviewed_count": 178,
+  "reviewed_count": 183,
   "required_fields": [
     "path",
     "disposition",
@@ -600,21 +600,6 @@
       "confirmation_requirements": "scope-bound and single-use when mutating",
       "rollback_scope": "declared by plan/executor receipt",
       "audit_evidence": "manual review of mutation_plan.py: implements or invokes the canonical authorization boundary",
-      "contract_identity": "not_applicable"
-    },
-    {
-      "path": "agent/onboarding_contract.py",
-      "disposition": "read_only",
-      "capability": "read.inspect",
-      "entry_point": "module API / probe",
-      "actor": "runtime or user read request",
-      "target_resources": "observed runtime/file/provider state",
-      "mutation_type": "none (scanner match is probe, literal, or secret read)",
-      "policy_path": "read-only; no mutation authorization",
-      "executor": "none",
-      "confirmation_requirements": "none",
-      "rollback_scope": "none",
-      "audit_evidence": "manual review of onboarding_contract.py: matched calls do not change managed state",
       "contract_identity": "not_applicable"
     },
     {
@@ -2673,6 +2658,21 @@
       "contract_identity": "personal-agent.pack-acquisition.v1"
     },
     {
+      "path": "agent/portable_backup.py",
+      "disposition": "central_executor_primitive",
+      "capability": "backup.create portable recovery artifact",
+      "entry_point": "confirmation-gated operator.backup executor and read-only validator",
+      "actor": "bound local user/operator",
+      "target_resources": "one allowlisted archive under the approved Personal Agent backup root or one explicit isolated restore target",
+      "mutation_type": "additive archive creation or staged conflict-safe isolated restore",
+      "policy_path": "exact backup confirmation, fixed allowlist, SQLite online backup, archive integrity and version validation",
+      "executor": "operator.backup.v1 through personal-agent.portable-backup.v2",
+      "confirmation_requirements": "backup creation uses the existing exact operator backup confirmation; validation is read-only",
+      "rollback_scope": "remove only the newly created archive; isolated restore refuses conflicting files",
+      "audit_evidence": "portable archive, SQLite/WAL, secret exclusion, corruption, version, conflict, and idempotency proof",
+      "contract_identity": "personal-agent.portable-backup.v2"
+    },
+    {
       "path": "scripts/pack_acquisition_broker_proof.py",
       "disposition": "offline_tool",
       "capability": "developer.wp5_release_proof",
@@ -2686,6 +2686,81 @@
       "rollback_scope": "ignored build report and temporary fixtures only",
       "audit_evidence": "WP5 per-category proof totals, sensitivity matrix, and redaction check",
       "contract_identity": "personal-agent.pack-proof.v1"
+    },
+    {
+      "path": "scripts/ubuntu_recovery_preflight.py",
+      "disposition": "offline_tool",
+      "capability": "developer.wp6_recovery_preflight",
+      "entry_point": "explicit command-line preflight",
+      "actor": "release operator",
+      "target_resources": "generated redacted WP6 preflight report under build/reports",
+      "mutation_type": "bounded proof report generation",
+      "policy_path": "not imported by runtime; read-only host probes and one ignored report",
+      "executor": "script-owned preflight runner",
+      "confirmation_requirements": "explicit operator command",
+      "rollback_scope": "ignored build report only",
+      "audit_evidence": "WP6 Ubuntu dependency and installer syntax preflight",
+      "contract_identity": "personal-agent.ubuntu-recovery-preflight.v1"
+    },
+    {
+      "path": "scripts/webui_dependency_audit.py",
+      "disposition": "offline_tool",
+      "capability": "developer.wp6_webui_dependency_audit",
+      "entry_point": "canonical release gate",
+      "actor": "release operator",
+      "target_resources": "npm advisory metadata and one redacted report under build/reports",
+      "mutation_type": "bounded proof report generation",
+      "policy_path": "runs npm audit read-only; it does not install or update dependencies",
+      "executor": "script-owned npm audit report adapter",
+      "confirmation_requirements": "explicit canonical release command",
+      "rollback_scope": "ignored build report only",
+      "audit_evidence": "WP6 dependency audit must report zero unresolved advisories",
+      "contract_identity": "personal-agent.webui-dependency-audit.v1"
+    },
+    {
+      "path": "scripts/wp6_gate_sensitivity.py",
+      "disposition": "offline_tool",
+      "capability": "developer.wp6_gate_sensitivity",
+      "entry_point": "canonical release gate",
+      "actor": "release operator",
+      "target_resources": "generated WP6 sensitivity report and temporary defect-overlay invocations",
+      "mutation_type": "bounded proof report generation",
+      "policy_path": "defect overlays require WP6_SENSITIVITY and cannot make a normal gate pass",
+      "executor": "script-owned canonical-gate sensitivity runner",
+      "confirmation_requirements": "explicit canonical release command",
+      "rollback_scope": "ignored build report only",
+      "audit_evidence": "sixteen actual canonical-gate rejection cases followed by clean pass",
+      "contract_identity": "personal-agent.wp6-gate-sensitivity.v1"
+    },
+    {
+      "path": "scripts/wp6_release_proof.py",
+      "disposition": "offline_tool",
+      "capability": "developer.wp6_release_proof",
+      "entry_point": "canonical release gate",
+      "actor": "release operator",
+      "target_resources": "commit/diff-bound WP6 JSON/text reports and temporary test state",
+      "mutation_type": "bounded proof report generation and isolated test orchestration",
+      "policy_path": "not imported by shipping runtime; exact requirements manifest and isolated tests",
+      "executor": "script-owned layered proof runner",
+      "confirmation_requirements": "explicit canonical release command",
+      "rollback_scope": "ignored build reports and temporary fixtures only",
+      "audit_evidence": "WP6 layer, journey, safety, backup, lifecycle, and redaction evidence",
+      "contract_identity": "personal-agent.wp6-release-proof.v1"
+    },
+    {
+      "path": "scripts/wp6_state_audit.py",
+      "disposition": "offline_tool",
+      "capability": "developer.wp6_state_audit",
+      "entry_point": "explicit pre/post release evidence command",
+      "actor": "release operator",
+      "target_resources": "one redacted state-audit report under build/reports",
+      "mutation_type": "bounded proof report generation",
+      "policy_path": "read-only API, SQLite, git, filesystem metadata, and systemd status probes",
+      "executor": "script-owned state evidence collector",
+      "confirmation_requirements": "explicit release operator command",
+      "rollback_scope": "ignored build report only",
+      "audit_evidence": "hash-only secrets, count-only conversations, SQLite integrity, exact runtime and policy truth",
+      "contract_identity": "personal-agent.wp6-state-audit.v1"
     }
   ]
 }

@@ -34,6 +34,11 @@ def main() -> int:
         body = page.locator("body").inner_text(timeout=5_000)
         checks.append({"name": "normal_user_pack_flow", "passed": all(text in body for text in ("Search configured catalogs", "Preview quarantine fetch", "Preview assistant-created draft", "Presence visualizer"))})
         checks.append({"name": "catalog_search_accessible", "passed": page.get_by_label("What capability do you need?").count() == 1 and page.get_by_role("button", name="Search configured catalogs").count() == 1})
+        diagnostics_group = page.locator("summary", has_text="Diagnostics")
+        if diagnostics_group.get_attribute("aria-expanded") != "true":
+            diagnostics_group.click(timeout=10_000)
+        page.get_by_role("button", name="Diagnostics & recovery", exact=True).click(timeout=10_000)
+        checks.append({"name": "normal_user_diagnostics_export", "passed": page.get_by_role("button", name="Export redacted diagnostics", exact=True).count() == 1})
         checks.append({"name": "reduced_motion_context", "passed": page.evaluate("matchMedia('(prefers-reduced-motion: reduce)').matches") is True})
         if args.expect_visualizer:
             checks.append({"name": "active_visualizer_core_render", "passed": page.get_by_role("img", name="thinking presence animation preview").count() == 1})

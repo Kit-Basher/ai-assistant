@@ -156,7 +156,7 @@ def _mode_failure_context(mode: str) -> dict[str, Any]:
             "kind": "confirm_token_expired",
             "subject": "Telegram token",
             "reason": "The token is missing or invalid.",
-            "next_step": "Run: python -m agent.secrets set telegram:bot_token",
+            "next_step": "Open Setup > Basics, add your Telegram bot token, then choose Save and test.",
         }
     if normalized == RECOVERY_LLM_UNAVAILABLE:
         return {

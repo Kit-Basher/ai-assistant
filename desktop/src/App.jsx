@@ -1786,9 +1786,9 @@ export default function App() {
 
   const exportSupportBundle = async () => {
     setSupportBusy(true);
-    setSupportStatus("Exporting support bundle...");
+    setSupportStatus("Exporting redacted diagnostics...");
     try {
-      const result = await request("GET", "/llm/support/bundle");
+      const result = await request("GET", "/diagnostics/export");
       const bundle = result.bundle || {};
       setSupportBundlePreview(bundle);
       const rendered = JSON.stringify(bundle, null, 2);
@@ -1806,18 +1806,18 @@ export default function App() {
         const url = window.URL.createObjectURL(blob);
         const anchor = document.createElement("a");
         anchor.href = url;
-        anchor.download = "personal-agent-support-bundle.json";
+        anchor.download = "personal-agent-diagnostics.json";
         document.body.appendChild(anchor);
         anchor.click();
         document.body.removeChild(anchor);
         window.URL.revokeObjectURL(url);
       }
-      setSupportStatus(copied ? "Support bundle copied to clipboard." : "Support bundle downloaded.");
-      appendLog({ endpoint: "/llm/support/bundle", ok: true, detail: copied ? "copied" : "downloaded" });
+      setSupportStatus(copied ? "Redacted diagnostics copied to clipboard." : "Redacted diagnostics downloaded.");
+      appendLog({ endpoint: "/diagnostics/export", ok: true, detail: copied ? "copied" : "downloaded" });
     } catch (error) {
       const detail = asErrorText(error);
-      setSupportStatus(`Support bundle export failed: ${detail}`);
-      appendLog({ endpoint: "/llm/support/bundle", ok: false, detail });
+      setSupportStatus(`Diagnostics export failed: ${detail}`);
+      appendLog({ endpoint: "/diagnostics/export", ok: false, detail });
     } finally {
       setSupportBusy(false);
     }
@@ -2078,8 +2078,8 @@ export default function App() {
     },
     {
       id: "operations",
-      label: "Operations",
-      group: "Developer/operator tools",
+      label: "Diagnostics & recovery",
+      group: "Diagnostics",
       content: (
         <OperationsTab
           autopilotBootstrapBusy={autopilotBootstrapBusy}

@@ -223,6 +223,7 @@ from agent.public_chat import (
     build_public_sentence_text,
     normalize_public_assistant_text,
 )
+from agent.portable_backup import BACKUP_CONTRACT as PORTABLE_BACKUP_CONTRACT, validate_backup as validate_portable_backup
 from agent.skills.system_health_analyzer import build_system_health_report
 from agent.skills.system_health import collect_system_health
 from agent.skills.system_health_summary import render_system_health_summary
@@ -19793,6 +19794,22 @@ class Orchestrator:
                 "mutated": False,
                 "warnings": ["Path is outside approved Personal Agent backup locations; no files were read."],
             }
+        if path.is_file() and (path.name.endswith(".tar.gz") or path.name.endswith(".tgz")):
+            validation = validate_portable_backup(path)
+            manifest = validation.manifest if isinstance(validation.manifest, dict) else {}
+            return {
+                "valid": bool(validation.ok),
+                "error": validation.error,
+                "path": label,
+                "schema_version": manifest.get("contract") or PORTABLE_BACKUP_CONTRACT,
+                "created_at": manifest.get("created_at_epoch"),
+                "included_files": list(validation.files),
+                "warnings": list(validation.warnings),
+                "errors": [] if validation.ok else [str(validation.error or "portable_backup_validation_failed")],
+                "portable": True,
+                "secrets_require_reentry": True,
+                "mutated": False,
+            }
         warnings: list[str] = []
         errors: list[str] = []
         if not path.is_dir():
@@ -19950,7 +19967,9 @@ class Orchestrator:
         if result.get("error") and not errors:
             lines.append(f"Reason: {result.get('error')}.")
         lines.append("Validation is read-only. I did not write files, create a restore directory, restart services, or overwrite anything.")
-        if valid:
+        if valid and result.get("portable"):
+            lines.append("This portable archive is ready for the documented recovery workflow. Secrets must be re-entered in Setup on the recovered host.")
+        elif valid:
             lines.append("To restore supported state from this backup, ask: restore from backup: <path>.")
         return self._runtime_truth_response(
             text="\n".join(lines),

@@ -52,7 +52,7 @@ class TestRuntimeContract(unittest.TestCase):
     def test_get_effective_next_action(self) -> None:
         self.assertIsNone(get_effective_next_action(runtime_mode=RUNTIME_MODE_READY, failure_code=None))
         self.assertEqual(
-            "Run: python -m agent.secrets set telegram:bot_token",
+            "Open Setup > Basics, add your Telegram bot token, then choose Save and test.",
             get_effective_next_action(runtime_mode=RUNTIME_MODE_DEGRADED, failure_code="telegram_token_missing"),
         )
         self.assertEqual(

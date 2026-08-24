@@ -67,8 +67,8 @@ class TestEndUserClosureContract(unittest.TestCase):
         self.assertIn('bash "$repo_root/scripts/build_webui.sh"', installer)
         self.assertIn("npm ci", builder)
         self.assertIn("webui_build_manifest.py", builder)
-        self.assertIn('"node_modules/@esbuild/linux-x64"', lockfile)
-        self.assertIn('"node_modules/@esbuild/win32-x64"', lockfile)
+        self.assertIn('"node_modules/@rolldown/binding-linux-x64-gnu"', lockfile)
+        self.assertIn('"node_modules/@rolldown/binding-win32-x64-msvc"', lockfile)
 
     def test_webui_live_smoke_requires_chat_first_asset_markers(self) -> None:
         good = (

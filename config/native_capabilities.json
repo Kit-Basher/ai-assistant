@@ -1,6 +1,6 @@
 {
   "schema_version": "native-capability-inventory.v1",
-  "product_version": "0.2.21",
+  "product_version": "0.2.24",
   "capabilities": [
     {"id":"assistant.presence","family":"assistant","mode":"read_only","chat":true,"proof_profile":"deterministic_read"},
     {"id":"assistant.capabilities","family":"assistant","mode":"read_only","chat":true,"proof_profile":"deterministic_read"},
@@ -64,6 +64,7 @@
     {"prefix":"/telegram","parent":"telegram.manage","disposition":"registered_native"},
     {"prefix":"/config","parent":"operator.status","disposition":"operator_only"},
     {"prefix":"/audit","parent":"operator.status","disposition":"operator_only"},
+    {"prefix":"/diagnostics","parent":"operator.status","disposition":"registered_native"},
     {"prefix":"/authorized","parent":"operator.lifecycle","disposition":"compatibility_only"},
     {"exact":"/","parent":"assistant.capabilities","disposition":"supporting_internal"}
   ],

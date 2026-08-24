@@ -5,7 +5,27 @@ This is the current-state handover doc. Product intent lives in
 `PRODUCT_RUNTIME_SPEC.md`. Treat this file as a status snapshot, not the sole
 source of truth.
 
-## WP5 candidate truth (v0.2.21)
+## WP6 pre-reinstall candidate truth (v0.2.24)
+
+- WP5 is closed at commit `71a9b54bd9ecbf0b7dca03fec9b5daac40224c12`.
+  WP6 adds a layered, registry-reconciled release proof, a separate blind
+  messy-language corpus, complete journey accounting, and actual canonical-gate
+  sensitivity checks.
+- A normal-user diagnostics export is available in the Web UI under
+  Diagnostics & recovery. It reports bounded runtime/capability/model/pack
+  health and excludes secrets, conversations, raw pack documents, prompts,
+  environment values, and private file contents.
+- The existing confirmation-gated backup action now also produces a validated
+  `personal-agent.portable-backup.v2` archive using SQLite online snapshots.
+  Machine-bound secrets and model artifacts are intentionally excluded.
+- The Web UI build toolchain is Vite 8 with zero known npm advisories at the
+  candidate audit. Ubuntu 24.04 preflight and the human recovery runbook are
+  ready, but the physical fresh-host journey has not occurred and WP6 must not
+  be called complete.
+- The only valid successful interim status is `WP6 PRE-REINSTALL GATE COMPLETE
+  - READY FOR UBUNTU RECOVERY TEST` after exact-candidate and live gates pass.
+
+## Completed WP5 truth (v0.2.23)
 
 - Missing-capability rescue can search enabled configured metadata sources, but
   never fetches automatically. Exact-confirmed supported HTTPS/GitHub artifacts

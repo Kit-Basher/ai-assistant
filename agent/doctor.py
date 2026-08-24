@@ -785,7 +785,7 @@ def _check_telegram_token(online: bool) -> DoctorCheck:
             check_id="telegram.token",
             status="WARN",
             detail_short="telegram token missing",
-            next_action="Run: python -m agent.secrets set telegram:bot_token",
+            next_action="Open Setup > Basics, add your Telegram bot token, then choose Save and test.",
         )
     detail = f"token={_token_preview(token)} source={'secret_store' if store.get_secret('telegram:bot_token') else 'env'}"
     if not online:

@@ -245,10 +245,11 @@ the project intent document, project intent wins.
 - Registry/listing metadata is untrusted input and never becomes authoritative
   pack identity.
 - Discovery cache is performance-only and remains untrusted metadata.
-- Preview is not install. Catalog content is metadata-only and is not fetched
-  or made usable by the current runtime.
-- `POST /packs/install` accepts a user-provided local text-pack directory only.
-  URL and remote archive fields fail closed before network access.
+- Preview is not install. Catalog metadata may be searched automatically, but
+  remote bytes are fetched only after an exact, expiring quarantine-only
+  authorization. Fetch never approves, grants, enables, registers, or uses.
+- Local user-supplied directories and exact-authorized HTTPS/GitHub archives
+  enter the same hostile quarantine/normalization/review boundary.
 - Ingestion order is:
   - local-directory validation and quarantine copy
   - quarantine

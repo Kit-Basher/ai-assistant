@@ -35,7 +35,7 @@ class TestRecoveryContract(unittest.TestCase):
         ready_payload = {"telegram": {"enabled": True, "configured": False, "state": "disabled_missing_token", "required": True}}
         mode = detect_recovery_mode(ready_payload=ready_payload)
         self.assertEqual(RECOVERY_TOKEN_INVALID, mode)
-        self.assertIn("telegram:bot_token", recovery_next_action(mode))
+        self.assertIn("Setup > Basics", recovery_next_action(mode))
 
     def test_telegram_disabled_optional_does_not_trigger_telegram_recovery(self) -> None:
         ready_payload = {

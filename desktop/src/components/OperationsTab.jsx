@@ -405,7 +405,7 @@ export default function OperationsTab({
         </div>
         <div className="row-actions">
           <button disabled={supportBusy} onClick={exportSupportBundle}>
-            {supportBusy ? "Working..." : "Export Support Bundle"}
+            {supportBusy ? "Working..." : "Export redacted diagnostics"}
           </button>
           <button
             disabled={supportBusy || !normalizeSupportTarget(supportDiagnoseTarget)}
@@ -424,7 +424,7 @@ export default function OperationsTab({
         <p className="help-text">
           {supportBundlePreview
             ? `Bundle ready · registry ${String(supportBundlePreview.registry_hash || "").slice(0, 12)} · safe mode ${supportBundlePreview.safe_mode?.enabled ? "on" : "off"}`
-            : "Support bundle not exported yet."}
+            : "No diagnostics exported yet. The export excludes secrets, conversations, and private files."}
         </p>
         <div className="model-list">
           {!supportDiagnosis ? <p className="empty">Run diagnosis to view root causes and suggested actions.</p> : null}

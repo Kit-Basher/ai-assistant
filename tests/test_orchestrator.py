@@ -2521,6 +2521,26 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIn("manifest_missing", malformed_response.text)
         self.assertFalse(malformed_response.data.get("runtime_payload", {}).get("mutated"))
 
+    def test_restore_validator_accepts_portable_v2_archive_read_only(self) -> None:
+        from scripts.backup_restore_proof import _write_fixture_state
+        from agent.portable_backup import create_backup
+
+        fake_home = Path(self.tmpdir.name) / "home"
+        _write_fixture_state(fake_home)
+        backup_root = fake_home / ".local/share/personal-agent/backups"
+        archive = create_backup(fake_home, backup_root / "personal-agent-backup-portable-v2.tar.gz")
+        orchestrator = self._orchestrator()
+
+        with patch("pathlib.Path.home", return_value=fake_home):
+            validated = orchestrator.handle_message(f"validate this backup: {archive}", "user1")
+
+        self.assertIn("Backup validation result: valid.", validated.text)
+        self.assertIn("portable archive", validated.text.lower())
+        payload = validated.data.get("runtime_payload")
+        self.assertEqual("personal-agent.portable-backup.v2", payload.get("schema_version"))
+        self.assertTrue(payload.get("portable"))
+        self.assertFalse(payload.get("mutated"))
+
     def test_operator_restore_confirmation_applies_allowlisted_preferences_fixture(self) -> None:
         fake_home = Path(self.tmpdir.name) / "home"
         backup_root = fake_home / ".local/share/personal-agent/backups"

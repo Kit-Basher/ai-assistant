@@ -102,7 +102,7 @@ def get_effective_llm_identity(
 def _next_action_from_failure_code(failure_code: str | None) -> str:
     code = _norm_text(failure_code)
     if code in {"telegram_token_missing", "missing_token"}:
-        return "Run: python -m agent.secrets set telegram:bot_token"
+        return "Open Setup > Basics, add your Telegram bot token, then choose Save and test."
     if code in {"registry_unreadable", "registry_invalid_json"}:
         return "Check LLM_REGISTRY_PATH and run: python -m agent doctor"
     if code in {"lock_unavailable", "lock_path_unavailable"}:

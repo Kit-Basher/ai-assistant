@@ -65,7 +65,8 @@ class TestStartupChecks(unittest.TestCase):
                 )
         self.assertEqual("FAIL", str(report.get("status")))
         self.assertEqual("telegram_token_missing", str(report.get("failure_code")))
-        self.assertIn("telegram:bot_token", str(report.get("next_action")))
+        self.assertIn("Setup > Basics", str(report.get("next_action")))
+        self.assertIn("Save and test", str(report.get("next_action")))
 
     def test_pass_when_telegram_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

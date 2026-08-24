@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from agent.config import runtime_service_name
 from agent.public_chat import build_no_llm_public_message
 
 
@@ -177,16 +176,16 @@ def onboarding_next_action(
     if normalized == ONBOARDING_READY:
         return "No action needed."
     if normalized == ONBOARDING_TOKEN_MISSING:
-        return "Run: python -m agent.secrets set telegram:bot_token"
+        return "Open Setup > Basics, add your Telegram bot token, then choose Save and test."
     if normalized == ONBOARDING_SERVICES_DOWN:
         if telegram_enabled and telegram_required and telegram_state in {"stopped", "crash_loop"}:
-            return "Run: systemctl --user restart personal-agent-telegram.service"
-        return f"Run: systemctl --user restart {runtime_service_name()}"
+            return "Open Setup > Optional capabilities and choose Restart Telegram."
+        return "Open Diagnostics and choose Restart Personal Agent."
     if normalized == ONBOARDING_LLM_MISSING:
-        return "Run: python -m agent setup"
+        return "Open Setup > Basics, choose an installed healthy chat model, and save it."
     if normalized == ONBOARDING_DEGRADED:
-        return "Run: python -m agent doctor"
-    return "Run: python -m agent setup"
+        return "Open Diagnostics, refresh status, and follow the suggested recovery action."
+    return "Open Setup > Basics and follow the short setup checklist."
 
 
 def onboarding_summary(
@@ -217,38 +216,38 @@ def onboarding_steps(state: str) -> list[str]:
     normalized = str(state or "").strip().upper()
     if normalized == ONBOARDING_READY:
         return [
-            "Use Telegram naturally.",
-            "Run: python -m agent status",
-            "Run: python -m agent doctor if anything looks wrong.",
+            "Describe what you want in chat.",
+            "Open Setup > Basics to review local access, model, and permission choices.",
+            "Open Diagnostics if anything looks wrong.",
         ]
     if normalized == ONBOARDING_TOKEN_MISSING:
         return [
-            "Run: python -m agent.secrets set telegram:bot_token",
-            "Run: systemctl --user restart personal-agent-telegram.service",
-            "Run: python -m agent status",
+            "Open Setup > Basics.",
+            "Paste the Telegram bot token into the hidden token field.",
+            "Choose Save and test; Telegram is optional unless your policy requires it.",
         ]
     if normalized == ONBOARDING_SERVICES_DOWN:
         return [
-            f"Run: systemctl --user restart {runtime_service_name()}",
-            "If Telegram is enabled: run systemctl --user restart personal-agent-telegram.service",
-            "Run: python -m agent status",
+            "Open Diagnostics and refresh status.",
+            "Choose the offered restart action for the affected Personal Agent service.",
+            "Wait for Ready, then return to chat.",
         ]
     if normalized == ONBOARDING_LLM_MISSING:
         return [
-            "Run: python -m agent doctor",
-            "Run: python -m agent setup --dry-run",
-            "Run: python -m agent status",
+            "Open Setup > Basics and review installed models.",
+            "Choose a healthy chat model and save it.",
+            "Use Refresh status to confirm it is responding.",
         ]
     if normalized == ONBOARDING_DEGRADED:
         return [
-            "Run: python -m agent doctor",
-            "Run: python -m agent setup --dry-run",
-            "Run: python -m agent status",
+            "Open Diagnostics and refresh status.",
+            "Follow the one suggested recovery action.",
+            "Export a redacted diagnostics bundle if you need help.",
         ]
     return [
-        "Run: python -m agent setup",
-        "Run: python -m agent doctor",
-        "Run: python -m agent status",
+        "Open Setup > Basics and choose what you want the assistant to help with.",
+        "Review local folders, model, and Safe Mode before saving.",
+        "Optional network and skill features stay off until you enable and approve them.",
     ]
 
 

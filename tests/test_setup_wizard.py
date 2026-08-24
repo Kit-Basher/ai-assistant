@@ -26,7 +26,7 @@ class TestSetupWizard(unittest.TestCase):
         )
         self.assertEqual("TOKEN_MISSING", result.onboarding_state)
         self.assertEqual("TOKEN_INVALID", result.recovery_mode)
-        self.assertEqual("Run: python -m agent.secrets set telegram:bot_token", result.next_action)
+        self.assertEqual("Open Setup > Basics, add your Telegram bot token, then choose Save and test.", result.next_action)
         self.assertTrue(result.dry_run)
         text = render_setup_text(result)
         self.assertIn("1) State: TOKEN_MISSING", text)
@@ -117,7 +117,7 @@ class TestSetupWizard(unittest.TestCase):
                 result = run_setup_wizard(fetch_json=_fetch, dry_run=True)
         self.assertEqual("SERVICES_DOWN", result.onboarding_state)
         self.assertEqual("TELEGRAM_DOWN", result.recovery_mode)
-        self.assertIn("personal-agent-telegram.service", result.next_action)
+        self.assertIn("Restart Telegram", result.next_action)
 
     def test_run_setup_wizard_prefers_embedded_ready_llm_payload(self) -> None:
         calls: list[str] = []
@@ -171,8 +171,8 @@ class TestSetupWizard(unittest.TestCase):
         with patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": ""}, clear=False):
             with patch("agent.doctor.SecretStore.get_secret", return_value=""):
                 doctor_check = _check_telegram_token(online=False)
-        self.assertEqual("Run: python -m agent.secrets set telegram:bot_token", setup_result.next_action)
-        self.assertEqual("Run: python -m agent.secrets set telegram:bot_token", str(status.get("next_action")))
+        self.assertEqual("Open Setup > Basics, add your Telegram bot token, then choose Save and test.", setup_result.next_action)
+        self.assertEqual("Open Setup > Basics, add your Telegram bot token, then choose Save and test.", str(status.get("next_action")))
         self.assertEqual(setup_result.next_action, doctor_check.next_action)
 
     def test_ready_when_telegram_disabled_optional(self) -> None:

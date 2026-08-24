@@ -49,9 +49,9 @@ _TELEGRAM_HELP_TEXT = (
 )
 
 _ROTATE_TOKEN_TEXT = (
-    "Rotate token:\n"
-    "1) python -m agent.secrets set telegram:bot_token\n"
-    "2) systemctl --user restart personal-agent-telegram.service"
+    "To rotate the token, open the local Personal Agent Web UI, then use "
+    "Setup > Basics > Telegram. Paste the replacement into the hidden field "
+    "and choose Save and test."
 )
 
 

@@ -24,7 +24,7 @@ class TestGoldenPath(unittest.TestCase):
 
     def test_next_step_for_failure_has_deterministic_mapping(self) -> None:
         self.assertEqual(
-            "Run: python -m agent.secrets set telegram:bot_token",
+            "Open Setup > Basics, add your Telegram bot token, then choose Save and test.",
             next_step_for_failure("telegram_token_missing"),
         )
         self.assertEqual("Run: python -m agent doctor", next_step_for_failure("llm_unavailable"))

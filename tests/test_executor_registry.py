@@ -1692,6 +1692,10 @@ class ExecutorRegistryTests(unittest.TestCase):
         self.assertLess(manifest["total_size_bytes"], BACKUP_MAX_TOTAL_BYTES)
         self.assertEqual(BACKUP_MAX_FILE_BYTES, manifest["size_caps"]["max_file_bytes"])
         self.assertTrue(expected.issubset(set(manifest["included_files"])))
+        portable = Path(result["details"]["portable_archive_path"])
+        self.assertTrue(portable.is_file())
+        self.assertEqual("personal-agent.portable-backup.v2", result["details"]["portable_contract"])
+        self.assertEqual(0o600, portable.stat().st_mode & 0o777)
         for name in expected:
             self.assertTrue((artifact / name).is_file(), name)
 

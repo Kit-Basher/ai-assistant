@@ -12,6 +12,7 @@ import ipaddress
 import json
 import mimetypes
 import os
+import platform
 from pathlib import Path
 import re
 import shutil
@@ -15059,6 +15060,12 @@ class AgentRuntime:
         }
 
     def llm_support_bundle(self) -> dict[str, Any]:
+        # Bootstrap once before taking any snapshot so one export cannot change
+        # the basis of the next export merely by lazily initializing chat.
+        orchestrator = self.orchestrator()
+        capability_rows = orchestrator.capability_registry_snapshot()
+        pack_state = self.packs_state()
+        ready = self.ready_status()
         document = self.registry_document if isinstance(self.registry_document, dict) else {}
         defaults = self._ensure_defaults(copy.deepcopy(document))
         providers_doc = document.get("providers") if isinstance(document.get("providers"), dict) else {}
@@ -15281,10 +15288,42 @@ class AgentRuntime:
             ),
         }
 
+        capability_health = [
+            {
+                "id": str(row.get("id") or "").strip(),
+                "origin": str(row.get("provenance") or "native").strip(),
+                "available": bool(row.get("available")),
+                "usable": bool(row.get("usable", row.get("available"))),
+                "mode": str(row.get("mode") or "read_only").strip(),
+                "requires_confirmation": str(row.get("approval_policy") or "") == "required",
+                "health": {
+                    "state": str((row.get("health") or {}).get("state") or "unknown"),
+                    "reason": str((row.get("health") or {}).get("reason") or "")[:160] or None,
+                },
+            }
+            for row in capability_rows
+            if isinstance(row, dict) and str(row.get("id") or "").strip()
+        ]
+        pack_counts = pack_state.get("counts") if isinstance(pack_state.get("counts"), dict) else {}
         bundle = {
-            "created_at_iso": self.started_at_iso,
+            "schema_version": "personal-agent.diagnostics.v1",
+            "generated_at_iso": self.started_at_iso,
+            "started_at_iso": self.started_at_iso,
             "api_version": "v1",
             "git_commit": self.git_commit or "unknown",
+            "runtime": {
+                "version": str(self.version or "unknown"),
+                "instance": runtime_instance(),
+                "ready": bool(ready.get("ready")),
+                "phase": ready.get("startup_phase") or ready.get("phase"),
+                "mode": ready.get("runtime_mode"),
+            },
+            "environment": {
+                "os": platform.system(),
+                "os_release": platform.release(),
+                "architecture": platform.machine(),
+                "python": platform.python_version(),
+            },
             "registry_hash": self._registry_hash(document),
             "safe_mode": {
                 "enabled": bool(self._effective_safe_mode()),
@@ -15300,6 +15339,18 @@ class AgentRuntime:
             "providers": providers,
             "models": models,
             "health_summary": health_summary,
+            "capability_health": capability_health,
+            "capability_counts": {
+                "total": len(capability_health),
+                "native": sum(1 for row in capability_health if row["origin"] == "native"),
+                "external": sum(1 for row in capability_health if row["origin"] != "native"),
+                "available": sum(1 for row in capability_health if row["available"]),
+            },
+            "packs": {
+                "counts": pack_counts,
+                "external_installed": int(pack_counts.get("external_installed") or pack_counts.get("external") or 0),
+                "warnings": [str(item)[:160] for item in (pack_state.get("warnings") or [])[:10]],
+            },
             "last_actions": audit_rows[:50],
             "ledger_tail": ledger_rows[:50],
             "notifications_tail": notification_rows[:20],
@@ -15311,6 +15362,14 @@ class AgentRuntime:
                 "cleanup_apply": compute_registry_prune_apply_policy(self),
                 "capabilities_reconcile_apply": compute_capabilities_reconcile_apply_policy(self),
                 "bootstrap_apply": compute_autopilot_bootstrap_apply_policy(self),
+            },
+            "redaction": {
+                "raw_conversations": "excluded",
+                "raw_environment": "excluded",
+                "raw_pack_documents": "excluded",
+                "secret_store": "excluded",
+                "private_file_contents": "excluded",
+                "max_recent_actions": 50,
             },
         }
         safe_bundle = sanitize_support_payload(redact_audit_value(bundle))
@@ -24958,7 +25017,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if path == "/llm/notifications/policy":
                 self._send_json(200, self.runtime.llm_notifications_policy())
                 return
-            if path == "/llm/support/bundle":
+            if path in {"/llm/support/bundle", "/diagnostics/export"}:
                 self._send_json(200, self.runtime.llm_support_bundle())
                 return
             if path == "/llm/support/diagnose":

@@ -330,7 +330,7 @@ class TestTelegramModelProviderRouter(unittest.TestCase):
 
             self.assertTrue(update.effective_message.replies)
             reply = str(update.effective_message.replies[-1]["text"] or "")
-            self.assertIn("python -m agent.secrets set telegram:bot_token", reply)
+            self.assertIn("Setup > Basics", reply)
             self.assertEqual([], orchestrator.calls)
 
     def test_where_were_we_routes_to_memory_command(self) -> None:

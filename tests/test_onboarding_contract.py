@@ -30,7 +30,7 @@ class TestOnboardingContract(unittest.TestCase):
         }
         self.assertEqual(ONBOARDING_TOKEN_MISSING, detect_onboarding_state(ready_payload=ready_payload))
         self.assertEqual(
-            "Run: python -m agent.secrets set telegram:bot_token",
+            "Open Setup > Basics, add your Telegram bot token, then choose Save and test.",
             onboarding_next_action(ONBOARDING_TOKEN_MISSING, ready_payload=ready_payload),
         )
 
@@ -53,7 +53,7 @@ class TestOnboardingContract(unittest.TestCase):
         }
         self.assertEqual(ONBOARDING_SERVICES_DOWN, detect_onboarding_state(ready_payload=ready_payload))
         self.assertEqual(
-            "Run: systemctl --user restart personal-agent-telegram.service",
+            "Open Setup > Optional capabilities and choose Restart Telegram.",
             onboarding_next_action(ONBOARDING_SERVICES_DOWN, ready_payload=ready_payload),
         )
 
@@ -93,7 +93,7 @@ class TestOnboardingContract(unittest.TestCase):
             ONBOARDING_DEGRADED,
             detect_onboarding_state(ready_payload=ready_payload, llm_status=status),
         )
-        self.assertIn("python -m agent doctor", onboarding_next_action(ONBOARDING_DEGRADED))
+        self.assertIn("Open Diagnostics", onboarding_next_action(ONBOARDING_DEGRADED))
         self.assertEqual(3, len(onboarding_steps(ONBOARDING_DEGRADED)))
 
     def test_detect_ready_when_telegram_disabled_optional(self) -> None:

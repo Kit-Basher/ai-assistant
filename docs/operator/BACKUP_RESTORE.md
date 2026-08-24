@@ -1,11 +1,16 @@
 # Backup and Restore
 
-The safest backup is the full canonical runtime state plus the user-service
-configuration.
+The supported portable recovery artifact is
+`personal-agent.portable-backup.v2`. It is created from an explicit allowlist,
+validated before extraction, and restored through a staging directory into an
+empty or byte-identical explicit target. A recursive copy of the whole state
+root is not the portable product contract because it includes runtimes,
+quarantine, logs, caches, and other ephemeral material.
 
-## Minimal Backup Set
+## Manual operator snapshot (advanced)
 
-Back up these paths before upgrades, risky changes, or recovery work:
+If an operator deliberately takes a stopped-machine snapshot rather than the
+portable workflow, preserve these paths as sensitive material:
 
 - `~/.config/personal-agent`
 - `~/.local/share/personal-agent`
@@ -27,8 +32,8 @@ Operator permissions remain configuration rather than mutable runtime state:
 - `~/.config/personal-agent/permissions.json`
 
 Internal-writer receipts use bounded `*.internal-writer.sqlite3` files under
-the same canonical state root. Backing up the whole state directory includes
-all of them.
+the same canonical state root. A whole-state snapshot includes them, but is
+host-sensitive and is not the normal-user cross-host recovery format.
 
 Recovery directories and archives are evidence until a human explicitly
 retires them. Install, doctor, backup, and cleanup flows must not delete or
@@ -154,16 +159,17 @@ python scripts/backup_restore_proof.py
 This proof is intentionally bounded and does not touch live
 `~/.local/share/personal-agent`, live `~/.config/personal-agent`, or user
 services. It creates representative Personal Agent state under a temporary
-directory, creates a backup archive, validates the archive, performs a dry-run
-restore, restores only into another temporary directory, and then checks that
-expected config, state, memory DB, search config, systemd unit, and secret-store
-files are present.
+directory, creates an allowlisted v2 archive, validates every member and
+digest, performs a dry-run restore, restores only into another temporary
+directory, and checks expected config, state database, search config, pack
+state, and the Personal Agent service unit.
 
 The proof also checks:
 
 - corrupt backup archives fail with `corrupt_backup`
 - strict version mismatch fails with `version_mismatch`
-- dry-run output redacts sensitive file details and never prints secret values
+- identical repeated restore is idempotent and conflicting targets fail closed
+- machine-bound secret files are excluded and Setup re-entry is explicit
 - no service is started, stopped, enabled, or restarted
 - live runtime state is not mutated
 
@@ -176,9 +182,13 @@ version-mismatched backup into live state.
 
 ## Secret Handling
 
-Backups include the encrypted/local secret-store file so same-machine restore can
-preserve provider and Telegram configuration. Proof and dry-run output must not
-print raw secret values. Treat backup archives as sensitive local artifacts.
+Portable backup v2 excludes the machine-bound encrypted-file secret store and
+never exports keyring contents. On a recovered host, the user re-enters optional
+provider and Telegram secrets through Setup. This is intentional: the existing
+file cipher derives from host identity and copying it is neither genuinely
+portable nor a sound secret-recovery design. Treat the remaining archive as
+local-sensitive because it contains user configuration, memory, task, and pack
+state.
 
 ## Uninstall Safety Backup
 

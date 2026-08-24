@@ -42,6 +42,10 @@ WP5_PACK_ACQUISITION_TEST_NODES: tuple[str, ...] = (
     "tests/test_pack_source_fetch_preview.py",
     "tests/test_pack_search_authorization.py",
 )
+WP6_REALITY_GATE_TEST_NODES: tuple[str, ...] = (
+    "tests/test_wp6_reality_gate.py",
+    "tests/test_backup_restore_proof.py",
+)
 
 PY_COMPILE_TARGETS: tuple[str, ...] = (
     "agent/api_server.py",
@@ -54,6 +58,13 @@ PY_COMPILE_TARGETS: tuple[str, ...] = (
     "agent/filesystem_skill.py",
     "agent/executor_registry.py",
     "agent/runtime_truth_service.py",
+    "agent/runtime_contract.py",
+    "agent/onboarding_contract.py",
+    "agent/recovery_contract.py",
+    "agent/telegram_runtime_state.py",
+    "agent/telegram_bridge.py",
+    "agent/doctor.py",
+    "agent/portable_backup.py",
     "agent/packs/store.py",
     "agent/packs/state_truth.py",
     "agent/packs/capability_recommendation.py",
@@ -103,6 +114,12 @@ PY_COMPILE_TARGETS: tuple[str, ...] = (
     "agent/packs/draft_builder.py",
     "scripts/pack_acquisition_broker_proof.py",
     "scripts/wp5_browser_candidate_smoke.py",
+    "scripts/backup_restore_proof.py",
+    "scripts/wp6_release_proof.py",
+    "scripts/wp6_gate_sensitivity.py",
+    "scripts/ubuntu_recovery_preflight.py",
+    "scripts/webui_dependency_audit.py",
+    "scripts/wp6_state_audit.py",
 )
 
 def _pytest_command(test_nodes: tuple[str, ...]) -> tuple[str, ...]:
@@ -116,6 +133,10 @@ RELEASE_GATE_COMMANDS: tuple[tuple[str, ...], ...] = (
     (sys.executable, "scripts/pack_capability_proof.py", "--execute-tests", "--sensitivity"),
     (sys.executable, "scripts/model_truth_latency_proof.py", "--execute-tests", "--sensitivity"),
     (sys.executable, "scripts/pack_acquisition_broker_proof.py", "--execute-tests", "--sensitivity"),
+    (sys.executable, "scripts/wp6_release_proof.py", "--execute-tests", "--require-clean"),
+    (sys.executable, "scripts/wp6_gate_sensitivity.py"),
+    (sys.executable, "scripts/ubuntu_recovery_preflight.py", "--json"),
+    (sys.executable, "scripts/webui_dependency_audit.py"),
     ("bash", "scripts/build_webui.sh"),
     (
         "node",
@@ -126,7 +147,7 @@ RELEASE_GATE_COMMANDS: tuple[tuple[str, ...], ...] = (
         "desktop/tests/stateUiHelpers.test.js",
         "desktop/tests/taskUiHelpers.test.js",
     ),
-    _pytest_command((*MAIN_TEST_NODES, *WP1_UNIFIED_ROUTING_TEST_NODES, *WP2_NATIVE_CAPABILITY_TEST_NODES, *WP3_TASK_LOOP_TEST_NODES, *WP4_PACK_RUNTIME_TEST_NODES, *WP45_MODEL_TRUTH_TEST_NODES, *WP5_PACK_ACQUISITION_TEST_NODES)),
+    _pytest_command((*MAIN_TEST_NODES, *WP1_UNIFIED_ROUTING_TEST_NODES, *WP2_NATIVE_CAPABILITY_TEST_NODES, *WP3_TASK_LOOP_TEST_NODES, *WP4_PACK_RUNTIME_TEST_NODES, *WP45_MODEL_TRUTH_TEST_NODES, *WP5_PACK_ACQUISITION_TEST_NODES, *WP6_REALITY_GATE_TEST_NODES)),
     _pytest_command(EXTENDED_TEST_NODES),
     ("git", "diff", "--check"),
 )
@@ -153,6 +174,8 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Run only the canonical release-gate py_compile target list.",
     )
+    parser.add_argument("--wp6-only", action="store_true", help="Run the canonical WP6 proof contract only.")
+    parser.add_argument("--wp6-defect", default=None, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if bool(args.list):
         _print_commands()
@@ -160,6 +183,11 @@ def main(argv: list[str] | None = None) -> int:
     if bool(args.py_compile_only):
         print(f"Running: {' '.join(PY_COMPILE_COMMAND)}", flush=True)
         return _run_command(PY_COMPILE_COMMAND)
+    if bool(args.wp6_only):
+        command = [sys.executable, "scripts/wp6_release_proof.py", "--require-clean"]
+        if args.wp6_defect:
+            command.extend(["--defect", str(args.wp6_defect)])
+        return _run_command(tuple(command))
     for command in RELEASE_GATE_COMMANDS:
         print(f"Running: {' '.join(command)}", flush=True)
         exit_code = _run_command(command)

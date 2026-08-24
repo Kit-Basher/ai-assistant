@@ -25,7 +25,8 @@ class TestBackupRestoreProof(unittest.TestCase):
 
             self.assertTrue(result.ok, result.error)
             self.assertIn(".local/share/personal-agent/agent.db", result.files)
-            self.assertIn(".local/share/personal-agent/secrets.enc.json", result.sensitive_files)
+            self.assertNotIn(".local/share/personal-agent/secrets.enc.json", result.files)
+            self.assertEqual((), result.sensitive_files)
 
     def test_dry_run_restore_succeeds_without_secret_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -36,8 +37,8 @@ class TestBackupRestoreProof(unittest.TestCase):
 
             self.assertTrue(result["ok"], result)
             self.assertFalse(result["mutated"])
-            self.assertNotIn("SUPER_SECRET_TOKEN_VALUE", rendered)
-            self.assertIn("<redacted>", rendered)
+            self.assertNotIn("MACHINE_BOUND_SECRET_MATERIAL", rendered)
+            self.assertTrue(result["secret_restoration"].startswith("reenter secrets"))
 
     def test_restore_into_temp_state_preserves_expected_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -51,7 +52,26 @@ class TestBackupRestoreProof(unittest.TestCase):
             self.assertFalse(result["mutated_live_state"])
             self.assertTrue((target / ".config/personal-agent/config.json").is_file())
             self.assertTrue((target / ".local/share/personal-agent/agent.db").is_file())
-            self.assertTrue((target / ".local/share/personal-agent/secrets.enc.json").is_file())
+            self.assertFalse((target / ".local/share/personal-agent/secrets.enc.json").exists())
+            self.assertTrue(result["secrets_require_reentry"])
+
+            repeated = backup_restore_proof.restore_to_temp_state(archive, target)
+            self.assertTrue(repeated["ok"], repeated)
+
+    def test_restore_refuses_conflicting_existing_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _source, archive = self._fixture_backup(root)
+            target = root / "target-home"
+            conflict = target / ".config/personal-agent/config.json"
+            conflict.parent.mkdir(parents=True)
+            conflict.write_text('{"profile":"different"}\n', encoding="utf-8")
+
+            result = backup_restore_proof.restore_to_temp_state(archive, target)
+
+            self.assertFalse(result["ok"])
+            self.assertEqual("restore_target_conflict", result["error"])
+            self.assertEqual('{"profile":"different"}\n', conflict.read_text(encoding="utf-8"))
 
     def test_corrupt_backup_fails_safely(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

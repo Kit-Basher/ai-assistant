@@ -500,7 +500,7 @@ def get_telegram_runtime_state(
         ready_state = "stopped"
     elif not token_configured:
         effective_state = "enabled_misconfigured"
-        next_action = "Run: python -m agent.secrets set telegram:bot_token"
+        next_action = "Open Setup > Basics, add your Telegram bot token, then choose Save and test."
         ready_state = "disabled_missing_token"
     elif embedded_running:
         if duplicate_pollers:

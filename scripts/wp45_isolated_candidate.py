@@ -132,6 +132,7 @@ def wait_ready(base: str, timeout: float = 40.0) -> dict[str, Any]:
 def start(port: int, state: Path, log: Path, *, selected_model: str) -> subprocess.Popen[str]:
     env = os.environ.copy()
     env.update({
+        "HOME": str(state.parents[2]),
         "AGENT_API_HOST": "127.0.0.1",
         "AGENT_API_PORT": str(port),
         "AGENT_DB_PATH": str(state / "agent.db"),
@@ -185,8 +186,14 @@ def main() -> int:
     results: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(prefix="personal-agent-wp45-") as raw:
         temp = Path(raw)
-        state = temp / "state"
-        state.mkdir()
+        candidate_home = temp / "home"
+        state = candidate_home / ".local/share/personal-agent"
+        state.mkdir(parents=True)
+        (candidate_home / ".config/personal-agent").mkdir(parents=True)
+        (candidate_home / ".config/systemd/user").mkdir(parents=True)
+        (candidate_home / ".config/systemd/user/personal-agent-api.service").write_text(
+            "[Unit]\nDescription=Personal Agent isolated candidate\n", encoding="utf-8"
+        )
         for name in ("agent.db", "llm_registry.json", "secrets.enc.json", "llm_usage_stats.json", "model_manager_state.json"):
             source = LIVE_STATE / name
             if source.is_file():
@@ -202,8 +209,14 @@ def main() -> int:
         proc = start(port, state, log, selected_model=selected_model)
         try:
             version = wait_ready(base)
+            try:
+                with urllib.request.urlopen("http://127.0.0.1:11434/api/tags", timeout=5.0) as response:
+                    observed_models = json.loads(response.read().decode("utf-8")).get("models") or []
+                expected_installed = len({str(row.get("name") or row.get("model") or "").strip().lower() for row in observed_models if isinstance(row, dict) and str(row.get("name") or row.get("model") or "").strip()})
+            except Exception:
+                expected_installed = -1
             status, truth, elapsed = request(base, "GET", "/llm/models/truth")
-            results.append({"name": "canonical_inventory", "passed": status == 200 and truth.get("counts", {}).get("physically_installed") == 9, "elapsed_ms": elapsed})
+            results.append({"name": "canonical_inventory", "passed": status == 200 and expected_installed >= 0 and truth.get("counts", {}).get("physically_installed") == expected_installed, "elapsed_ms": elapsed, "provider_observed": expected_installed})
             results.append({"name": "selection_truth", "passed": truth.get("selection", {}).get("effective_model") == selected_model})
             results.append({"name": "recommendation_truth", "passed": truth.get("recommendation", {}).get("default_general_assistant") == "qwen2.5:3b-instruct"})
             for index, (name, text, expected) in enumerate((
@@ -248,6 +261,14 @@ def main() -> int:
             })
             status, generic, generic_ms = chat(base, "In one short sentence, explain why leaves look green.", "generic")
             results.append({"name": "generic_model_chat", "passed": status == 200 and bool(str(generic.get("message") or "").strip()), "elapsed_ms": generic_ms, "model": (generic.get("meta") or {}).get("model")})
+            diagnostics_status, diagnostics, diagnostics_ms = request(base, "GET", "/diagnostics/export")
+            diagnostics_text = json.dumps(diagnostics, sort_keys=True).lower()
+            results.append({"name": "diagnostics_export", "passed": diagnostics_status == 200 and str((diagnostics.get("bundle") or {}).get("schema_version") or "") == "personal-agent.diagnostics.v1" and "bearer secret" not in diagnostics_text, "elapsed_ms": diagnostics_ms})
+            backup_preview_status, _backup_preview, _ = chat(base, "back up Personal Agent", "portable-backup")
+            backup_apply_status, backup_apply, backup_ms = chat(base, "yes", "portable-backup")
+            backup_message = str(backup_apply.get("message") or "")
+            portable_archives = list((state / "backups").glob("personal-agent-backup-*-portable-v2.tar.gz"))
+            results.append({"name": "portable_backup_chat", "passed": backup_preview_status == 200 and backup_apply_status == 200 and "portable recovery archive" in backup_message.lower() and len(portable_archives) == 1, "elapsed_ms": backup_ms, "archive_count": len(portable_archives)})
             status, ui, ui_ms = request(base, "GET", "/")
             results.append({"name": "web_ui", "passed": status == 200 and "Personal Agent" in str(ui.get("_text") or ""), "elapsed_ms": ui_ms})
             status, before_packs, _ = request(base, "GET", "/packs/capabilities")
@@ -421,7 +442,7 @@ def main() -> int:
             proc = start(port, state, log, selected_model=selected_model)
             wait_ready(base)
             status, restarted_truth, _ = request(base, "GET", "/llm/models/truth")
-            results.append({"name": "restart_reconstruction", "passed": status == 200 and restarted_truth.get("counts", {}).get("physically_installed") == 9})
+            results.append({"name": "restart_reconstruction", "passed": status == 200 and expected_installed >= 0 and restarted_truth.get("counts", {}).get("physically_installed") == expected_installed})
             after_registry = hashlib.sha256(registry_path.read_bytes()).hexdigest()
             after_defaults = json.loads(registry_path.read_text(encoding="utf-8")).get("defaults", {})
             results.append({"name": "zero_model_mutation", "passed": before_registry == after_registry and before_defaults == after_defaults})
