@@ -121,11 +121,15 @@ def wait_ready(base: str, timeout: float = 40.0) -> dict[str, Any]:
     last: dict[str, Any] = {}
     while time.monotonic() < deadline:
         try:
-            _status, last, _elapsed = request(base, "GET", "/version", timeout=2.0)
-            if last:
-                return last
+            ready_status, ready, _elapsed = request(base, "GET", "/ready", timeout=2.0)
+            last = ready
+            if ready_status == 200 and ready.get("ready") is True:
+                version_status, version, _ = request(base, "GET", "/version", timeout=2.0)
+                if version_status == 200 and version:
+                    return version
         except Exception:
-            time.sleep(0.2)
+            pass
+        time.sleep(0.2)
     raise RuntimeError(f"candidate_not_listening:{last}")
 
 
@@ -360,6 +364,20 @@ def main() -> int:
                 "revoked_status": revoke_status,
                 "post_revoke_status": denied_status,
                 "raw_fixture_leaked": raw_fixture_leaked,
+                "status_evidence": {
+                    "create": local_status,
+                    "grant": grant_status,
+                    "index": index_status,
+                    "search": search_status,
+                    "restart_search": restart_search_status,
+                    "revoke": revoke_status,
+                    "remove": local_remove_status,
+                },
+                "content_evidence": {
+                    "initial_result_has_dune": "Dune" in str((search_body.get("setup") or {}).get("result") or ""),
+                    "restart_result_has_hyperion": "Hyperion" in str((restart_search.get("setup") or {}).get("result") or ""),
+                    "post_revoke_has_no_result": not bool((denied_search.get("setup") or {}).get("result")),
+                },
             })
 
             # Workflow C: core-rendered raster metadata only. The browser
