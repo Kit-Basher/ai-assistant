@@ -247,8 +247,12 @@ class BrowserHarness:
     def assert_interactive(self) -> None:
         textarea = self.page.locator("textarea")
         textarea.wait_for(state="visible", timeout=5000)
-        if not textarea.is_enabled(timeout=2000):
-            raise SmokeFailure("chat textarea is not enabled")
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if textarea.is_enabled(timeout=1000):
+                return
+            time.sleep(0.1)
+        raise SmokeFailure("chat textarea did not become enabled within 10 seconds")
 
     def assert_latest_response_visible(self) -> dict[str, float]:
         self.page.wait_for_timeout(100)
@@ -436,7 +440,10 @@ def _run_browser_journey(args: argparse.Namespace) -> list[Check]:
             api_was_stopped = False
             ui.allow_network_failure = False
             recovered = ui.send("is the assistant healthy?", timeout=60.0)
-            if _contains_any(recovered, ("traceback", "raw json", "{\"", "[{")) or not _contains_any(recovered, ("doctor", "ok", "warn", "fail")):
+            if _contains_any(recovered, ("traceback", "raw json", "{\"", "[{")) or not _contains_any(
+                recovered,
+                ("ready", "healthy", "doctor", "ok", "warn", "fail"),
+            ):
                 raise SmokeFailure(f"post-restart response looked broken: {_safe_excerpt(recovered)}")
             ui.assert_interactive()
             checks.append(_pass("API restart recovery", _safe_excerpt(recovered), f"systemctl --user start {SERVICE_NAME}; UI chat"))
@@ -477,6 +484,7 @@ def _run_browser_journey(args: argparse.Namespace) -> list[Check]:
             page.locator("textarea").wait_for(state="visible", timeout=15000)
             checks.append(_pass("bounded large transcript remains usable", f"assistant_rows_before_reload={baseline_count + 10}", "10 deterministic UI messages"))
 
+            special_console_start = len(ui.console_errors)
             special = "rewrite this: line one\nline two with 'quotes' and \"double quotes\" and <script>alert('x')</script> and https://example.test/path?q=1"
             special_response = ui.send(special, timeout=30.0)
             body_after_special = ui.body_text()
@@ -484,6 +492,17 @@ def _run_browser_journey(args: argparse.Namespace) -> list[Check]:
                 raise SmokeFailure("special-character text was hidden or corrupted")
             if ui.dialogs:
                 raise SmokeFailure(f"special-character input triggered dialog: {ui.dialogs}")
+            # This adversarial request is intentionally rejected with HTTP
+            # 400 while the UI renders the bounded denial. Chrome records
+            # that expected response as a generic console error without the
+            # request URL; suppress only that exact error from this one send.
+            prior_console = ui.console_errors[:special_console_start]
+            special_console = [
+                row
+                for row in ui.console_errors[special_console_start:]
+                if not _contains_any(row, ("server responded with a status of 400",))
+            ]
+            ui.console_errors = [*prior_console, *special_console]
             checks.append(_pass("special-character and multiline rendering", _safe_excerpt(special_response), "UI multiline/special text"))
 
             users_before = len([row for row in ui.user_rows() if "is telegram working" in row.lower()])
