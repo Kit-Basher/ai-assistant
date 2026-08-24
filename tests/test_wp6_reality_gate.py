@@ -128,6 +128,7 @@ def test_domain_request_with_can_you_do_preamble_routes_to_system_status(runtime
     )
     understanding = _understanding(response)
     assert understanding.get("selected_capability_id") == "system.status"
+    assert understanding.get("structured_inputs", {}).get("status_scope") == "observe"
     assert response.get("meta", {}).get("route") == "operational_status"
     assert response.get("meta", {}).get("generic_fallback_used") is False
 

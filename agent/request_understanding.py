@@ -452,7 +452,8 @@ def _structured_capability_inputs(
         elif "doctor" in tokens:
             result["status_scope"] = "doctor"
         elif "slow" in tokens or "storage" in tokens or (
-            tokens & {"memory", "cpu", "resources"} and tokens & {"using", "usage", "much", "eating", "consuming"}
+            tokens & {"memory", "ram", "cpu", "resources"}
+            and tokens & {"using", "usage", "much", "eating", "consume", "consumed", "consuming"}
         ):
             result["status_scope"] = "observe"
         else:
