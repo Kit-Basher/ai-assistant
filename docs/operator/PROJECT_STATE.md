@@ -5,7 +5,7 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Version: `v0.2.28` (Work Package 6 pre-reinstall release candidate)
+- Version: `v0.2.29` (Work Package 6 pre-reinstall release candidate)
 - Baseline: completed WP5 commit `71a9b54bd9ecbf0b7dca03fec9b5daac40224c12`
 - Promoted live runtime before this candidate: `v0.2.23`
 - Capability truth: the live registry plus
