@@ -5,7 +5,7 @@ This is the current-state handover doc. Product intent lives in
 `PRODUCT_RUNTIME_SPEC.md`. Treat this file as a status snapshot, not the sole
 source of truth.
 
-## WP6 pre-reinstall candidate truth (v0.2.25)
+## WP6 pre-reinstall candidate truth (v0.2.26)
 
 - WP5 is closed at commit `71a9b54bd9ecbf0b7dca03fec9b5daac40224c12`.
   WP6 adds a layered, registry-reconciled release proof, a separate blind

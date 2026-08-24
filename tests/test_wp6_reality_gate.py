@@ -120,6 +120,18 @@ def test_indirect_new_model_investigation_routes_to_model_scout(runtime: AgentRu
     assert response.get("meta", {}).get("generic_fallback_used") is False
 
 
+def test_domain_request_with_can_you_do_preamble_routes_to_system_status(runtime: AgentRuntime) -> None:
+    response = _chat(
+        runtime,
+        "Would you mind checking the machine and telling me whether RAM is being consumed heavily?",
+        thread="wp6-resource-domain",
+    )
+    understanding = _understanding(response)
+    assert understanding.get("selected_capability_id") == "system.status"
+    assert response.get("meta", {}).get("route") == "operational_status"
+    assert response.get("meta", {}).get("generic_fallback_used") is False
+
+
 def test_diagnostics_export_uses_real_route_and_redacts_hostile_secrets(runtime: AgentRuntime) -> None:
     runtime.audit_log.append(actor="Bearer wp6-secret-token", action="password=wp6", decision="deny", reason="Authorization: Basic abc", params={"api_key": "should-not-appear"}, dry_run=True, outcome="blocked", error_kind=None, duration_ms=1)
     handler = _Handler(runtime, {}, path="/diagnostics/export")

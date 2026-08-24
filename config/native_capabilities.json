@@ -1,6 +1,6 @@
 {
   "schema_version": "native-capability-inventory.v1",
-  "product_version": "0.2.25",
+  "product_version": "0.2.26",
   "capabilities": [
     {"id":"assistant.presence","family":"assistant","mode":"read_only","chat":true,"proof_profile":"deterministic_read"},
     {"id":"assistant.capabilities","family":"assistant","mode":"read_only","chat":true,"proof_profile":"deterministic_read"},

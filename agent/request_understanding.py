@@ -189,7 +189,8 @@ def _semantic_domain_boost(capability_id: str, tokens: set[str]) -> float:
         "model", "models", "ollama", "provider", "telegram", "file", "files",
         "engine", "engines", "pack", "packs", "skill", "skills", "system", "runtime", "search",
         "install", "switch", "upgrade",
-        "memory", "remembered", "continuity",
+        "computer", "machine", "service", "process", "cpu", "ram", "memory", "resources", "disk", "storage",
+        "remembered", "continuity",
     }
     if capability_id == "assistant.presence" and presence_words and len(tokens) <= 7 and not domain_words:
         score += 0.42
@@ -199,7 +200,7 @@ def _semantic_domain_boost(capability_id: str, tokens: set[str]) -> float:
         (has("can") and has("you", "assistant", "helper") and has("do", "handle"))
         or (has("what") and has("help") and has("with"))
         or (has("what", "which") and has("jobs", "work", "actions") and has("handle", "support", "do"))
-    ):
+    ) and not domain_words:
         score += 0.42
     filesystem_domain = has(
         "file", "files", "filename", "folder", "directory", "document", "drive", "download", "downloaded",
@@ -247,7 +248,7 @@ def _semantic_domain_boost(capability_id: str, tokens: set[str]) -> float:
         score += 0.36
     if capability_id == "system.status" and has("agent", "assistant", "service", "process") and has("running", "working", "healthy", "health", "status", "alive", "doctor", "doing"):
         score += 0.34
-    if capability_id == "system.status" and has("cpu", "memory", "resources") and has("using", "usage", "eating", "consuming"):
+    if capability_id == "system.status" and has("cpu", "ram", "memory", "resources") and has("using", "usage", "eating", "consuming"):
         score += 0.34
     model_domain = has("model", "models", "ollama", "openrouter", "gemma", "qwen", "provider", "engine") or has_fuzzy(
         "model", "models", "ollama", "openrouter", "gemma", "qwen", "provider", "engine"
