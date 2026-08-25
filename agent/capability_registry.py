@@ -26,6 +26,7 @@ HealthHook = Callable[[], tuple[bool, str | None]]
 SelfTestHook = Callable[[], Mapping[str, Any]]
 IndependentVerificationHook = Callable[[Mapping[str, Any], Any], Mapping[str, Any]]
 TaskInputValidationHook = Callable[[Mapping[str, Any]], tuple[bool, str | None]]
+InputNormalizerHook = Callable[[Mapping[str, Any]], Mapping[str, Any]]
 
 
 class CapabilityHealthState(str, Enum):
@@ -124,6 +125,23 @@ class CapabilityDefinition:
     # optional subset is the exact model-visible surface for native tool
     # calling; ``None`` means the full contract (used by dynamic packs).
     model_input_fields: tuple[str, ...] | None = None
+    # A model-facing contract may deliberately rename or narrow compatibility
+    # inputs retained by the native implementation.  Translation remains a
+    # deterministic registry-bound operation, never model authority.
+    model_input_contract: CapabilityContract | None = None
+    input_normalizer_hook: InputNormalizerHook | None = None
+
+    def model_contract(self) -> CapabilityContract:
+        if self.model_input_contract is not None:
+            return self.model_input_contract
+        fields = self.model_input_fields
+        properties = {
+            name: expected
+            for name, expected in self.input_contract.properties.items()
+            if name not in {"user_id", "text"} and (fields is None or name in fields)
+        }
+        required = tuple(name for name in self.input_contract.required if name in properties)
+        return CapabilityContract(properties=properties, required=required)
 
     def availability(self) -> tuple[bool, str | None]:
         health = self.health()
@@ -212,7 +230,10 @@ class CapabilityRegistry:
         available, reason = definition.availability()
         if not available and not definition.unavailable_invocation_safe:
             raise RuntimeError(reason or "capability_unavailable")
-        return definition, definition.input_contract.validate(inputs)
+        validated = definition.input_contract.validate(inputs)
+        if definition.input_normalizer_hook is not None:
+            validated = definition.input_contract.validate(definition.input_normalizer_hook(validated))
+        return definition, validated
 
     def invoke(self, capability_id: str, inputs: Mapping[str, Any] | None, *, approved: bool = False) -> Any:
         definition, validated = self.validate_selection(capability_id, inputs)
@@ -265,6 +286,7 @@ class CapabilityRegistry:
                     "type": item.capability_type,
                     "material_group": item.material_group,
                     "input_contract": item.input_contract.public_schema(),
+                    "model_input_contract": item.model_contract().public_schema(),
                     "output_contract": item.output_contract.public_schema(),
                     "verification": "hook",
                     "self_test": "hook" if item.self_test_hook is not None else "missing",

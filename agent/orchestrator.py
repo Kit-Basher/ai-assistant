@@ -1560,6 +1560,27 @@ class Orchestrator:
     def _build_conversation_capability_registry(self) -> CapabilityRegistry:
         registry = CapabilityRegistry()
         output = CapabilityContract(properties={"response": OrchestratorResponse}, required=("response",))
+        filesystem_model_contracts = {
+            "filesystem.list": CapabilityContract(properties={"path": str}, required=("path",)),
+            "filesystem.read": CapabilityContract(properties={"path": str}, required=("path",)),
+            "filesystem.create_directory": CapabilityContract(properties={"path": str}, required=("path",)),
+            "filesystem.search": CapabilityContract(properties={"query": str, "path": str}, required=("query",)),
+        }
+
+        def normalize_filesystem_model_path(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+            """Translate the one public filesystem spelling behind registry validation.
+
+            Compatibility callers can retain ``path_hint``.  Model-led calls
+            receive only ``path`` and are translated only after their model
+            contract has been validated.  Supplying both is intentionally
+            ambiguous and therefore rejected on every registry path.
+            """
+            normalized = dict(payload)
+            if "path" in normalized and "path_hint" in normalized:
+                raise ValueError("ambiguous_filesystem_path_fields")
+            if "path" in normalized:
+                normalized["path_hint"] = normalized.pop("path")
+            return normalized
 
         def add(
             capability_id: str,
@@ -1696,6 +1717,7 @@ class Orchestrator:
                         properties={
                             "user_id": str,
                             "text": str,
+                            "path": str,
                             "path_hint": str,
                             "query": str,
                             "search_mode": str,
@@ -1758,6 +1780,8 @@ class Orchestrator:
                     ),
                     task_input_validation_hook=validate_task_inputs,
                     model_input_fields=model_input_fields,
+                    model_input_contract=filesystem_model_contracts.get(capability_id),
+                    input_normalizer_hook=(normalize_filesystem_model_path if capability_id in filesystem_model_contracts else None),
                 )
             )
 
@@ -1793,7 +1817,7 @@ class Orchestrator:
                 "what is inside the downloads folder",
             ),
             group="filesystem_list",
-            model_input_fields=("path_hint", "filesystem_view"),
+            model_input_fields=("path",),
         )
         add(
             "filesystem.search",
@@ -1805,7 +1829,7 @@ class Orchestrator:
                 "where did my recent download go",
             ),
             group="filesystem_search",
-            model_input_fields=("path_hint", "query", "search_mode", "filesystem_view"),
+            model_input_fields=("query", "path"),
         )
         add(
             "filesystem.read",
@@ -1816,7 +1840,7 @@ class Orchestrator:
                 "read the notes from this path",
             ),
             group="filesystem_read",
-            model_input_fields=("path_hint",),
+            model_input_fields=("path",),
         )
         add(
             "system.status",
@@ -1927,7 +1951,7 @@ class Orchestrator:
             ),
             group="filesystem_mutation",
             mode=CapabilityMode.MUTATING,
-            model_input_fields=("path_hint",),
+            model_input_fields=("path",),
         )
         add(
             "system.package.install",
@@ -18063,6 +18087,7 @@ class Orchestrator:
             for row in (payload.get("results") if isinstance(payload.get("results"), list) else [])
             if isinstance(row, dict)
         ]
+        matches = self._filesystem_model_matches(results)
         preview = ", ".join(str(row.get("path") or "").strip() for row in results[:8] if str(row.get("path") or "").strip())
         message = f"Filename matches for {normalized_query!r} under {target}: {preview}."
         if bool(payload.get("truncated", False)):
@@ -18073,6 +18098,7 @@ class Orchestrator:
             used_tools=["filesystem"],
             payload={
                 **payload,
+                "matches": matches,
                 "title": "Filename search",
                 "summary": message,
             },
@@ -18291,6 +18317,7 @@ class Orchestrator:
             for row in (payload.get("results") if isinstance(payload.get("results"), list) else [])
             if isinstance(row, dict)
         ]
+        matches = self._filesystem_model_matches(results)
         preview_lines: list[str] = []
         for row in results[:4]:
             path = str(row.get("path") or "").strip()
@@ -18311,10 +18338,28 @@ class Orchestrator:
             used_tools=["filesystem"],
             payload={
                 **payload,
+                "matches": matches,
                 "title": "Text search",
                 "summary": f"Text matches for {normalized_query!r} under {target}.",
             },
         )
+
+    @staticmethod
+    def _filesystem_model_matches(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Bounded, data-only search observations suitable for a follow-up read."""
+        matches: list[dict[str, Any]] = []
+        for row in results[:12]:
+            path = str(row.get("path") or "").strip()
+            if not path:
+                continue
+            item = {"path": path}
+            for key in ("type", "line_number", "size"):
+                if key in row and isinstance(row[key], (str, int, float, bool)):
+                    item[key] = row[key]
+            if isinstance(row.get("snippet"), str):
+                item["snippet"] = str(row["snippet"]).replace("\x00", " ")[:400]
+            matches.append(item)
+        return matches
 
     @staticmethod
     def _shell_blocked_message(payload: dict[str, Any]) -> str:

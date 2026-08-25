@@ -8,6 +8,8 @@ import urllib.parse
 from pathlib import Path
 
 from agent.api_server import APIServerHandler, AgentRuntime
+from agent.assistant_turn import capability_catalog_authority, inspected_contracts, live_capability_catalog, normalize_native_tool_response
+from agent.llm.types import Response, ToolCall
 from tests.test_api_server import _config
 
 
@@ -155,6 +157,69 @@ class TestFilesystemAPIContract(unittest.TestCase):
         self.assertEqual("forbidden", post_denied.payload()["error"])
         self.assertTrue(get_denied.payload()["operator_only"])
         self.assertTrue(post_denied.payload()["operator_only"])
+
+    def test_model_filesystem_contract_uses_path_and_translates_only_at_registry_boundary(self) -> None:
+        self.runtime._repo_root = Path(__file__).resolve().parents[1]  # noqa: SLF001 - restore runtime assets before bootstrapping chat
+        registry = self.runtime.orchestrator()._capability_registry  # noqa: SLF001 - isolated contract boundary
+        catalog = {row["id"]: row for row in live_capability_catalog(registry)}
+        self.assertEqual({"path": "string"}, catalog["filesystem.read"]["inputs"])
+        self.assertEqual({"path": "string"}, catalog["filesystem.list"]["inputs"])
+        self.assertEqual({"path": "string"}, catalog["filesystem.create_directory"]["inputs"])
+        self.assertEqual({"query": "string", "path": "string"}, catalog["filesystem.search"]["inputs"])
+        contracts = {row["id"]: row for row in inspected_contracts(registry, ["filesystem.search", "filesystem.read"])}
+        self.assertEqual({"query": "string", "path": "string"}, contracts["filesystem.search"]["inputs"])
+        self.assertEqual({"path": "string"}, contracts["filesystem.read"]["inputs"])
+
+        authority = capability_catalog_authority(registry)
+        call = Response(text="", provider="test", model="test", tool_calls=(
+            ToolCall("search-1", "assistant_invoke_capability", json.dumps({"capability_id": "filesystem.search", "arguments_json": json.dumps({"query": "todo", "path": str(self.allowed_root)})})),
+        ))
+        turn = normalize_native_tool_response(call, registry, {}, catalog_authority=authority)
+        self.assertEqual({"query": "todo", "path": str(self.allowed_root)}, turn["calls"][0]["arguments"])
+        result = registry.invoke("filesystem.search", {"user_id": "test", "text": "find todo", **turn["calls"][0]["arguments"]})
+        matches = (result.data.get("runtime_payload") or {}).get("matches")
+        self.assertIsInstance(matches, list)
+        selected = next(row["path"] for row in matches if row["path"] == str(self.todo))
+        read = registry.invoke("filesystem.read", {"user_id": "test", "text": "read it", "path": selected})
+        self.assertIn("finish personal agent", str(read.text))
+
+        legacy = Response(text="", provider="test", model="test", tool_calls=(
+            ToolCall("bad", "assistant_invoke_capability", json.dumps({"capability_id": "filesystem.read", "arguments_json": json.dumps({"path_hint": selected})})),
+        ))
+        self.assertEqual("validation_observation", normalize_native_tool_response(legacy, registry, {}, catalog_authority=authority)["action"])
+        with self.assertRaisesRegex(ValueError, "ambiguous_filesystem_path_fields"):
+            registry.invoke("filesystem.read", {"user_id": "test", "text": "read", "path": selected, "path_hint": selected})
+        # A contract-surface change invalidates the frozen current-turn
+        # catalog; it is never silently reinterpreted as legacy path_hint.
+        from dataclasses import replace
+        legacy = registry.require("filesystem.read")
+        registry._items["filesystem.read"] = replace(  # noqa: SLF001 - isolated stale-snapshot proof
+            legacy,
+            model_input_contract=type(legacy.model_contract())(properties={"path_hint": str}, required=("path_hint",)),
+        )
+        stale_native = Response(text="", provider="test", model="test", tool_calls=(ToolCall("old", "filesystem.read", json.dumps({"path": selected})),))
+        with self.assertRaises(ValueError):
+            normalize_native_tool_response(stale_native, registry, {}, catalog_authority=authority)
+
+    def test_model_path_translation_preserves_containment_revocation_and_mutation_preview(self) -> None:
+        self.runtime._repo_root = Path(__file__).resolve().parents[1]  # noqa: SLF001 - restore runtime assets before bootstrapping chat
+        registry = self.runtime.orchestrator()._capability_registry  # noqa: SLF001 - isolated contract boundary
+        for rejected in (str(self.allowed_root / ".." / "outside" / "outside.txt"), str(self.escape)):
+            result = registry.invoke("filesystem.read", {"user_id": "test", "text": "read", "path": rejected})
+            self.assertFalse(result.data.get("ok"))
+            self.assertIn(result.data.get("error_kind"), {"outside_allowed_roots", "sensitive_path_blocked"})
+        preview = registry.preview_mutation("filesystem.create_directory", {"user_id": "test", "text": "create", "path": str(self.notes / "new")})
+        self.assertIn("preview", str(preview.data).lower())
+
+        definition = registry.require("filesystem.search")
+        from dataclasses import replace
+        from agent.capability_registry import CapabilityProvenance
+        registry.register(replace(definition, capability_id="pack.temp", provenance=CapabilityProvenance.PACK))
+        stale = capability_catalog_authority(registry)
+        self.assertTrue(registry.unregister_external("pack.temp"))
+        stale_call = Response(text="", provider="test", model="test", tool_calls=(ToolCall("stale", "pack.temp", "{}"),))
+        with self.assertRaises(ValueError):
+            normalize_native_tool_response(stale_call, registry, {}, catalog_authority=stale)
 
 
 if __name__ == "__main__":
