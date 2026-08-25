@@ -10,6 +10,10 @@ class Message:
     content: str
     name: str | None = None
     tool_call_id: str | None = None
+    # Native tool-capable providers require the assistant tool-call message to
+    # remain in the transcript before a subsequent ``role=tool`` observation.
+    # This is transport data, not an execution grant.
+    tool_calls: tuple["ToolCall", ...] = ()
 
 
 @dataclass(frozen=True)
@@ -42,6 +46,10 @@ class Request:
     max_tokens: int | None = None
     timeout_seconds: float | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Provider-native JSON Schema. It is optional because most routes use the
+    # OpenAI-compatible JSON-object mode; the assistant-turn boundary needs a
+    # closed grammar rather than prompt-only JSON.
+    response_schema: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

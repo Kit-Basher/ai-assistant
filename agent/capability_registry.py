@@ -120,6 +120,10 @@ class CapabilityDefinition:
     independent_verification_hook: IndependentVerificationHook | None = None
     compensation_capability_id: str | None = None
     task_input_validation_hook: TaskInputValidationHook | None = None
+    # The runtime input contract can retain compatibility-only fields.  This
+    # optional subset is the exact model-visible surface for native tool
+    # calling; ``None`` means the full contract (used by dynamic packs).
+    model_input_fields: tuple[str, ...] | None = None
 
     def availability(self) -> tuple[bool, str | None]:
         health = self.health()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import replace
 import json
 import os
 import socket
@@ -12,6 +13,7 @@ from typing import Any
 from agent.llm.providers.base import Provider
 from agent.llm.registry import APIKeySource, ProviderConfig
 from agent.llm.types import EmbeddingResponse, LLMError, Message, Request, Response, ToolCall, Usage
+from agent.llm.reasoning_boundary import sanitize_stream_chunk
 from agent.secret_store import SecretStore
 
 
@@ -21,6 +23,14 @@ class OpenAICompatProvider(Provider):
     secret_store: SecretStore | None = None
 
     def __post_init__(self) -> None:
+        # llama.cpp is a private, managed local provider profile.  It is not a
+        # generic remote OpenAI-compatible endpoint: allowing a caller to
+        # redirect it would weaken both its network boundary and the mandatory
+        # reasoning-discard boundary below.
+        if self.config.provider_type == "llama_cpp_openai_compatible":
+            parsed = urllib.parse.urlparse(self.config.base_url)
+            if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost"}:
+                raise ValueError("llama.cpp provider requires a localhost http endpoint")
         self._override_api_key: str | None = None
 
     @property
@@ -110,7 +120,7 @@ class OpenAICompatProvider(Provider):
         return str(raw)
 
     @staticmethod
-    def _to_messages(messages: tuple[Message, ...]) -> list[dict[str, Any]]:
+    def _to_messages(messages: tuple[Message, ...], *, native_ollama: bool = False) -> list[dict[str, Any]]:
         if not messages:
             return [{"role": "user", "content": "ping"}]
         output: list[dict[str, Any]] = []
@@ -121,16 +131,44 @@ class OpenAICompatProvider(Provider):
             }
             if item.name:
                 row["name"] = item.name
-            if item.tool_call_id:
+            # Ollama's /api/chat tool-result role is positional after the
+            # assistant tool-call message.  ``tool_call_id`` is an OpenAI
+            # protocol field and makes an otherwise valid native transcript
+            # less reliable for smaller local models.
+            if item.tool_call_id and not native_ollama:
                 row["tool_call_id"] = item.tool_call_id
+            if item.tool_calls:
+                calls: list[dict[str, Any]] = []
+                for call in item.tool_calls:
+                    try:
+                        arguments: Any = json.loads(call.arguments or "{}")
+                    except Exception:
+                        arguments = call.arguments
+                    if not isinstance(arguments, dict):
+                        arguments = {}
+                    calls.append({
+                        "id": call.id,
+                        # OpenAI-compatible llama.cpp validates the complete
+                        # assistant tool-call transcript on the next turn.
+                        # `type` is mandatory there (Ollama's native shape
+                        # does not use it).
+                        **({} if native_ollama else {"type": "function"}),
+                        "function": {
+                            "name": call.name,
+                            # Ollama's native API consumes an object here;
+                            # OpenAI-compatible endpoints consume JSON text.
+                            "arguments": arguments if native_ollama else json.dumps(arguments, ensure_ascii=True),
+                        },
+                    })
+                row["tool_calls"] = calls
             output.append(row)
         return output
 
     @staticmethod
     def _parse_usage(parsed: dict[str, Any]) -> Usage:
         usage = parsed.get("usage") if isinstance(parsed.get("usage"), dict) else {}
-        prompt_tokens = int(usage.get("prompt_tokens") or 0)
-        completion_tokens = int(usage.get("completion_tokens") or 0)
+        prompt_tokens = int(usage.get("prompt_tokens") or parsed.get("prompt_eval_count") or 0)
+        completion_tokens = int(usage.get("completion_tokens") or parsed.get("eval_count") or 0)
         total_tokens = int(usage.get("total_tokens") or (prompt_tokens + completion_tokens))
         return Usage(
             prompt_tokens=prompt_tokens,
@@ -277,6 +315,10 @@ class OpenAICompatProvider(Provider):
         )
 
     def chat(self, request: Request, *, model: str, timeout_seconds: float) -> Response:
+        # A localhost llama.cpp profile is never allowed to surface provider
+        # reasoning, even if a caller or model metadata tries to omit it.
+        if self.config.provider_type == "llama_cpp_openai_compatible":
+            request = replace(request, metadata={**request.metadata, "discard_reasoning": True})
         if not self.available():
             raise LLMError(
                 kind="provider_unavailable",
@@ -287,21 +329,39 @@ class OpenAICompatProvider(Provider):
                 raw=None,
             )
 
+        schema = request.response_schema if isinstance(request.response_schema, dict) else None
+        # Ollama's native endpoint is the only production adapter path that
+        # exposes full JSON Schema grammar in `format`. Do not downgrade it to
+        # OpenAI's json_object response_format.
+        native_ollama_schema = bool(schema and self.config.id == "ollama")
+        native_ollama_tools = bool(
+            request.tools
+            and self.config.id == "ollama"
+            and bool(request.metadata.get("ollama_native_tools"))
+        )
+        native_ollama = native_ollama_schema or native_ollama_tools
         body: dict[str, Any] = {
             "model": model,
-            "messages": self._to_messages(request.messages),
+            "messages": self._to_messages(request.messages, native_ollama=native_ollama),
         }
+        if native_ollama:
+            body["stream"] = False
+        if native_ollama_schema:
+            body["format"] = schema
         if request.temperature is not None:
             body["temperature"] = float(request.temperature)
         if request.max_tokens is not None:
             body["max_tokens"] = int(request.max_tokens)
         if request.tools:
             body["tools"] = list(request.tools)
-        if request.require_json:
+        if request.require_json and not native_ollama:
             body["response_format"] = {"type": "json_object"}
 
         data = json.dumps(body, ensure_ascii=True).encode("utf-8")
         url = self._build_url()
+        if native_ollama:
+            parsed_url = urllib.parse.urlsplit(url)
+            url = urllib.parse.urlunsplit((parsed_url.scheme, parsed_url.netloc, "/api/chat", "", ""))
         headers = self._build_headers()
         req = urllib.request.Request(url, data=data, headers=headers, method="POST")
 
@@ -338,8 +398,15 @@ class OpenAICompatProvider(Provider):
             ) from exc
 
         choices = parsed.get("choices") if isinstance(parsed.get("choices"), list) else []
-        message = choices[0].get("message") if choices and isinstance(choices[0], dict) else {}
+        message = (
+            parsed.get("message")
+            if native_ollama and isinstance(parsed.get("message"), dict)
+            else choices[0].get("message") if choices and isinstance(choices[0], dict) else {}
+        )
         message = message if isinstance(message, dict) else {}
+        if request.metadata.get("discard_reasoning"):
+            safe = sanitize_stream_chunk({"choices": [{"index": 0, "finish_reason": choices[0].get("finish_reason") if choices else parsed.get("done_reason"), "delta": message}]})
+            message = safe.get("choices", [{}])[0].get("delta", {}) if isinstance(safe, dict) else {}
         text = self._normalize_content(message.get("content")).strip()
         tool_calls = self._parse_tool_calls(message)
 
@@ -349,7 +416,7 @@ class OpenAICompatProvider(Provider):
             model=model,
             usage=self._parse_usage(parsed),
             tool_calls=tool_calls,
-            raw=parsed,
+            raw=({key: value for key, value in parsed.items() if key not in {"choices", "message"}} if request.metadata.get("discard_reasoning") else parsed),
         )
 
     def embed_texts(self, texts: tuple[str, ...], *, model: str, timeout_seconds: float) -> EmbeddingResponse:

@@ -11865,13 +11865,12 @@ class AgentRuntime:
 
         source_surface = str(payload.get("source_surface") or "api").strip().lower() or "api"
         last_user_text = str(messages[-1].get("content") or "").strip()
-        route_decision_started = time.monotonic()
-        # The orchestrator's unified understanding layer owns every ordinary
-        # chat turn, including greetings and presence checks.
+        # /chat deliberately performs no natural-language route preview. The
+        # model-led orchestrator is the sole ordinary-language interpreter.
         social_turn_kind = None
-        bootstrap_social_hint = classify_trivial_social_turn(last_user_text)
-        route_decision = self.chat_route_decision(payload, last_user_text)
-        route_decision_ms = int(max(0.0, time.monotonic() - route_decision_started) * 1000)
+        bootstrap_social_hint = False
+        route_decision = {"route": "model_led_turn", "kind": "ordinary_language"}
+        route_decision_ms = 0
         bootstrap_ms = 0
         llm_request_ms = 0
         orchestrator_ms = 0
@@ -11886,37 +11885,9 @@ class AgentRuntime:
 
         user_id = self._chat_user_id(payload)
         thread_id = self._chat_thread_id(payload, user_id=user_id)
-        request_understanding_preview = payload.get("_request_understanding_preview")
-        request_understanding_ms = int(payload.get("_request_understanding_ms") or 0)
-        unified_bootstrap_skip = False
-        try:
-            if request_understanding_preview is None:
-                understanding_started = time.monotonic()
-                request_understanding_preview = self.orchestrator().preview_conversation_request(
-                    user_id,
-                    last_user_text,
-                    thread_id=thread_id,
-                )
-                request_understanding_ms = int(max(0.0, time.monotonic() - understanding_started) * 1000)
-            unified_bootstrap_skip = bool(
-                request_understanding_preview.selected_capability_id
-                or request_understanding_preview.clarification
-                or request_understanding_preview.fallback_category.value
-                in {"grounded_casual", "unavailable_capability"}
-            )
-        except Exception:
-            request_understanding_preview = None
-            unified_bootstrap_skip = False
-        if (
-            not bootstrap_social_hint
-            and not unified_bootstrap_skip
-            and not self._skip_bootstrap_for_chat_route(route_decision)
-        ):
-            bootstrap_started = time.monotonic()
-            _ = self._auto_bootstrap_local_chat_model()
-            bootstrap_ms = int(max(0.0, time.monotonic() - bootstrap_started) * 1000)
-            timings_ms["bootstrap_ms"] = bootstrap_ms
-        timings_ms["request_understanding_ms"] = request_understanding_ms
+        request_understanding_preview = None
+        request_understanding_ms = 0
+        timings_ms["request_understanding_ms"] = 0
         chat_context = {
             "payload": {
                 key: value

@@ -37,6 +37,7 @@ from agent.capability_registry import (
     CapabilityRegistry,
 )
 from agent.request_understanding import FallbackCategory, RequestUnderstanding, RequestUnderstandingService
+from agent.assistant_turn import ASSISTANT_TURN_SCHEMA_VERSION, ModelLedAssistantTurn
 from agent.task_loop import GeneralTaskPlanner, TaskCoordinator, TaskState, TaskStore, build_deterministic_plan, build_missing_capability
 from agent.disk_diff import diff_disk_reports, time_since
 from agent.disk_anomalies import detect_anomalies
@@ -1042,6 +1043,15 @@ class Orchestrator:
         self._pack_registry_reconstruction = self._dynamic_pack_runtime.register_usable()
         self._sync_pack_visualizer()
         self._request_understanding = RequestUnderstandingService(self._capability_registry)
+        # WP6.1 ordinary-language authority.  The old request-understanding
+        # service remains only for explicitly structured compatibility paths;
+        # it is not consulted by the normal /chat front door.
+        self._model_led_turn = ModelLedAssistantTurn(
+            registry=self._capability_registry,
+            llm_client=self.llm_client,
+            invoke=self._invoke_conversation_capability,
+            available=self._llm_chat_available,
+        )
         self._task_coordinator = TaskCoordinator(
             store=TaskStore(self.db),
             registry=self._capability_registry,
@@ -1073,6 +1083,12 @@ class Orchestrator:
         self._dynamic_pack_runtime = runtime
         self._pack_registry_reconstruction = report
         self._request_understanding = RequestUnderstandingService(registry)
+        self._model_led_turn = ModelLedAssistantTurn(
+            registry=registry,
+            llm_client=self.llm_client,
+            invoke=self._invoke_conversation_capability,
+            available=self._llm_chat_available,
+        )
         self._task_coordinator = TaskCoordinator(store=TaskStore(self.db), registry=registry)
         self._sync_pack_visualizer()
         return report
@@ -1552,6 +1568,7 @@ class Orchestrator:
             *,
             group: str,
             mode: CapabilityMode = CapabilityMode.READ_ONLY,
+            model_input_fields: tuple[str, ...] = (),
         ) -> None:
             proof_requirements = (
                 (
@@ -1740,6 +1757,7 @@ class Orchestrator:
                         else None
                     ),
                     task_input_validation_hook=validate_task_inputs,
+                    model_input_fields=model_input_fields,
                 )
             )
 
@@ -1775,6 +1793,7 @@ class Orchestrator:
                 "what is inside the downloads folder",
             ),
             group="filesystem_list",
+            model_input_fields=("path_hint", "filesystem_view"),
         )
         add(
             "filesystem.search",
@@ -1786,6 +1805,7 @@ class Orchestrator:
                 "where did my recent download go",
             ),
             group="filesystem_search",
+            model_input_fields=("path_hint", "query", "search_mode", "filesystem_view"),
         )
         add(
             "filesystem.read",
@@ -1796,6 +1816,7 @@ class Orchestrator:
                 "read the notes from this path",
             ),
             group="filesystem_read",
+            model_input_fields=("path_hint",),
         )
         add(
             "system.status",
@@ -1807,6 +1828,7 @@ class Orchestrator:
                 "tell me the current runtime state",
             ),
             group="system_status",
+            model_input_fields=("status_scope",),
         )
         add(
             "models.inventory",
@@ -1819,6 +1841,7 @@ class Orchestrator:
                 "explain why Gemma is being used",
             ),
             group="model_inventory",
+            model_input_fields=("model_view", "local_only", "remote_only", "provider_id"),
         )
         add(
             "models.switch",
@@ -1831,6 +1854,7 @@ class Orchestrator:
             ),
             group="model_mutation",
             mode=CapabilityMode.MUTATING,
+            model_input_fields=("model_target", "model_action", "promote_default"),
         )
         add(
             "models.scout",
@@ -1844,6 +1868,7 @@ class Orchestrator:
                 "investigate a newly announced language model candidate",
             ),
             group="model_scout",
+            model_input_fields=("scout_view", "scout_focus", "scout_task", "scout_role"),
         )
         add(
             "packs.use",
@@ -1856,6 +1881,7 @@ class Orchestrator:
                 "list the packs you have",
             ),
             group="packs",
+            model_input_fields=("pack_operation", "pack_query", "pack_path"),
         )
         add(
             "conversation.history",
@@ -1867,6 +1893,7 @@ class Orchestrator:
                 "what do you remember about this task",
             ),
             group="conversation",
+            model_input_fields=("history_focus",),
         )
         add(
             "search.web",
@@ -1877,6 +1904,7 @@ class Orchestrator:
                 "check whether web search is configured and working",
             ),
             group="web_search",
+            model_input_fields=("search_operation", "query"),
         )
         add(
             "system.shell.inspect",
@@ -1887,6 +1915,7 @@ class Orchestrator:
                 "inspect the operating system kernel information",
             ),
             group="shell_inspection",
+            model_input_fields=("command_name", "command_subject"),
         )
         add(
             "filesystem.create_directory",
@@ -1898,6 +1927,7 @@ class Orchestrator:
             ),
             group="filesystem_mutation",
             mode=CapabilityMode.MUTATING,
+            model_input_fields=("path_hint",),
         )
         add(
             "system.package.install",
@@ -1909,6 +1939,7 @@ class Orchestrator:
             ),
             group="package_mutation",
             mode=CapabilityMode.MUTATING,
+            model_input_fields=("package", "package_manager"),
         )
         add(
             "memory.status",
@@ -1919,6 +1950,7 @@ class Orchestrator:
                 "check continuity memory health",
             ),
             group="memory_status",
+            model_input_fields=("memory_operation", "history_focus"),
         )
         add(
             "memory.manage",
@@ -1929,6 +1961,7 @@ class Orchestrator:
             ),
             group="memory_lifecycle",
             mode=CapabilityMode.MUTATING,
+            model_input_fields=("memory_operation", "history_focus"),
         )
         add(
             "packs.manage",
@@ -1942,6 +1975,7 @@ class Orchestrator:
             ),
             group="pack_lifecycle",
             mode=CapabilityMode.MUTATING,
+            model_input_fields=("pack_operation", "pack_query", "pack_path"),
         )
         add(
             "telegram.status",
@@ -1951,6 +1985,7 @@ class Orchestrator:
                 "show the optional messaging adapter status",
             ),
             group="telegram_status",
+            model_input_fields=("transport_action",),
         )
         add(
             "telegram.manage",
@@ -1961,6 +1996,7 @@ class Orchestrator:
             ),
             group="telegram",
             mode=CapabilityMode.MUTATING,
+            model_input_fields=("transport_action",),
         )
         add(
             "operator.status",
@@ -1971,6 +2007,7 @@ class Orchestrator:
                 "show storage used by old assistant releases",
             ),
             group="operator_status",
+            model_input_fields=("lifecycle_operation",),
         )
         add(
             "operator.lifecycle",
@@ -1982,6 +2019,7 @@ class Orchestrator:
             ),
             group="operator_lifecycle",
             mode=CapabilityMode.MUTATING,
+            model_input_fields=("lifecycle_operation",),
         )
         return registry
 
@@ -2878,6 +2916,62 @@ class Orchestrator:
             return self._invoke_conversation_capability(capability_id, understanding.structured_inputs)
         result = self._capability_registry.invoke(capability_id, understanding.structured_inputs)
         return result if isinstance(result, OrchestratorResponse) else None
+
+    def _model_led_assistant_response(
+        self,
+        *,
+        user_id: str,
+        text: str,
+        chat_context: Mapping[str, Any] | None = None,
+    ) -> OrchestratorResponse:
+        """The sole ordinary-natural-language front door.
+
+        This deliberately does not call request understanding, nl_route, or a
+        phrase classifier.  The model receives only bounded context and the
+        current registry contracts; the registry validates every proposal.
+        """
+        context = dict(chat_context or {})
+        pending = self.confirmations.get(user_id)
+        pending_summary: dict[str, Any] | None = None
+        if pending is not None:
+            pending_summary = {
+                "present": True,
+                "action_type": self._pending_confirmation_action_type(pending),
+                "expires_at": int(pending.expires_at or 0),
+                "thread_id": self._active_thread_id_for_user(user_id),
+                "note": "Only an exact bound yes/no/cancel is handled deterministically. A different request may proceed safely.",
+            }
+        bounded_context = {
+            "thread_id": str(context.get("thread_id") or "")[:160],
+            "source_surface": str(context.get("source_surface") or "api")[:40],
+            "pending": pending_summary,
+            "recent_messages": [
+                {"role": str(item.get("role") or "")[:20], "content": str(item.get("content") or "")[:1200]}
+                for item in (context.get("messages") if isinstance(context.get("messages"), list) else [])[-6:]
+                if isinstance(item, Mapping)
+            ],
+        }
+        result = self._model_led_turn.run(user_text=text, user_id=user_id, context=bounded_context)
+        data = dict(result.data)
+        turn = data.get("assistant_turn") if isinstance(data.get("assistant_turn"), dict) else {}
+        # The model can request a control operation, but it never supplies a
+        # token, actor, thread, hash, or approval.  This runtime-owned binding
+        # is the only place a pending action can be changed from ordinary chat.
+        if turn.get("outcome") == "control_pending" and turn.get("pending_control") == "cancel" and pending is not None:
+            cancelled = self._clear_pending_confirmation(user_id, status=PENDING_STATUS_ABORTED)
+            self._cancel_pending_confirmation_plan(cancelled)
+            data["approval_state"] = "cancelled"
+            if not result.text.strip():
+                result = type(result)("Okay — I cancelled that pending action. Your other requests are unaffected.", data)
+        data.setdefault("route", "model_led_turn")
+        data.setdefault("used_runtime_state", bool(data.get("used_tools")))
+        data.setdefault("assistant_turn_contract", ASSISTANT_TURN_SCHEMA_VERSION)
+        data.setdefault("diagnostic", {
+            "kind": str(data.get("assistant_turn", {}).get("outcome") if isinstance(data.get("assistant_turn"), dict) else "respond"),
+            "capabilities": list(data.get("used_tools") or []),
+            "turn_id": str(context.get("trace_id") or "")[:128],
+        })
+        return OrchestratorResponse(result.text, data)
 
     def _emit_tool_log(self, event: str, payload: dict[str, Any]) -> None:
         log_event(self.log_path, event, payload)
@@ -25398,6 +25492,24 @@ class Orchestrator:
                 text = cleaned_text
                 memory_disabled_for_turn = True
             effective_user_text = cleaned_text if memory_disabled_for_turn else text
+            # Explicit slash commands and an exact, currently-bound approval
+            # response retain their structured compatibility surfaces. Every
+            # other ordinary-language turn is model-led before any legacy
+            # matcher, classifier, router, or canned fallback can inspect it.
+            pending_for_turn = self.confirmations.get(user_id)
+            exact_pending_reply = bool(
+                pending_for_turn is not None
+                and (
+                    self._looks_like_plan_confirmation_accept(effective_user_text)
+                    or self._looks_like_pending_denial(effective_user_text)
+                )
+            )
+            if not cmd and not exact_pending_reply and str(effective_user_text or "").strip():
+                return self._model_led_assistant_response(
+                    user_id=user_id,
+                    text=str(effective_user_text),
+                    chat_context=context,
+                )
             preview = context.get("request_understanding_preview")
             preview_capability_id = str(
                 getattr(preview, "selected_capability_id", None) or ""

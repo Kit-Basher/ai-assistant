@@ -118,7 +118,7 @@ class LLMRouter:
     def _build_default_providers(self) -> dict[str, Provider]:
         providers: dict[str, Provider] = {}
         for provider_id, provider_cfg in self.registry.providers.items():
-            if provider_cfg.provider_type in {"openai_compat", "openai"}:
+            if provider_cfg.provider_type in {"openai_compat", "openai", "llama_cpp_openai_compatible"}:
                 providers[provider_id] = OpenAICompatProvider(provider_cfg, secret_store=self._secret_store)
             else:
                 providers[provider_id] = _UnavailableProvider(provider_id)
