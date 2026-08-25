@@ -16,6 +16,7 @@ from agent.assistant_turn import (
     repaired_transcript,
     canonical_call_signature,
     capability_catalog_authority,
+    provider_transcript_tool_calls,
     _tool_name,
 )
 from agent.capability_registry import ApprovalPolicy, CapabilityContract, CapabilityDefinition, CapabilityMode, CapabilityProvenance, CapabilityRegistry
@@ -81,6 +82,36 @@ def test_dynamic_pack_revocation_invalidates_catalog_authority() -> None:
     assert registry.unregister_external("pack.lookup") is True
     with pytest.raises(TurnValidationError, match="unknown|stale"):
         normalize_native_tool_response(_response("pack.lookup", {"query": "x"}), registry, {}, catalog_authority=authority)
+
+
+def test_direct_canonical_call_is_rewritten_to_declared_alias_with_same_id() -> None:
+    response = _response("filesystem.search", {"query": "backup"}, call_id="exact-call")
+    turn = {"calls": [{"call_id": "exact-call", "capability_id": "filesystem.search", "arguments": {"query": "backup"}}]}
+    serialized = provider_transcript_tool_calls(response, turn)
+    assert serialized == (ToolCall(id="exact-call", name=_tool_name("filesystem.search"), arguments='{"query": "backup"}'),)
+
+
+def test_direct_canonical_selection_exposes_only_its_alias_and_preserves_tool_pairing() -> None:
+    calls: list[tuple[str, dict]] = []; registry = _registry(calls)
+    replies = iter([
+        _response("filesystem.search", {"query": "backup"}, call_id="direct"),
+        Response(text="Found it.", provider="ollama", model="qwen"),
+    ])
+    captured = []
+    class Provider:
+        def chat(self, request, *, model, timeout_seconds):
+            captured.append(request)
+            return next(replies)
+    class Client:
+        config = SimpleNamespace(llm_provider="ollama", ollama_model="ollama:qwen")
+        def provider_for_id(self, _): return Provider()
+    result = ModelLedAssistantTurn(registry=registry, llm_client=Client(), invoke=lambda cid, values: registry.invoke(cid, values), available=lambda: True).run(user_text="find backup", user_id="u")
+    assert result.data["assistant_turn"]["outcome"] == "respond"
+    second = captured[1]
+    assert _tool_name("filesystem.search") in {tool["function"]["name"] for tool in second.tools}
+    assistant, tool = second.messages[-2:]
+    assert assistant.tool_calls[0].name == _tool_name("filesystem.search")
+    assert assistant.tool_calls[0].id == tool.tool_call_id == "direct"
 
 
 def test_direct_catalog_id_preserves_mutation_approval_boundary() -> None:

@@ -314,6 +314,26 @@ def canonical_call_signature(definition: CapabilityDefinition, arguments: Mappin
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
 
 
+def provider_transcript_tool_calls(response: Response, turn: Mapping[str, Any]) -> tuple[ToolCall, ...]:
+    """Serialize accepted calls using the alias declared to the provider.
+
+    A model may select an exact canonical catalog ID before its schema has
+    been exposed. Once runtime accepts that selection, subsequent native-tool
+    transcripts must contain the same call ID but the provider-safe function
+    name. This is a transport normalization only; it cannot add capability
+    authority because the map comes from the already validated turn.
+    """
+    aliases = {
+        str(item["call_id"]): _tool_name(str(item["capability_id"]))
+        for item in turn.get("calls", [])
+        if isinstance(item, Mapping) and item.get("call_id") and item.get("capability_id")
+    }
+    return tuple(
+        ToolCall(id=call.id, name=aliases.get(str(call.id), call.name), arguments=call.arguments)
+        for call in response.tool_calls
+    )
+
+
 class ModelLedAssistantTurn:
     def __init__(self, *, registry: CapabilityRegistry, llm_client: Any, invoke: Callable[[str, Mapping[str, Any]], Any], available: Callable[[], bool], provider_timeout_seconds: int = 45) -> None:
         self.registry, self.llm_client, self.invoke, self.available = registry, llm_client, invoke, available
@@ -450,7 +470,14 @@ class ModelLedAssistantTurn:
             if capability_rounds >= MAX_TOOL_ROUNDS:
                 return AssistantTurnResult("I reached the safe tool-round limit with partial evidence. Please narrow the next step.", {"ok": False, "route": "model_led_turn", "used_llm": True, "used_tools": calls_used, "assistant_turn": {"contract": ASSISTANT_TURN_SCHEMA_VERSION, "outcome": "partial", "ceiling": "tool_rounds", "capabilities": calls_used, "generations": generations, "contract_inspections": contract_inspections, "generation_diagnostics": generation_diagnostics}})
             capability_rounds += 1
-            messages += (Message(role="assistant", content=str(response.text or ""), tool_calls=tuple(response.tool_calls)),)
+            # Direct canonical selection is now a selected capability for this
+            # turn. Its alias/schema is exposed on the very next provider
+            # request, while all other IDs remain unavailable.
+            exposed_capability_ids = set(exposed_capability_ids or ()) | {
+                str(call["capability_id"]) for call in turn["calls"]
+            }
+            transcript_calls = provider_transcript_tool_calls(response, turn)
+            messages += (Message(role="assistant", content=str(response.text or ""), tool_calls=transcript_calls),)
             for call in turn["calls"]:
                 definition = self.registry.require(call["capability_id"])
                 inputs = {"user_id": user_id, "text": user_text, **call["arguments"]}

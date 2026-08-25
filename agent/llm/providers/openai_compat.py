@@ -131,11 +131,11 @@ class OpenAICompatProvider(Provider):
             }
             if item.name:
                 row["name"] = item.name
-            # Ollama's /api/chat tool-result role is positional after the
-            # assistant tool-call message.  ``tool_call_id`` is an OpenAI
-            # protocol field and makes an otherwise valid native transcript
-            # less reliable for smaller local models.
-            if item.tool_call_id and not native_ollama:
+            # Preserve the exact runtime-bound call ID for every provider.
+            # Native Ollama may use the pair positionally, but retaining the
+            # ID makes the transcript unambiguous and prevents a provider
+            # adapter from silently rebinding a tool observation.
+            if item.tool_call_id:
                 row["tool_call_id"] = item.tool_call_id
             if item.tool_calls:
                 calls: list[dict[str, Any]] = []
