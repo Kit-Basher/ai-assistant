@@ -243,15 +243,17 @@ def normalize_native_tool_response(response: Response, registry: CapabilityRegis
     forbidden = {"user_id", "text", "approved", "actor", "policy", "risk", "verification", "status", "mode"}
     normalized: list[dict[str, Any]] = []
     for position, call in enumerate(calls, start=1):
-        if call.name not in tool_names:
+        # A provider can sometimes produce a native call using an exact
+        # canonical catalog ID instead of our always-declared neutral invoke
+        # tool.  This is an explicit model selection, not an inference: both
+        # the turn snapshot and the current registry must contain exactly the
+        # same case-sensitive ID and contract fingerprint.  Provider aliases
+        # are deliberately *not* accepted on this path.
+        if catalog_authority is None or call.name not in catalog_authority:
             raise TurnValidationError("capability_must_use_provider_neutral_invoke")
-        capability_id = tool_names.get(call.name)
-        # A compact catalog already contains exact canonical IDs.  A model may
-        # use one directly, but only when it was present in this turn's exact
-        # snapshot and the live registry has not changed since rendering it.
-        # Provider-safe names remain restricted to inspected/exposed tools.
-        if capability_id is None and catalog_authority is not None and call.name in catalog_authority:
-            capability_id = call.name
+        if capability_catalog_authority(registry).get(call.name) != catalog_authority[call.name]:
+            raise TurnValidationError("stale_or_revoked_catalog_capability")
+        capability_id = call.name
         definition = registry.get(capability_id or "")
         if definition is None or not definition.chat_selectable:
             raise TurnValidationError("unknown_or_unselectable_capability")
@@ -321,23 +323,36 @@ def canonical_call_signature(definition: CapabilityDefinition, arguments: Mappin
 
 
 def provider_transcript_tool_calls(response: Response, turn: Mapping[str, Any]) -> tuple[ToolCall, ...]:
-    """Serialize accepted calls using the alias declared to the provider.
+    """Serialize accepted direct canonical calls as the neutral invoke tool.
 
-    A model may select an exact canonical catalog ID before its schema has
-    been exposed. Once runtime accepts that selection, subsequent native-tool
-    transcripts must contain the same call ID but the provider-safe function
-    name. This is a transport normalization only; it cannot add capability
-    authority because the map comes from the already validated turn.
+    The provider is only ever offered ``assistant_invoke_capability``.  If it
+    nonetheless returned an exact canonical ID from this turn's catalog, keep
+    its call ID and normalize the *transcript syntax* to that declared tool.
+    This cannot add authority: ``turn`` already passed the registry snapshot,
+    health, and full input-contract validation.
     """
-    aliases = {
-        str(item["call_id"]): (str(item["capability_id"]), _tool_name(str(item["capability_id"])))
+    canonical_calls = {
+        str(item["call_id"]): str(item["capability_id"])
         for item in turn.get("calls", [])
         if isinstance(item, Mapping) and item.get("call_id") and item.get("capability_id")
     }
-    return tuple(
-        ToolCall(id=call.id, name=(aliases[str(call.id)][1] if str(call.id) in aliases and call.name == aliases[str(call.id)][0] else call.name), arguments=call.arguments)
-        for call in response.tool_calls
-    )
+    normalized: list[ToolCall] = []
+    for call in response.tool_calls:
+        capability_id = canonical_calls.get(str(call.id))
+        if capability_id is not None and call.name == capability_id:
+            arguments = _arguments(call)
+            payload = {
+                "capability_id": capability_id,
+                "arguments_json": json.dumps(arguments, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+            }
+            normalized.append(ToolCall(
+                id=call.id,
+                name=INTERNAL_INVOKE_TOOL,
+                arguments=json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+            ))
+        else:
+            normalized.append(call)
+    return tuple(normalized)
 
 
 class ModelLedAssistantTurn:
@@ -476,12 +491,6 @@ class ModelLedAssistantTurn:
             if capability_rounds >= MAX_TOOL_ROUNDS:
                 return AssistantTurnResult("I reached the safe tool-round limit with partial evidence. Please narrow the next step.", {"ok": False, "route": "model_led_turn", "used_llm": True, "used_tools": calls_used, "assistant_turn": {"contract": ASSISTANT_TURN_SCHEMA_VERSION, "outcome": "partial", "ceiling": "tool_rounds", "capabilities": calls_used, "generations": generations, "contract_inspections": contract_inspections, "generation_diagnostics": generation_diagnostics}})
             capability_rounds += 1
-            # Direct canonical selection is now a selected capability for this
-            # turn. Its alias/schema is exposed on the very next provider
-            # request, while all other IDs remain unavailable.
-            exposed_capability_ids = set(exposed_capability_ids or ()) | {
-                str(call["capability_id"]) for call in turn["calls"]
-            }
             transcript_calls = provider_transcript_tool_calls(response, turn)
             messages += (Message(role="assistant", content=str(response.text or ""), tool_calls=transcript_calls),)
             for call in turn["calls"]:

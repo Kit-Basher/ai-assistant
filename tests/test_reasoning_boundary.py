@@ -51,13 +51,13 @@ def test_openai_compatible_tool_transcript_has_type_and_exact_result_binding() -
     assert rows[1]["tool_call_id"] == "call-7"
 
 
-def test_native_ollama_tool_transcript_preserves_alias_call_id_and_native_arguments() -> None:
+def test_native_ollama_tool_transcript_preserves_neutral_invoke_call_id_and_arguments() -> None:
     rows = OpenAICompatProvider._to_messages((
-        Message(role="assistant", content="", tool_calls=(ToolCall(id="call-7", name="capability__filesystem_search__79d03b12ed", arguments='{"query":"backup"}'),)),
+        Message(role="assistant", content="", tool_calls=(ToolCall(id="call-7", name="assistant_invoke_capability", arguments='{"capability_id":"filesystem.search","arguments_json":"{\\"query\\":\\"backup\\"}"}'),)),
         Message(role="tool", content="{\"state\":\"ok\"}", tool_call_id="call-7"),
     ), native_ollama=True)
     assert rows[0]["tool_calls"][0]["id"] == "call-7"
-    assert rows[0]["tool_calls"][0]["function"]["name"] == "capability__filesystem_search__79d03b12ed"
-    assert rows[0]["tool_calls"][0]["function"]["arguments"] == {"query": "backup"}
+    assert rows[0]["tool_calls"][0]["function"]["name"] == "assistant_invoke_capability"
+    assert rows[0]["tool_calls"][0]["function"]["arguments"] == {"capability_id": "filesystem.search", "arguments_json": "{\"query\":\"backup\"}"}
     assert "type" not in rows[0]["tool_calls"][0]
     assert rows[1]["tool_call_id"] == "call-7"
